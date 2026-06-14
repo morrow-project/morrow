@@ -136,6 +136,97 @@ async fn authenticated_client_can_subscribe_publish_receive_and_ack() {
     harness.shutdown().await;
 }
 #[tokio::test]
+async fn authenticated_client_with_permissions_can_subscribe_publish_receive_and_ack() {
+    let subscriber_auth = ClientAuth::from_seed("subscriber1", [7; 32]);
+    let publisher_auth = ClientAuth::from_seed("publisher1", [8; 32]);
+    let harness = Harness::start_with_config(
+        auth_config_with_permissions(vec![
+            (&subscriber_auth, None, Some(vec!["orders.*".to_string()])),
+            (&publisher_auth, Some(vec!["orders.>".to_string()]), None),
+        ]),
+        None,
+    )
+    .await;
+
+    let mut subscriber = Client::connect(harness.addr, harness.max_payload)
+        .await
+        .unwrap();
+    let info = subscriber.read_info().await.unwrap();
+    subscriber
+        .connect_authenticated(&info, &subscriber_auth, false, 5_000, 16)
+        .await
+        .unwrap();
+    subscriber.subscribe("orders.*", "sid1").await.unwrap();
+    subscriber.ping_roundtrip().await.unwrap();
+
+    let mut publisher = Client::connect(harness.addr, harness.max_payload)
+        .await
+        .unwrap();
+    let info = publisher.read_info().await.unwrap();
+    publisher
+        .connect_authenticated(&info, &publisher_auth, false, 5_000, 16)
+        .await
+        .unwrap();
+    publisher.publish("orders.created", b"hello").await.unwrap();
+
+    let message = subscriber.next_message().await.unwrap();
+    assert_eq!(message.subject, "orders.created");
+    assert_eq!(message.sid, "sid1");
+    assert_eq!(message.payload, b"hello");
+    subscriber
+        .ack(message.ack_subject.as_deref().unwrap())
+        .await
+        .unwrap();
+
+    harness.shutdown().await;
+}
+#[tokio::test]
+async fn authenticated_permissions_reject_unauthorized_subscribe_and_publish() {
+    let subscriber_auth = ClientAuth::from_seed("subscriber1", [7; 32]);
+    let publisher_auth = ClientAuth::from_seed("publisher1", [8; 32]);
+    let harness = Harness::start_with_config(
+        auth_config_with_permissions(vec![
+            (&subscriber_auth, None, Some(vec!["orders.*".to_string()])),
+            (&publisher_auth, Some(vec!["orders.*".to_string()]), None),
+        ]),
+        None,
+    )
+    .await;
+
+    let mut subscriber = Client::connect(harness.addr, harness.max_payload)
+        .await
+        .unwrap();
+    let info = subscriber.read_info().await.unwrap();
+    subscriber
+        .connect_authenticated(&info, &subscriber_auth, false, 5_000, 16)
+        .await
+        .unwrap();
+    subscriber.subscribe("events.*", "sid1").await.unwrap();
+    match subscriber.next_frame().await.unwrap().unwrap() {
+        ServerFrame::Err(error) => assert!(error.contains("subscribe not authorized")),
+        frame => panic!("expected subscribe auth error, got {frame:?}"),
+    }
+
+    let mut publisher = Client::connect(harness.addr, harness.max_payload)
+        .await
+        .unwrap();
+    let info = publisher.read_info().await.unwrap();
+    publisher
+        .connect_authenticated(&info, &publisher_auth, false, 5_000, 16)
+        .await
+        .unwrap();
+    publisher
+        .publish("events.created", b"blocked")
+        .await
+        .unwrap();
+    match publisher.next_frame().await.unwrap().unwrap() {
+        ServerFrame::Err(error) => assert!(error.contains("publish not authorized")),
+        frame => panic!("expected publish auth error, got {frame:?}"),
+    }
+
+    harness.shutdown().await;
+}
+#[tokio::test]
 async fn authenticated_connect_rejects_invalid_signature() {
     let configured_auth = ClientAuth::from_seed("client1", [7; 32]);
     let wrong_auth = ClientAuth::from_seed("client1", [9; 32]);
@@ -420,4 +511,24 @@ async fn routed_cluster_forwards_inbox_request_reply() {
     assert_eq!(response.payload, b"world");
 
     harness.shutdown().await;
+}
+
+fn auth_config_with_permissions(
+    clients: Vec<(&ClientAuth, Option<Vec<String>>, Option<Vec<String>>)>,
+) -> AuthConfig {
+    AuthConfig {
+        enabled: true,
+        clients: clients
+            .into_iter()
+            .map(|(client, publish, subscribe)| {
+                (
+                    client.client_id().to_string(),
+                    AuthClientConfig {
+                        public_key: client.public_key_hex().to_ascii_lowercase(),
+                        permissions: Some(AuthPermissions { publish, subscribe }),
+                    },
+                )
+            })
+            .collect(),
+    }
 }

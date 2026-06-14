@@ -32,8 +32,9 @@ tracing-subscriber = { version = "0.3.23", default-features = false, features = 
 
 [profile.release]
 codegen-units = 1
-debug = "line-tables-only"
+debug = "none"
 lto = "fat"
 opt-level = 3
 overflow-checks = true
 panic = "abort"
+strip = true

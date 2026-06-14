@@ -12,6 +12,7 @@ pub(super) struct Client {
     pub(super) sender: mpsc::Sender<Vec<u8>>,
     pub(super) remote_addr: Option<SocketAddr>,
     pub(super) connected_at_ms: u64,
+    pub(super) configured: bool,
     pub(super) verbose: bool,
     pub(super) durable_id: Option<String>,
     pub(super) authenticated: bool,

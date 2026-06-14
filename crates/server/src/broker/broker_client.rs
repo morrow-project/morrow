@@ -54,6 +54,7 @@ impl Broker {
                 sender,
                 remote_addr,
                 connected_at_ms: self.hooks.clock.now_ms(),
+                configured: false,
                 verbose: self.config.verbose,
                 durable_id: None,
                 authenticated: false,
@@ -83,6 +84,7 @@ impl Broker {
             .clients
             .get_mut(&id)
             .ok_or_else(|| BrokerError::msg("unknown connection"))?;
+        crate::broker_ensure!(!client.configured, "CONNECT already received");
         let durable_id = if self.config.auth.enabled {
             let nonce = client
                 .auth_nonce
@@ -97,7 +99,7 @@ impl Broker {
                 .clients
                 .get(&auth.client_id)
                 .ok_or_else(|| BrokerError::msg("unknown client_id"))?;
-            let client_id = auth::verify(auth, nonce, public_key)?;
+            let client_id = auth::verify(auth, nonce, &public_key.public_key)?;
             if let Some(durable_id) = durable_id {
                 crate::broker_ensure!(
                     durable_id == client_id,
@@ -121,6 +123,7 @@ impl Broker {
             client.max_in_flight > 0,
             "max_in_flight must be greater than zero"
         );
+        client.configured = true;
         Ok(())
     }
 
@@ -135,6 +138,8 @@ impl Broker {
             subject::validate_subscription(&sub_subject),
             "invalid subscription subject"
         );
+        self.authorize_subscribe(connection_id, &sub_subject)
+            .await?;
         protocol::validate_identifier("sid", &sid)?;
         if let Some(queue) = &queue {
             protocol::validate_identifier("queue group", queue)?;
@@ -206,6 +211,48 @@ impl Broker {
             self.deliver_pending().await?;
         }
         self.sync_route_interests().await;
+        Ok(())
+    }
+
+    pub(super) async fn authorize_subscribe(
+        &self,
+        connection_id: u64,
+        subject_name: &str,
+    ) -> Result<()> {
+        if !self.config.auth.enabled {
+            return Ok(());
+        }
+        let inner = self.inner.lock().await;
+        let client = inner
+            .clients
+            .get(&connection_id)
+            .ok_or_else(|| BrokerError::msg("unknown connection"))?;
+        crate::broker_ensure!(client.authenticated, "authentication required");
+        if is_inbox_subscription(subject_name) {
+            return Ok(());
+        }
+        let client_id = client
+            .durable_id
+            .as_deref()
+            .ok_or_else(|| BrokerError::msg("authenticated client is missing durable identity"))?;
+        let auth_client = self
+            .config
+            .auth
+            .clients
+            .get(client_id)
+            .ok_or_else(|| BrokerError::msg("unknown authenticated client"))?;
+        let Some(permissions) = &auth_client.permissions else {
+            return Ok(());
+        };
+        let Some(patterns) = &permissions.subscribe else {
+            return Ok(());
+        };
+        crate::broker_ensure!(
+            patterns
+                .iter()
+                .any(|pattern| subject::matches(pattern, subject_name)),
+            "subscribe not authorized"
+        );
         Ok(())
     }
 

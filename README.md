@@ -129,7 +129,11 @@ Ed25519 public keys:
     "clients": [
       {
         "client_id": "client1",
-        "public_key": "64-hex-character-ed25519-public-key"
+        "public_key": "64-hex-character-ed25519-public-key",
+        "permissions": {
+          "publish": ["orders.*", "events.>"],
+          "subscribe": ["orders.created", "events.*"]
+        }
       }
     ]
   }
@@ -141,6 +145,12 @@ generated server nonce in the `INFO` frame. The client signs that nonce and send
 the configured client ID plus hex-encoded signature in `CONNECT`. After
 successful verification, the authenticated client ID becomes the durable
 identity for that connection.
+
+The `permissions` block is optional. When omitted, an authenticated client may
+publish and subscribe to all normal subjects. When present, `publish` and
+`subscribe` are subject-pattern allowlists using the same `*` and `>` wildcard
+rules as subscriptions. Broker ack subjects and `_INBOX.*` request/reply
+subjects remain available for their protocol roles.
 
 ## Run
 

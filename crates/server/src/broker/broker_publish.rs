@@ -9,6 +9,8 @@ impl Broker {
         payload: Vec<u8>,
     ) -> Result<()> {
         if let Some(ack) = protocol::parse_ack_subject(&subject_name) {
+            self.authorize_publish(publisher_id, &subject_name, true)
+                .await?;
             self.ack(ack).await?;
             self.send_verbose_ok(publisher_id).await?;
             return Ok(());
@@ -25,6 +27,8 @@ impl Broker {
             payload.len() <= self.config.max_payload,
             "payload exceeds max payload"
         );
+        self.authorize_publish(publisher_id, &subject_name, false)
+            .await?;
 
         let (transient_deliveries, verbose) = {
             let mut inner = self.inner.lock().await;
@@ -126,6 +130,49 @@ impl Broker {
             self.send_to(publisher_id, protocol::ok().to_vec()).await?;
         }
 
+        Ok(())
+    }
+
+    pub(super) async fn authorize_publish(
+        &self,
+        connection_id: u64,
+        subject_name: &str,
+        is_ack: bool,
+    ) -> Result<()> {
+        if !self.config.auth.enabled {
+            return Ok(());
+        }
+        let inner = self.inner.lock().await;
+        let client = inner
+            .clients
+            .get(&connection_id)
+            .ok_or_else(|| BrokerError::msg("unknown connection"))?;
+        crate::broker_ensure!(client.authenticated, "authentication required");
+        if is_ack || is_inbox_publish(subject_name) {
+            return Ok(());
+        }
+        let client_id = client
+            .durable_id
+            .as_deref()
+            .ok_or_else(|| BrokerError::msg("authenticated client is missing durable identity"))?;
+        let auth_client = self
+            .config
+            .auth
+            .clients
+            .get(client_id)
+            .ok_or_else(|| BrokerError::msg("unknown authenticated client"))?;
+        let Some(permissions) = &auth_client.permissions else {
+            return Ok(());
+        };
+        let Some(patterns) = &permissions.publish else {
+            return Ok(());
+        };
+        crate::broker_ensure!(
+            patterns
+                .iter()
+                .any(|pattern| subject::matches(pattern, subject_name)),
+            "publish not authorized"
+        );
         Ok(())
     }
 

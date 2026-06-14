@@ -9,7 +9,7 @@ use std::{
 use client::{Client, ClientAuth};
 use server::{
     Broker, Config,
-    config::{AuthConfig, TlsConfig},
+    config::{AuthClientConfig, AuthConfig, TlsConfig},
 };
 use tokio::net::TcpListener;
 
@@ -267,7 +267,10 @@ impl Harness {
                 .map(|client| {
                     (
                         client.client_id().to_string(),
-                        client.public_key_hex().to_ascii_lowercase(),
+                        AuthClientConfig {
+                            public_key: client.public_key_hex().to_ascii_lowercase(),
+                            permissions: None,
+                        },
                     )
                 })
                 .collect(),

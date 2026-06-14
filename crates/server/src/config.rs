@@ -28,7 +28,17 @@ pub struct TlsConfig {
 #[derive(Debug, Clone, Default)]
 pub struct AuthConfig {
     pub enabled: bool,
-    pub clients: HashMap<String, String>,
+    pub clients: HashMap<String, AuthClientConfig>,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthClientConfig {
+    pub public_key: String,
+    pub permissions: Option<AuthPermissions>,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthPermissions {
+    pub publish: Option<Vec<String>>,
+    pub subscribe: Option<Vec<String>>,
 }
 #[derive(Debug, Clone)]
 pub struct ClusterConfig {
@@ -131,6 +141,12 @@ impl Config {
                 format!("creating Raft directory {}", cluster.raft_dir.display())
             })?;
         }
+        if self.auth.enabled {
+            crate::broker_ensure!(
+                !self.auth.clients.is_empty(),
+                "config field auth.clients must contain at least one client when auth is enabled"
+            );
+        }
         std::fs::create_dir_all(&self.wal_dir)
             .with_context(|| format!("creating WAL directory {}", self.wal_dir.display()))?;
         Ok(())
@@ -225,7 +241,14 @@ fn get_auth_config(value: &serde_json::Value) -> Result<AuthConfig> {
                 let public_key = get_string(value, "public_key")?.ok_or_else(|| {
                     BrokerError::msg("config field auth.clients[].public_key is required")
                 })?;
-                clients.insert(client_id.to_string(), public_key.to_ascii_lowercase());
+                let permissions = get_auth_permissions(value)?;
+                clients.insert(
+                    client_id.to_string(),
+                    AuthClientConfig {
+                        public_key: public_key.to_ascii_lowercase(),
+                        permissions,
+                    },
+                );
             }
         }
         Some(_) => {
@@ -236,6 +259,54 @@ fn get_auth_config(value: &serde_json::Value) -> Result<AuthConfig> {
         None => {}
     }
     Ok(AuthConfig { enabled, clients })
+}
+fn get_auth_permissions(value: &serde_json::Value) -> Result<Option<AuthPermissions>> {
+    let Some(permissions) = value.get("permissions") else {
+        return Ok(None);
+    };
+    let serde_json::Value::Object(_) = permissions else {
+        return Err(BrokerError::msg(
+            "config field auth.clients[].permissions must be an object",
+        ));
+    };
+    let publish = get_permission_patterns(permissions, "publish")?;
+    let subscribe = get_permission_patterns(permissions, "subscribe")?;
+    crate::broker_ensure!(
+        publish.is_some() || subscribe.is_some(),
+        "config field auth.clients[].permissions must contain publish or subscribe"
+    );
+    Ok(Some(AuthPermissions { publish, subscribe }))
+}
+fn get_permission_patterns(
+    permissions: &serde_json::Value,
+    key: &str,
+) -> Result<Option<Vec<String>>> {
+    let Some(value) = permissions.get(key) else {
+        return Ok(None);
+    };
+    let serde_json::Value::Array(values) = value else {
+        return Err(BrokerError::msg(format!(
+            "config field auth.clients[].permissions.{key} must be an array"
+        )));
+    };
+    crate::broker_ensure!(
+        !values.is_empty(),
+        "config field auth.clients[].permissions.{key} must not be empty"
+    );
+    let mut patterns = Vec::with_capacity(values.len());
+    for value in values {
+        let serde_json::Value::String(pattern) = value else {
+            return Err(BrokerError::msg(format!(
+                "config field auth.clients[].permissions.{key} must contain only strings"
+            )));
+        };
+        crate::broker_ensure!(
+            protocol::subject::validate_subscription(pattern),
+            "config field auth.clients[].permissions.{key} contains invalid subject pattern"
+        );
+        patterns.push(pattern.to_string());
+    }
+    Ok(Some(patterns))
 }
 impl TlsConfig {
     fn validate(&self) -> Result<()> {

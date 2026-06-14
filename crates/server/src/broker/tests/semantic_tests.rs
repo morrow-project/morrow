@@ -5,6 +5,13 @@ async fn auth_enabled_generates_fresh_nonce_per_connection() {
     let dir = TempDir::new().unwrap();
     let mut config = test_config(dir.path());
     config.auth.enabled = true;
+    config.auth.clients.insert(
+        "client1".into(),
+        crate::config::AuthClientConfig {
+            public_key: "abcd".into(),
+            permissions: None,
+        },
+    );
     let broker = Broker::open(config).unwrap();
     let (tx1, _rx1) = mpsc::channel(8);
     let (tx2, _rx2) = mpsc::channel(8);

@@ -158,11 +158,21 @@ impl TestClient {
         Self::connect_with(broker, false).await
     }
 
+    async fn connect_with_info(broker: &Broker) -> (Self, String) {
+        Self::connect_with_info_and_path(broker, false).await
+    }
+
     async fn connect_accepted(broker: &Broker) -> Self {
         Self::connect_with(broker, true).await
     }
 
     async fn connect_with(broker: &Broker, accepted_path: bool) -> Self {
+        Self::connect_with_info_and_path(broker, accepted_path)
+            .await
+            .0
+    }
+
+    async fn connect_with_info_and_path(broker: &Broker, accepted_path: bool) -> (Self, String) {
         let (client_stream, server_stream) = tokio::io::duplex(4096);
         let server = broker.clone();
         let task = tokio::spawn(async move {
@@ -181,7 +191,7 @@ impl TestClient {
         };
         let info = client.read_frame().await;
         assert!(info.starts_with("INFO "));
-        client
+        (client, info)
     }
 
     async fn connect_durable(broker: &Broker, durable_id: &str, ack_timeout_ms: u64) -> Self {
@@ -396,5 +406,6 @@ async fn http_request(broker: &Broker, path: &str) -> String {
     String::from_utf8(response).unwrap()
 }
 
+mod auth_tests;
 mod cluster_admin_tests;
 mod semantic_tests;

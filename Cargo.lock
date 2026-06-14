@@ -1331,6 +1331,7 @@ name = "server"
 version = "0.1.0"
 dependencies = [
  "crc32fast",
+ "ed25519-dalek",
  "openraft",
  "protocol",
  "rustls",

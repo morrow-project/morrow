@@ -298,6 +298,10 @@ Authentication:
   authenticated `client_id`.
 - Authenticated connections use the authenticated client ID as the durable
   identity.
+- Servers may configure per-client publish and subscribe allowlists. Allowlist
+  entries are subject patterns using the same `*` and `>` wildcard rules as
+  subscriptions. Broker ack subjects and `_INBOX.*` request/reply subjects are
+  allowed for their protocol roles.
 
 Durable settings:
 

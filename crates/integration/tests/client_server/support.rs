@@ -1,7 +1,9 @@
 pub(super) use client::{Client, ClientAuth, ServerFrame};
 pub(super) use server::{
     Broker, Config,
-    config::{AuthConfig, ClusterConfig, ClusterNodeConfig, TlsConfig},
+    config::{
+        AuthClientConfig, AuthConfig, AuthPermissions, ClusterConfig, ClusterNodeConfig, TlsConfig,
+    },
 };
 pub(super) use std::{
     net::SocketAddr,
@@ -279,7 +281,10 @@ impl Harness {
                 .map(|client| {
                     (
                         client.client_id().to_string(),
-                        client.public_key_hex().to_ascii_lowercase(),
+                        AuthClientConfig {
+                            public_key: client.public_key_hex().to_ascii_lowercase(),
+                            permissions: None,
+                        },
                     )
                 })
                 .collect(),

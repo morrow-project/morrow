@@ -142,12 +142,60 @@ fn parses_auth_config() {
         "auth": {
             "enabled": true,
             "clients": [
-                {"client_id": "client1", "public_key": "ABCD"}
+                {
+                    "client_id": "client1",
+                    "public_key": "ABCD",
+                    "permissions": {
+                        "publish": ["orders.*", "events.>"],
+                        "subscribe": ["orders.created"]
+                    }
+                }
             ]
         }
     });
 
     let auth = get_auth_config(&value).unwrap();
     assert!(auth.enabled);
-    assert_eq!(auth.clients["client1"], "abcd");
+    let client = &auth.clients["client1"];
+    assert_eq!(client.public_key, "abcd");
+    let permissions = client.permissions.as_ref().unwrap();
+    assert_eq!(
+        permissions.publish.as_ref().unwrap(),
+        &["orders.*".to_string(), "events.>".to_string()]
+    );
+    assert_eq!(
+        permissions.subscribe.as_ref().unwrap(),
+        &["orders.created".to_string()]
+    );
+}
+
+#[test]
+fn rejects_enabled_auth_without_clients() {
+    let value = serde_json::json!({
+        "auth": {"enabled": true, "clients": []}
+    });
+
+    let err = Config::from_json(&value).unwrap_err();
+    assert!(err.to_string().contains("auth.clients"));
+}
+
+#[test]
+fn rejects_invalid_auth_permission_pattern() {
+    let value = serde_json::json!({
+        "auth": {
+            "enabled": true,
+            "clients": [
+                {
+                    "client_id": "client1",
+                    "public_key": "abcd",
+                    "permissions": {
+                        "publish": ["orders.>.created"]
+                    }
+                }
+            ]
+        }
+    });
+
+    let err = get_auth_config(&value).unwrap_err();
+    assert!(err.to_string().contains("invalid subject pattern"));
 }
