@@ -77,6 +77,36 @@ fn parses_pub_args() {
         Command::Pub {
             subject: "orders.created".into(),
             payload: b"hello".to_vec(),
+            qos: None,
+            msg_id: None,
+        }
+    );
+}
+
+#[test]
+fn parses_qos_pub_args() {
+    let args = Args::parse(
+        [
+            "broker-cli",
+            "pub",
+            "orders.created",
+            "hello",
+            "--qos",
+            "2",
+            "--msg-id",
+            "msg-1",
+        ]
+        .into_iter()
+        .map(str::to_string),
+    )
+    .unwrap();
+    assert_eq!(
+        args.command,
+        Command::Pub {
+            subject: "orders.created".into(),
+            payload: b"hello".to_vec(),
+            qos: Some(AckLevel::HighDurability),
+            msg_id: Some("msg-1".into()),
         }
     );
 }

@@ -16,13 +16,52 @@ pub(super) fn parse_command(args: Vec<String>) -> Result<Command> {
                 .next()
                 .ok_or_else(|| CliError::msg("pub requires a payload"))?
                 .into_bytes();
-            ensure_no_more(args, "pub")?;
-            Ok(Command::Pub { subject, payload })
+            let mut qos = None;
+            let mut msg_id = None;
+            while let Some(arg) = args.next() {
+                match arg.as_str() {
+                    "--qos" => {
+                        let value = args
+                            .next()
+                            .ok_or_else(|| CliError::msg("--qos requires a value"))?;
+                        qos = Some(parse_ack_level(&value)?);
+                    }
+                    "--msg-id" => {
+                        msg_id = Some(
+                            args.next()
+                                .ok_or_else(|| CliError::msg("--msg-id requires a value"))?,
+                        );
+                    }
+                    _ => return Err(CliError::msg(format!("unknown pub option {arg}"))),
+                }
+            }
+            if qos.is_some() && msg_id.is_none() {
+                return Err(CliError::msg("--msg-id is required when --qos is set"));
+            }
+            if qos.is_none() && msg_id.is_some() {
+                return Err(CliError::msg("--qos is required when --msg-id is set"));
+            }
+            Ok(Command::Pub {
+                subject,
+                payload,
+                qos,
+                msg_id,
+            })
         }
         "sub" => parse_sub(args),
         "request" => parse_request(args),
         "reply" => parse_reply(args),
         _ => Err(usage()),
+    }
+}
+
+fn parse_ack_level(value: &str) -> Result<AckLevel> {
+    match value {
+        "0" => Ok(AckLevel::Accepted),
+        "1" => Ok(AckLevel::Durable),
+        "2" => Ok(AckLevel::HighDurability),
+        "3" => Ok(AckLevel::ClusterDurable),
+        _ => Err(CliError::msg("--qos must be 0, 1, 2, or 3")),
     }
 }
 

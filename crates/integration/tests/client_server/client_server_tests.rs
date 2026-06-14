@@ -226,7 +226,6 @@ async fn authenticated_permissions_reject_unauthorized_subscribe_and_publish() {
 
     harness.shutdown().await;
 }
-#[tokio::test]
 async fn authenticated_connect_rejects_invalid_signature() {
     let configured_auth = ClientAuth::from_seed("client1", [7; 32]);
     let wrong_auth = ClientAuth::from_seed("client1", [9; 32]);
@@ -511,24 +510,4 @@ async fn routed_cluster_forwards_inbox_request_reply() {
     assert_eq!(response.payload, b"world");
 
     harness.shutdown().await;
-}
-
-fn auth_config_with_permissions(
-    clients: Vec<(&ClientAuth, Option<Vec<String>>, Option<Vec<String>>)>,
-) -> AuthConfig {
-    AuthConfig {
-        enabled: true,
-        clients: clients
-            .into_iter()
-            .map(|(client, publish, subscribe)| {
-                (
-                    client.client_id().to_string(),
-                    AuthClientConfig {
-                        public_key: client.public_key_hex().to_ascii_lowercase(),
-                        permissions: Some(AuthPermissions { publish, subscribe }),
-                    },
-                )
-            })
-            .collect(),
-    }
 }

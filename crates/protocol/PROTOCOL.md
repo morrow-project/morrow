@@ -139,6 +139,18 @@ The server sends `+OK` only when verbose mode is enabled for the connection.
 Verbose mode is enabled when either the server config has `verbose: true` or the
 client sends `CONNECT {"verbose":true}`.
 
+### P-ACK
+
+Producer acknowledgement for a publish that requested per-message QoS.
+
+```text
+P-ACK <msg-id> <level> OK <retained> <seq>\r\n
+```
+
+`level` is the requested QoS value. `retained` is `true` when the publish was
+stored for at least one durable consumer. `seq` is the durable sequence number
+when retained, or `-` when not retained.
+
 ### -ERR
 
 Error response.
@@ -486,6 +498,43 @@ Verbose response:
 
 - If verbose mode is enabled, successful non-ACK publishes receive `+OK`.
 - ACK publishes also receive `+OK` when verbose mode is enabled.
+
+### HPUB
+
+Header publish uses NATS-style headers and may request a per-message producer
+acknowledgement:
+
+```text
+HPUB <subject> <headers-len> <total-len>\r\n
+NATS/1.0\r\n
+Broker-QoS: 1\r\n
+Broker-Msg-Id: msg-123\r\n
+\r\n
+hello\r\n
+```
+
+With reply subject:
+
+```text
+HPUB <subject> <reply-to> <headers-len> <total-len>\r\n
+...
+```
+
+QoS headers are producer metadata and are not forwarded to subscribers.
+
+- `Broker-QoS`: optional numeric value.
+  - `0`: accepted after validation, authorization, transient delivery
+    preparation, and route forwarding.
+  - `1`: durable after local durable append or successful cluster write.
+  - `2`: high durability after local WAL flush, or successful cluster write in
+    clustered mode.
+  - `3`: cluster durable after successful cluster write; rejected when
+    clustering is disabled.
+- `Broker-Msg-Id`: required when `Broker-QoS` is present. It must be non-empty,
+  at most 128 bytes, and contain no whitespace.
+
+Successful QoS publishes receive `P-ACK` and do not also receive verbose `+OK`.
+Failures receive `-ERR`.
 
 ## Durable ACKs
 

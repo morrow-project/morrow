@@ -17,6 +17,7 @@ pub enum Command {
         subject: String,
         reply_to: Option<String>,
         payload: Vec<u8>,
+        ack: Option<ProducerAckRequest>,
     },
     Sub {
         subject: String,
@@ -27,6 +28,32 @@ pub enum Command {
         sid: String,
         max_messages: Option<usize>,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AckLevel {
+    Accepted = 0,
+    Durable = 1,
+    HighDurability = 2,
+    ClusterDurable = 3,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProducerAckRequest {
+    pub level: AckLevel,
+    pub msg_id: String,
+}
+
+impl AckLevel {
+    fn parse(value: &str) -> Result<Self, ProtocolError> {
+        match value {
+            "0" => Ok(Self::Accepted),
+            "1" => Ok(Self::Durable),
+            "2" => Ok(Self::HighDurability),
+            "3" => Ok(Self::ClusterDurable),
+            _ => Err(ProtocolError("Broker-QoS must be 0, 1, 2, or 3".into())),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,6 +116,7 @@ pub async fn read_command<R: AsyncBufRead + Unpin>(
         "SUB" => parse_sub(parts).map(Some),
         "UNSUB" => parse_unsub(parts).map(Some),
         "PUB" => read_pub(reader, parts, max_payload).await.map(Some),
+        "HPUB" => read_hpub(reader, parts, max_payload).await.map(Some),
         _ => Err(ProtocolError(format!("unsupported command {op}"))),
     }
 }
@@ -276,7 +304,131 @@ async fn read_pub<'a, R: AsyncBufRead + Unpin>(
         subject,
         reply_to,
         payload,
+        ack: None,
     })
+}
+
+async fn read_hpub<'a, R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+    mut parts: impl Iterator<Item = &'a str>,
+    max_payload: usize,
+) -> Result<Command, ProtocolError> {
+    let subject = parts
+        .next()
+        .ok_or_else(|| ProtocolError("HPUB requires a subject".into()))?
+        .to_string();
+    let second = parts
+        .next()
+        .ok_or_else(|| ProtocolError("HPUB requires a headers length".into()))?;
+    let third = parts
+        .next()
+        .ok_or_else(|| ProtocolError("HPUB requires a total length".into()))?;
+    let fourth = parts.next();
+    if parts.next().is_some() {
+        return Err(ProtocolError("HPUB has too many arguments".into()));
+    }
+
+    let (reply_to, headers_len_token, total_len_token) = match fourth {
+        Some(total_len) => (Some(second.to_string()), third, total_len),
+        None => (None, second, third),
+    };
+    let headers_len = parse_len(headers_len_token, "HPUB headers length")?;
+    let total_len = parse_len(total_len_token, "HPUB total length")?;
+    if headers_len > total_len {
+        return Err(ProtocolError(
+            "HPUB headers length exceeds total frame length".into(),
+        ));
+    }
+    if total_len > max_payload {
+        return Err(ProtocolError(format!(
+            "HPUB total length {total_len} exceeds max payload {max_payload}"
+        )));
+    }
+
+    let mut frame = vec![0; total_len + 2];
+    reader
+        .read_exact(&mut frame)
+        .await
+        .map_err(|err| ProtocolError(format!("failed to read HPUB payload: {err}")))?;
+    if &frame[total_len..] != b"\r\n" {
+        return Err(ProtocolError(
+            "HPUB payload must be followed by CRLF".into(),
+        ));
+    }
+    frame.truncate(total_len);
+    let payload = frame.split_off(headers_len);
+    let headers = parse_headers(&frame)?;
+    let ack = parse_producer_ack_request(&headers)?;
+
+    Ok(Command::Pub {
+        subject,
+        reply_to,
+        payload,
+        ack,
+    })
+}
+
+fn parse_len(value: &str, field: &str) -> Result<usize, ProtocolError> {
+    value
+        .parse::<usize>()
+        .map_err(|_| ProtocolError(format!("{field} must be an integer")))
+}
+
+fn parse_headers(bytes: &[u8]) -> Result<Vec<(String, String)>, ProtocolError> {
+    let text = std::str::from_utf8(bytes)
+        .map_err(|err| ProtocolError(format!("HPUB headers are not UTF-8: {err}")))?;
+    let mut lines = text.split("\r\n");
+    match lines.next() {
+        Some("NATS/1.0") => {}
+        _ => return Err(ProtocolError("HPUB headers missing NATS/1.0 line".into())),
+    }
+    let mut headers = Vec::new();
+    for line in lines {
+        if line.is_empty() {
+            break;
+        }
+        let (name, value) = line
+            .split_once(':')
+            .ok_or_else(|| ProtocolError("malformed HPUB header line".into()))?;
+        headers.push((name.trim().to_string(), value.trim().to_string()));
+    }
+    Ok(headers)
+}
+
+fn parse_producer_ack_request(
+    headers: &[(String, String)],
+) -> Result<Option<ProducerAckRequest>, ProtocolError> {
+    let Some(level) = header_value(headers, "Broker-QoS") else {
+        return Ok(None);
+    };
+    let level = AckLevel::parse(level)?;
+    let msg_id = header_value(headers, "Broker-Msg-Id")
+        .ok_or_else(|| ProtocolError("Broker-Msg-Id is required when Broker-QoS is set".into()))?;
+    validate_msg_id(msg_id)?;
+    Ok(Some(ProducerAckRequest {
+        level,
+        msg_id: msg_id.to_string(),
+    }))
+}
+
+fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    headers
+        .iter()
+        .find(|(header_name, _)| header_name.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.as_str())
+}
+
+fn validate_msg_id(value: &str) -> Result<(), ProtocolError> {
+    if value.is_empty()
+        || value.len() > 128
+        || value.chars().any(|ch| ch == '\r' || ch == '\n')
+        || value.chars().any(char::is_whitespace)
+    {
+        return Err(ProtocolError(
+            "Broker-Msg-Id must be non-empty, at most 128 bytes, and contain no whitespace".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn trim_crlf(line: &mut Vec<u8>) -> Result<(), ProtocolError> {
@@ -308,6 +460,13 @@ pub fn pong() -> &'static [u8] {
 
 pub fn ok() -> &'static [u8] {
     b"+OK\r\n"
+}
+
+pub fn producer_ack(msg_id: &str, level: AckLevel, retained: bool, seq: Option<u64>) -> Vec<u8> {
+    let seq = seq
+        .map(|seq| seq.to_string())
+        .unwrap_or_else(|| "-".to_string());
+    format!("P-ACK {msg_id} {} OK {retained} {seq}\r\n", level as u8).into_bytes()
 }
 
 pub fn err(message: &str) -> Vec<u8> {
@@ -379,136 +538,4 @@ pub fn parse_ack_subject(subject: &str) -> Option<AckSubject> {
 }
 
 #[cfg(test)]
-mod tests {
-    use tokio::io::BufReader;
-
-    use super::*;
-
-    #[tokio::test]
-    async fn parses_pub_with_payload() {
-        let mut reader = BufReader::new(&b"PUB orders.created 5\r\nhello\r\n"[..]);
-        let command = read_command(&mut reader, 1024).await.unwrap().unwrap();
-        assert_eq!(
-            command,
-            Command::Pub {
-                subject: "orders.created".into(),
-                reply_to: None,
-                payload: b"hello".to_vec()
-            }
-        );
-    }
-
-    #[tokio::test]
-    async fn parses_connect_durable_metadata() {
-        let mut reader = BufReader::new(
-            &b"CONNECT {\"verbose\":true,\"durable_id\":\"client1\",\"ack_timeout_ms\":25,\"max_in_flight\":7}\r\n"[..],
-        );
-        let command = read_command(&mut reader, 1024).await.unwrap().unwrap();
-        assert_eq!(
-            command,
-            Command::Connect {
-                verbose: true,
-                durable_id: Some("client1".into()),
-                ack_timeout_ms: Some(25),
-                max_in_flight: Some(7),
-                auth: None,
-            }
-        );
-    }
-
-    #[tokio::test]
-    async fn parses_connect_client_auth() {
-        let mut reader =
-            BufReader::new(&b"CONNECT {\"client_id\":\"client1\",\"signature\":\"1234\"}\r\n"[..]);
-        let command = read_command(&mut reader, 1024).await.unwrap().unwrap();
-        assert_eq!(
-            command,
-            Command::Connect {
-                verbose: false,
-                durable_id: None,
-                ack_timeout_ms: None,
-                max_in_flight: None,
-                auth: Some(ConnectAuth {
-                    client_id: "client1".into(),
-                    signature: "1234".into(),
-                }),
-            }
-        );
-    }
-
-    #[tokio::test]
-    async fn rejects_malformed_connect_field_types() {
-        for (payload, expected) in [
-            (r#"{"verbose":"true"}"#, "verbose"),
-            (r#"{"durable_id":7}"#, "durable_id"),
-            (r#"{"ack_timeout_ms":"25"}"#, "ack_timeout_ms"),
-            (r#"{"max_in_flight":"7"}"#, "max_in_flight"),
-            (r#"{"client_id":7,"signature":"1234"}"#, "client_id"),
-            (r#"{"client_id":"client1","signature":1234}"#, "signature"),
-        ] {
-            let line = format!("CONNECT {payload}\r\n");
-            let mut reader = BufReader::new(line.as_bytes());
-            let err = read_command(&mut reader, 1024).await.unwrap_err();
-            assert!(
-                err.0.contains(expected),
-                "expected {expected:?} in error {err:?}"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn parses_sub_variants() {
-        let mut reader = BufReader::new(&b"SUB orders.* workers 7\r\n"[..]);
-        let command = read_command(&mut reader, 1024).await.unwrap().unwrap();
-        assert_eq!(
-            command,
-            Command::Sub {
-                subject: "orders.*".into(),
-                queue: Some("workers".into()),
-                sid: "7".into()
-            }
-        );
-    }
-
-    #[tokio::test]
-    async fn rejects_oversized_payload() {
-        let mut reader = BufReader::new(&b"PUB orders.created 5\r\nhello\r\n"[..]);
-        let err = read_command(&mut reader, 4).await.unwrap_err();
-        assert!(err.0.contains("exceeds max payload"));
-    }
-
-    #[test]
-    fn encodes_msg_frames() {
-        assert_eq!(
-            msg("orders.created", "1", None, b"ok"),
-            b"MSG orders.created 1 2\r\nok\r\n"
-        );
-    }
-
-    #[test]
-    fn encodes_hmsg_frames() {
-        assert_eq!(
-            hmsg(
-                "orders.created",
-                "1",
-                Some("_INBOX.client.1"),
-                &[("Broker-Ack", "_BROKER.ACK.consumer.1.2")],
-                b"ok"
-            ),
-            b"HMSG orders.created 1 _INBOX.client.1 50 52\r\nNATS/1.0\r\nBroker-Ack: _BROKER.ACK.consumer.1.2\r\n\r\nok\r\n"
-        );
-    }
-
-    #[test]
-    fn parses_ack_subjects() {
-        assert_eq!(
-            parse_ack_subject("_BROKER.ACK.consumer1.42.9"),
-            Some(AckSubject {
-                consumer_id: "consumer1".into(),
-                seq: 42,
-                delivery_id: 9,
-            })
-        );
-        assert!(parse_ack_subject("_BROKER.ACK.consumer1.nope.9").is_none());
-    }
-}
+mod tests;

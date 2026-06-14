@@ -22,10 +22,31 @@ pub(super) async fn run_command(config: &CliConfig, command: Command) -> Result<
             println!("PONG");
             Ok(())
         }
-        Command::Pub { subject, payload } => {
+        Command::Pub {
+            subject,
+            payload,
+            qos,
+            msg_id,
+        } => {
             let mut client = config.connect_client().await?;
-            client.publish(&subject, &payload).await?;
-            if config.connect.verbose {
+            if let Some(qos) = qos {
+                let msg_id = msg_id.expect("parser requires msg-id when qos is set");
+                let ack = client
+                    .publish_with_qos(&subject, None, &payload, qos, &msg_id)
+                    .await?;
+                println!(
+                    "P-ACK {} {} OK {} {}",
+                    ack.msg_id,
+                    ack.level as u8,
+                    ack.retained,
+                    ack.seq
+                        .map(|seq| seq.to_string())
+                        .unwrap_or_else(|| "-".to_string())
+                );
+            } else {
+                client.publish(&subject, &payload).await?;
+            }
+            if qos.is_none() && config.connect.verbose {
                 expect_ok(&mut client).await?;
             }
             Ok(())

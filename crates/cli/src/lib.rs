@@ -1,4 +1,6 @@
-use client::{Client, ClientAuth, ClientOptions, ClientTlsOptions, ServerFrame};
+use client::{
+    Client, ClientAuth, ClientOptions, ClientTlsOptions, ServerFrame, protocol::AckLevel,
+};
 use std::{
     error::Error,
     fmt, fs,
@@ -19,6 +21,8 @@ pub enum Command {
     Pub {
         subject: String,
         payload: Vec<u8>,
+        qos: Option<AckLevel>,
+        msg_id: Option<String>,
     },
     Request {
         subject: String,

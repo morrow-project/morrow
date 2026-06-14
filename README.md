@@ -249,6 +249,24 @@ PUB orders.created 5
 hello
 ```
 
+Publish with per-message producer QoS by using `HPUB` with `Broker-QoS` and
+`Broker-Msg-Id` headers:
+
+```text
+HPUB orders.created 51 56
+NATS/1.0
+Broker-QoS: 1
+Broker-Msg-Id: msg-123
+
+hello
+```
+
+Successful QoS publishes receive a producer acknowledgement:
+
+```text
+P-ACK msg-123 1 OK true 1
+```
+
 The subscriber receives a message with an ack reply subject:
 
 ```text

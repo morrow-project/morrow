@@ -52,6 +52,13 @@ pub struct Message {
     pub headers: Vec<(String, String)>,
     pub payload: Vec<u8>,
 }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProducerAck {
+    pub msg_id: String,
+    pub level: protocol::AckLevel,
+    pub retained: bool,
+    pub seq: Option<u64>,
+}
 #[derive(Debug, Clone)]
 pub struct ClientAuth {
     client_id: String,
@@ -61,6 +68,7 @@ pub struct ClientAuth {
 pub enum ServerFrame {
     Info(Info),
     Message(Message),
+    ProducerAck(ProducerAck),
     Pong,
     Ok,
     Err(String),

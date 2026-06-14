@@ -187,6 +187,77 @@ impl Client {
             .map_err(|err| ClientError::with_source("writing PUB payload terminator", err))
     }
 
+    pub async fn publish_with_qos(
+        &mut self,
+        subject: &str,
+        reply_to: Option<&str>,
+        payload: &[u8],
+        level: protocol::AckLevel,
+        msg_id: &str,
+    ) -> Result<ProducerAck> {
+        validate_producer_msg_id(msg_id)?;
+        if payload.len() > self.max_payload {
+            return Err(ClientError::msg(format!(
+                "payload size {} exceeds max payload {}",
+                payload.len(),
+                self.max_payload
+            )));
+        }
+        let headers = format!(
+            "NATS/1.0\r\nBroker-QoS: {}\r\nBroker-Msg-Id: {msg_id}\r\n\r\n",
+            level as u8
+        );
+        let total_len = headers.len() + payload.len();
+        if total_len > self.max_payload {
+            return Err(ClientError::msg(format!(
+                "HPUB total length {total_len} exceeds max payload {}",
+                self.max_payload
+            )));
+        }
+        match reply_to {
+            Some(reply_to) => {
+                self.write_line(&format!(
+                    "HPUB {subject} {reply_to} {} {total_len}",
+                    headers.len()
+                ))
+                .await?;
+            }
+            None => {
+                self.write_line(&format!("HPUB {subject} {} {total_len}", headers.len()))
+                    .await?;
+            }
+        }
+        self.stream
+            .get_mut()
+            .write_all(headers.as_bytes())
+            .await
+            .map_err(|err| ClientError::with_source("writing HPUB headers", err))?;
+        self.stream
+            .get_mut()
+            .write_all(payload)
+            .await
+            .map_err(|err| ClientError::with_source("writing HPUB payload", err))?;
+        self.stream
+            .get_mut()
+            .write_all(b"\r\n")
+            .await
+            .map_err(|err| ClientError::with_source("writing HPUB payload terminator", err))?;
+
+        loop {
+            match self.next_frame().await? {
+                Some(ServerFrame::ProducerAck(ack)) if ack.msg_id == msg_id => return Ok(ack),
+                Some(ServerFrame::ProducerAck(_)) => {}
+                Some(ServerFrame::Err(err)) => return Err(ClientError::msg(err)),
+                Some(frame) => {
+                    return Err(ClientError::msg(format!(
+                        "expected P-ACK after HPUB, got {frame:?}"
+                    )));
+                }
+                None => return Err(ClientError::msg("connection closed before P-ACK")),
+            }
+        }
+    }
+
     pub async fn ack(&mut self, ack_subject: &str) -> Result<()> {
         self.publish(ack_subject, b"").await
     }
@@ -298,4 +369,17 @@ impl Client {
             .await
             .map_err(|err| ClientError::with_source("writing protocol line terminator", err))
     }
+}
+
+fn validate_producer_msg_id(msg_id: &str) -> Result<()> {
+    if msg_id.is_empty()
+        || msg_id.len() > 128
+        || msg_id.chars().any(|ch| ch == '\r' || ch == '\n')
+        || msg_id.chars().any(char::is_whitespace)
+    {
+        return Err(ClientError::msg(
+            "msg_id must be non-empty, at most 128 bytes, and contain no whitespace",
+        ));
+    }
+    Ok(())
 }

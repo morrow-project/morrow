@@ -34,8 +34,9 @@ impl Broker {
                 subject,
                 reply_to,
                 payload,
+                ack,
             } => {
-                self.publish(connection_id, subject, reply_to, payload)
+                self.publish(connection_id, subject, reply_to, payload, ack)
                     .await
             }
         }

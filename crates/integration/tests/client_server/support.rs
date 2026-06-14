@@ -16,6 +16,27 @@ pub(super) use tokio::{
     time::Duration,
 };
 pub(super) const TLS_SERVER_NAME: &str = "localhost";
+
+pub(super) fn auth_config_with_permissions(
+    clients: Vec<(&ClientAuth, Option<Vec<String>>, Option<Vec<String>>)>,
+) -> AuthConfig {
+    AuthConfig {
+        enabled: true,
+        clients: clients
+            .into_iter()
+            .map(|(client, publish, subscribe)| {
+                (
+                    client.client_id().to_string(),
+                    AuthClientConfig {
+                        public_key: client.public_key_hex().to_ascii_lowercase(),
+                        permissions: Some(AuthPermissions { publish, subscribe }),
+                    },
+                )
+            })
+            .collect(),
+    }
+}
+
 pub(super) struct TestDir(PathBuf);
 impl TestDir {
     pub(super) fn new() -> Self {

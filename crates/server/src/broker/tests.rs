@@ -258,6 +258,40 @@ impl TestClient {
         stream.get_mut().write_all(b"\r\n").await.unwrap();
     }
 
+    async fn publish_qos(
+        &mut self,
+        subject: &str,
+        payload: &[u8],
+        level: protocol::AckLevel,
+        msg_id: &str,
+    ) {
+        let headers = format!(
+            "NATS/1.0\r\nBroker-QoS: {}\r\nBroker-Msg-Id: {msg_id}\r\n\r\n",
+            level as u8
+        );
+        self.write_line(&format!(
+            "HPUB {subject} {} {}",
+            headers.len(),
+            headers.len() + payload.len()
+        ))
+        .await;
+        let stream = self.stream.as_mut().expect("client is disconnected");
+        stream
+            .get_mut()
+            .write_all(headers.as_bytes())
+            .await
+            .unwrap();
+        stream.get_mut().write_all(payload).await.unwrap();
+        stream.get_mut().write_all(b"\r\n").await.unwrap();
+    }
+
+    async fn expect_producer_ack(&mut self, msg_id: &str, level: u8, retained: bool, seq: &str) {
+        assert_eq!(
+            self.read_frame().await,
+            format!("P-ACK {msg_id} {level} OK {retained} {seq}\r\n")
+        );
+    }
+
     async fn ping_roundtrip(&mut self) {
         self.write_line("PING").await;
         self.expect_pong().await;
@@ -408,4 +442,5 @@ async fn http_request(broker: &Broker, path: &str) -> String {
 
 mod auth_tests;
 mod cluster_admin_tests;
+mod qos_tests;
 mod semantic_tests;

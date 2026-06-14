@@ -59,6 +59,27 @@ async fn parses_msg_ack_reply_as_ack_subject() {
 }
 
 #[tokio::test]
+async fn parses_producer_ack_frame() {
+    let (_writer, reader) = tokio::io::duplex(64);
+    let mut reader = BufReader::new(Box::new(reader) as Box<dyn ClientStream>);
+
+    let frame = parse_frame(&mut reader, "P-ACK msg-1 2 OK true 42", 1024)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(
+        frame,
+        ServerFrame::ProducerAck(ProducerAck {
+            msg_id: "msg-1".into(),
+            level: protocol::AckLevel::HighDurability,
+            retained: true,
+            seq: Some(42),
+        })
+    );
+}
+
+#[tokio::test]
 async fn rejects_malformed_hmsg_lengths() {
     let (_writer, reader) = tokio::io::duplex(64);
     let mut reader = BufReader::new(Box::new(reader) as Box<dyn ClientStream>);

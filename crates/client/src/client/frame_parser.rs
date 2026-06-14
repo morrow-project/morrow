@@ -14,6 +14,7 @@ pub(super) async fn parse_frame(
         "PONG" => Ok(Some(ServerFrame::Pong)),
         "+OK" => Ok(Some(ServerFrame::Ok)),
         "-ERR" => Ok(Some(ServerFrame::Err(line.to_string()))),
+        "P-ACK" => parse_producer_ack(parts).map(Some),
         "MSG" => parse_msg(stream, parts, max_payload).await.map(Some),
         "HMSG" => parse_hmsg(stream, parts, max_payload).await.map(Some),
         _ => Err(ClientError::msg(format!("unsupported server frame {op}"))),
@@ -38,6 +39,68 @@ pub(super) fn parse_info(line: &str) -> Result<Info> {
             .and_then(serde_json::Value::as_str)
             .map(str::to_string),
     })
+}
+
+pub(super) fn parse_producer_ack<'a>(
+    mut parts: impl Iterator<Item = &'a str>,
+) -> Result<ServerFrame> {
+    let msg_id = parts
+        .next()
+        .ok_or_else(|| ClientError::msg("P-ACK missing message id"))?
+        .to_string();
+    let level = match parts
+        .next()
+        .ok_or_else(|| ClientError::msg("P-ACK missing level"))?
+    {
+        "0" => protocol::AckLevel::Accepted,
+        "1" => protocol::AckLevel::Durable,
+        "2" => protocol::AckLevel::HighDurability,
+        "3" => protocol::AckLevel::ClusterDurable,
+        _ => return Err(ClientError::msg("P-ACK level must be 0, 1, 2, or 3")),
+    };
+    match parts
+        .next()
+        .ok_or_else(|| ClientError::msg("P-ACK missing status"))?
+    {
+        "OK" => {}
+        status => {
+            return Err(ClientError::msg(format!(
+                "unsupported P-ACK status {status}"
+            )));
+        }
+    }
+    let retained = match parts
+        .next()
+        .ok_or_else(|| ClientError::msg("P-ACK missing retained flag"))?
+    {
+        "true" => true,
+        "false" => false,
+        _ => {
+            return Err(ClientError::msg(
+                "P-ACK retained flag must be true or false",
+            ));
+        }
+    };
+    let seq = match parts
+        .next()
+        .ok_or_else(|| ClientError::msg("P-ACK missing sequence"))?
+    {
+        "-" => None,
+        value => Some(
+            value
+                .parse()
+                .map_err(|_| ClientError::msg("P-ACK sequence must be an integer"))?,
+        ),
+    };
+    if parts.next().is_some() {
+        return Err(ClientError::msg("P-ACK has too many arguments"));
+    }
+    Ok(ServerFrame::ProducerAck(ProducerAck {
+        msg_id,
+        level,
+        retained,
+        seq,
+    }))
 }
 
 pub(super) async fn parse_msg<'a>(
