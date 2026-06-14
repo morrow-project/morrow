@@ -110,7 +110,40 @@ flushes the WAL before exiting.
 - `crates/server`: the broker runtime, WAL, TLS, and JSON configuration.
 - `crates/protocol`: shared wire protocol parsing/encoding, subject matching,
   and challenge-response helpers.
-- `crates/client`: client crate scaffold for broker client tooling.
+- `crates/client`: reusable client library for TCP/TLS connections, auth, and
+  protocol commands.
+- `crates/cli`: `broker-cli`, a command-line client for running broker
+  operations against a live server.
+- `crates/integration`: cross-crate integration tests.
+
+## CLI
+
+Start from the example config:
+
+```bash
+cp client.json.example client.json
+```
+
+Run a ping:
+
+```bash
+cargo run --release -p cli -- --config client.json ping
+```
+
+Publish a message:
+
+```bash
+cargo run --release -p cli -- --config client.json pub orders.created hello
+```
+
+Subscribe and ack the first delivered message:
+
+```bash
+cargo run --release -p cli -- --config client.json sub orders.* --ack --max-messages 1
+```
+
+The CLI handles `INFO`, TLS, challenge-response auth, and `CONNECT` implicitly
+from `client.json`. User-visible commands are `ping`, `pub`, and `sub`.
 
 ## Minimal Session
 

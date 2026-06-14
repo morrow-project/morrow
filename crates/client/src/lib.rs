@@ -1,6 +1,6 @@
 use std::{
     error::Error, fmt, fs::File, io::BufReader as StdBufReader, net::SocketAddr, path::Path,
-    sync::Arc,
+    path::PathBuf, sync::Arc,
 };
 
 use tokio::{
@@ -20,6 +20,24 @@ pub use protocol;
 pub struct Client {
     stream: BufReader<Box<dyn ClientStream>>,
     max_payload: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct ClientOptions {
+    pub addr: SocketAddr,
+    pub max_payload: usize,
+    pub tls: Option<ClientTlsOptions>,
+    pub auth: Option<ClientAuth>,
+    pub durable_id: Option<String>,
+    pub verbose: bool,
+    pub ack_timeout_ms: u64,
+    pub max_in_flight: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct ClientTlsOptions {
+    pub server_name: String,
+    pub ca_cert_file: PathBuf,
 }
 
 trait ClientStream: AsyncRead + AsyncWrite + Unpin + Send {}
@@ -103,6 +121,47 @@ impl Client {
             Some(frame) => Err(ClientError::msg(format!("expected INFO, got {frame:?}"))),
             None => Err(ClientError::msg("connection closed before INFO")),
         }
+    }
+
+    pub async fn connect_with_options(options: &ClientOptions) -> Result<Self> {
+        let mut client = match &options.tls {
+            Some(tls) => {
+                Self::connect_tls(
+                    options.addr,
+                    &tls.server_name,
+                    &tls.ca_cert_file,
+                    options.max_payload,
+                )
+                .await?
+            }
+            None => Self::connect(options.addr, options.max_payload).await?,
+        };
+        let info = client.read_info().await?;
+        if let Some(auth) = &options.auth {
+            client
+                .connect_authenticated(
+                    &info,
+                    auth,
+                    options.verbose,
+                    options.ack_timeout_ms,
+                    options.max_in_flight,
+                )
+                .await?;
+        } else {
+            let durable_id = options
+                .durable_id
+                .as_deref()
+                .ok_or_else(|| ClientError::msg("durable_id is required when auth is disabled"))?;
+            client
+                .connect_durable(
+                    durable_id,
+                    options.verbose,
+                    options.ack_timeout_ms,
+                    options.max_in_flight,
+                )
+                .await?;
+        }
+        Ok(client)
     }
 
     pub async fn connect_durable(
@@ -268,6 +327,13 @@ impl ClientAuth {
 
     pub fn from_seed(client_id: impl Into<String>, seed: [u8; 32]) -> Self {
         Self::new(client_id, SigningKey::from_bytes(&seed))
+    }
+
+    pub fn from_seed_hex(client_id: impl Into<String>, seed_hex: &str) -> Result<Self> {
+        Ok(Self::from_seed(
+            client_id,
+            decode_fixed::<32>(seed_hex, "private_key_seed_hex")?,
+        ))
     }
 
     pub fn client_id(&self) -> &str {
@@ -449,4 +515,28 @@ fn hex(bytes: &[u8]) -> String {
         out.push(HEX[(byte & 0x0f) as usize] as char);
     }
     out
+}
+
+fn decode_fixed<const N: usize>(value: &str, field: &str) -> Result<[u8; N]> {
+    let value = value.trim();
+    if value.len() != N * 2 {
+        return Err(ClientError::msg(format!(
+            "{field} must be {} hex characters",
+            N * 2
+        )));
+    }
+    let mut out = [0_u8; N];
+    for (idx, chunk) in value.as_bytes().chunks_exact(2).enumerate() {
+        out[idx] = (hex_value(chunk[0], field)? << 4) | hex_value(chunk[1], field)?;
+    }
+    Ok(out)
+}
+
+fn hex_value(byte: u8, field: &str) -> Result<u8> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        b'A'..=b'F' => Ok(byte - b'A' + 10),
+        _ => Err(ClientError::msg(format!("{field} must be hex encoded"))),
+    }
 }

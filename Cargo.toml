@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/client",
+    "crates/cli",
     "crates/integration",
     "crates/protocol",
     "crates/server",
@@ -13,6 +14,7 @@ edition = "2024"
 
 [workspace.dependencies]
 client = { path = "crates/client" }
+cli = { path = "crates/cli" }
 protocol = { path = "crates/protocol" }
 server = { path = "crates/server" }
 crc32fast = { version = "1.5.0", default-features = false, features = ["std"] }

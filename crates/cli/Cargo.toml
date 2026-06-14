@@ -1,0 +1,16 @@
+[package]
+name = "cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "broker-cli"
+path = "src/main.rs"
+
+[dependencies]
+client.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+server.workspace = true
