@@ -1,8 +1,10 @@
 use std::{
     error::Error,
     fmt, fs,
+    io::BufRead,
     net::SocketAddr,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use client::{Client, ClientAuth, ClientOptions, ClientTlsOptions, ServerFrame};
@@ -20,6 +22,15 @@ pub enum Command {
     Pub {
         subject: String,
         payload: Vec<u8>,
+    },
+    Request {
+        subject: String,
+        payload: Vec<u8>,
+        timeout_ms: u64,
+    },
+    Reply {
+        subject: String,
+        queue: Option<String>,
     },
     Sub {
         subject: String,
@@ -95,6 +106,44 @@ async fn run_command(config: &CliConfig, command: Command) -> Result<()> {
             }
             Ok(())
         }
+        Command::Request {
+            subject,
+            payload,
+            timeout_ms,
+        } => {
+            let mut client = config.connect_client().await?;
+            let response = client
+                .request(&subject, &payload, Duration::from_millis(timeout_ms))
+                .await?;
+            println!("{}", String::from_utf8_lossy(&response.payload));
+            Ok(())
+        }
+        Command::Reply { subject, queue } => {
+            let mut client = config.connect_client().await?;
+            match queue {
+                Some(queue) => {
+                    client
+                        .subscribe_queue(&subject, &queue, DEFAULT_SID)
+                        .await?
+                }
+                None => client.subscribe(&subject, DEFAULT_SID).await?,
+            }
+            client.ping_roundtrip().await?;
+            loop {
+                let message = client.next_message().await?;
+                println!(
+                    "{} {} {}",
+                    message.subject,
+                    message.sid,
+                    String::from_utf8_lossy(&message.payload)
+                );
+                let response = read_stdin_line().await?;
+                client.respond(&message, response.as_bytes()).await?;
+                if let Some(ack_subject) = &message.ack_subject {
+                    client.ack(ack_subject).await?;
+                }
+            }
+        }
         Command::Sub {
             subject,
             sid,
@@ -118,8 +167,8 @@ async fn run_command(config: &CliConfig, command: Command) -> Result<()> {
                     String::from_utf8_lossy(&message.payload)
                 );
                 if ack {
-                    if let Some(reply_to) = &message.reply_to {
-                        client.ack(reply_to).await?;
+                    if let Some(ack_subject) = &message.ack_subject {
+                        client.ack(ack_subject).await?;
                     }
                 }
                 received += 1;
@@ -193,8 +242,77 @@ fn parse_command(args: Vec<String>) -> Result<Command> {
             Ok(Command::Pub { subject, payload })
         }
         "sub" => parse_sub(args),
+        "request" => parse_request(args),
+        "reply" => parse_reply(args),
         _ => Err(usage()),
     }
+}
+
+fn parse_request(mut args: impl Iterator<Item = String>) -> Result<Command> {
+    let subject = args
+        .next()
+        .ok_or_else(|| CliError::msg("request requires a subject"))?;
+    let payload = args
+        .next()
+        .ok_or_else(|| CliError::msg("request requires a payload"))?
+        .into_bytes();
+    let mut timeout_ms = 30_000;
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--timeout-ms" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| CliError::msg("--timeout-ms requires a value"))?;
+                timeout_ms = value
+                    .parse()
+                    .map_err(|_| CliError::msg("--timeout-ms must be an integer"))?;
+            }
+            _ => return Err(CliError::msg(format!("unknown request option {arg}"))),
+        }
+    }
+    Ok(Command::Request {
+        subject,
+        payload,
+        timeout_ms,
+    })
+}
+
+fn parse_reply(mut args: impl Iterator<Item = String>) -> Result<Command> {
+    let subject = args
+        .next()
+        .ok_or_else(|| CliError::msg("reply requires a subject"))?;
+    let mut queue = None;
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--queue" => {
+                queue = Some(
+                    args.next()
+                        .ok_or_else(|| CliError::msg("--queue requires a value"))?,
+                );
+            }
+            _ => return Err(CliError::msg(format!("unknown reply option {arg}"))),
+        }
+    }
+    Ok(Command::Reply { subject, queue })
+}
+
+async fn read_stdin_line() -> Result<String> {
+    tokio::task::spawn_blocking(|| {
+        let mut line = String::new();
+        let read = std::io::stdin()
+            .lock()
+            .read_line(&mut line)
+            .map_err(|err| CliError::with_source("reading response from stdin", err))?;
+        if read == 0 {
+            return Err(CliError::msg("stdin closed before response was provided"));
+        }
+        while line.ends_with('\n') || line.ends_with('\r') {
+            line.pop();
+        }
+        Ok(line)
+    })
+    .await
+    .map_err(|err| CliError::with_source("joining stdin reader task", err))?
 }
 
 fn parse_sub(mut args: impl Iterator<Item = String>) -> Result<Command> {
@@ -252,9 +370,11 @@ fn ensure_no_more(mut args: impl Iterator<Item = String>, command: &str) -> Resu
 
 fn usage() -> CliError {
     CliError::msg(
-        "usage: broker-cli [--config client.json] <ping|pub|sub>\n\
+        "usage: broker-cli [--config client.json] <ping|pub|sub|request|reply>\n\
          pub <subject> <payload>\n\
-         sub <subject> [--sid sid] [--queue group] [--ack] [--max-messages n]",
+         sub <subject> [--sid sid] [--queue group] [--ack] [--max-messages n]\n\
+         request <subject> <payload> [--timeout-ms n]\n\
+         reply <subject> [--queue group]",
     )
 }
 
@@ -572,6 +692,48 @@ mod tests {
                 queue: Some("workers".into()),
                 ack: true,
                 max_messages: Some(2),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_request_args() {
+        let args = Args::parse(
+            [
+                "broker-cli",
+                "request",
+                "orders.lookup",
+                "hello",
+                "--timeout-ms",
+                "500",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .unwrap();
+        assert_eq!(
+            args.command,
+            Command::Request {
+                subject: "orders.lookup".into(),
+                payload: b"hello".to_vec(),
+                timeout_ms: 500,
+            }
+        );
+    }
+
+    #[test]
+    fn parses_reply_args() {
+        let args = Args::parse(
+            ["broker-cli", "reply", "orders.lookup", "--queue", "workers"]
+                .into_iter()
+                .map(str::to_string),
+        )
+        .unwrap();
+        assert_eq!(
+            args.command,
+            Command::Reply {
+                subject: "orders.lookup".into(),
+                queue: Some("workers".into()),
             }
         );
     }

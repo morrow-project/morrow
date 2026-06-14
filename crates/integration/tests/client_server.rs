@@ -68,10 +68,67 @@ async fn client_can_subscribe_publish_receive_and_ack_against_server() {
     assert_eq!(message.sid, "sid1");
     assert_eq!(message.payload, b"hello");
     let ack_subject = message
-        .reply_to
+        .ack_subject
         .expect("durable messages carry ack subject");
     subscriber.ack(&ack_subject).await.unwrap();
     subscriber.ping_roundtrip().await.unwrap();
+
+    harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn client_request_receives_response_from_durable_responder() {
+    let harness = Harness::start().await;
+    let mut responder = Client::connect(harness.addr, harness.max_payload)
+        .await
+        .unwrap();
+    responder.read_info().await.unwrap();
+    responder
+        .connect_durable("responder1", false, 5_000, 16)
+        .await
+        .unwrap();
+    responder.subscribe("service.echo", "sid1").await.unwrap();
+    responder.ping_roundtrip().await.unwrap();
+
+    let responder_task = tokio::spawn(async move {
+        let message = responder.next_message().await.unwrap();
+        assert_eq!(message.subject, "service.echo");
+        assert_eq!(message.payload, b"hello");
+        assert!(
+            message
+                .reply_to
+                .as_deref()
+                .is_some_and(|reply| reply.starts_with("_INBOX."))
+        );
+        assert!(
+            message
+                .ack_subject
+                .as_deref()
+                .is_some_and(|ack| ack.starts_with("_BROKER.ACK."))
+        );
+        responder.respond(&message, b"world").await.unwrap();
+        responder
+            .ack(message.ack_subject.as_deref().unwrap())
+            .await
+            .unwrap();
+    });
+
+    let mut requester = Client::connect(harness.addr, harness.max_payload)
+        .await
+        .unwrap();
+    requester.read_info().await.unwrap();
+    requester
+        .connect_durable("requester1", false, 5_000, 16)
+        .await
+        .unwrap();
+    let response = requester
+        .request("service.echo", b"hello", Duration::from_secs(3))
+        .await
+        .unwrap();
+    assert!(response.subject.starts_with("_INBOX."));
+    assert_eq!(response.payload, b"world");
+    assert!(response.ack_subject.is_none());
+    responder_task.await.unwrap();
 
     harness.shutdown().await;
 }
@@ -110,7 +167,7 @@ async fn authenticated_client_can_subscribe_publish_receive_and_ack() {
     assert_eq!(message.sid, "sid1");
     assert_eq!(message.payload, b"hello");
     let ack_subject = message
-        .reply_to
+        .ack_subject
         .expect("durable messages carry ack subject");
     subscriber.ack(&ack_subject).await.unwrap();
     subscriber.ping_roundtrip().await.unwrap();
@@ -202,7 +259,7 @@ async fn tls_client_can_subscribe_publish_receive_and_ack() {
     assert_eq!(message.sid, "sid1");
     assert_eq!(message.payload, b"hello");
     let ack_subject = message
-        .reply_to
+        .ack_subject
         .expect("durable messages carry ack subject");
     subscriber.ack(&ack_subject).await.unwrap();
     subscriber.ping_roundtrip().await.unwrap();
@@ -253,7 +310,7 @@ async fn tls_authenticated_client_can_subscribe_publish_receive_and_ack() {
     assert_eq!(message.sid, "sid1");
     assert_eq!(message.payload, b"hello");
     let ack_subject = message
-        .reply_to
+        .ack_subject
         .expect("durable messages carry ack subject");
     subscriber.ack(&ack_subject).await.unwrap();
     subscriber.ping_roundtrip().await.unwrap();

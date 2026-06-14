@@ -6,7 +6,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use client::ClientAuth;
+use client::{Client, ClientAuth};
 use server::{
     Broker, Config,
     config::{AuthConfig, TlsConfig},
@@ -14,9 +14,11 @@ use server::{
 use tokio::net::TcpListener;
 
 const TLS_SERVER_NAME: &str = "localhost";
+static CLI_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[tokio::test]
 async fn cli_ping_against_server() {
+    let _guard = CLI_TEST_LOCK.lock().await;
     let harness = Harness::start().await;
     let config = ClientConfigFile::new(&harness, None, None);
 
@@ -29,6 +31,7 @@ async fn cli_ping_against_server() {
 
 #[tokio::test]
 async fn cli_pub_and_sub_against_server() {
+    let _guard = CLI_TEST_LOCK.lock().await;
     let harness = Harness::start().await;
     let config = ClientConfigFile::new(&harness, None, None);
     let sub = Command::new(cli_bin())
@@ -45,7 +48,7 @@ async fn cli_pub_and_sub_against_server() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
 
     let pub_output = run_cli([
         "--config",
@@ -64,7 +67,49 @@ async fn cli_pub_and_sub_against_server() {
 }
 
 #[tokio::test]
+async fn cli_request_against_client_responder() {
+    let _guard = CLI_TEST_LOCK.lock().await;
+    let harness = Harness::start().await;
+    let config = ClientConfigFile::new(&harness, None, None);
+    let mut responder = Client::connect(harness.addr, harness.max_payload)
+        .await
+        .unwrap();
+    responder.read_info().await.unwrap();
+    responder
+        .connect_durable("responder1", false, 5_000, 16)
+        .await
+        .unwrap();
+    responder.subscribe("service.echo", "sid1").await.unwrap();
+    responder.ping_roundtrip().await.unwrap();
+    let responder_task = tokio::spawn(async move {
+        let message = responder.next_message().await.unwrap();
+        responder.respond(&message, b"world").await.unwrap();
+        responder
+            .ack(message.ack_subject.as_deref().unwrap())
+            .await
+            .unwrap();
+    });
+
+    let output = run_cli([
+        "--config",
+        config.path_str(),
+        "request",
+        "service.echo",
+        "hello",
+        "--timeout-ms",
+        "3000",
+    ])
+    .await;
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "world\n");
+    responder_task.await.unwrap();
+    harness.shutdown().await;
+}
+
+#[tokio::test]
 async fn cli_ping_with_auth() {
+    let _guard = CLI_TEST_LOCK.lock().await;
     let auth = ClientAuth::from_seed("client1", [7; 32]);
     let harness = Harness::start_with_auth(&[&auth]).await;
     let config = ClientConfigFile::new(&harness, Some(&auth), None);
@@ -78,6 +123,7 @@ async fn cli_ping_with_auth() {
 
 #[tokio::test]
 async fn cli_ping_with_tls() {
+    let _guard = CLI_TEST_LOCK.lock().await;
     let harness = Harness::start_tls().await;
     let config = ClientConfigFile::new(&harness, None, Some(tls_ca_cert_file()));
 
@@ -90,6 +136,7 @@ async fn cli_ping_with_tls() {
 
 #[tokio::test]
 async fn cli_ping_with_tls_and_auth() {
+    let _guard = CLI_TEST_LOCK.lock().await;
     let auth = ClientAuth::from_seed("client1", [7; 32]);
     let harness = Harness::start_tls_with_auth(&[&auth]).await;
     let config = ClientConfigFile::new(&harness, Some(&auth), Some(tls_ca_cert_file()));

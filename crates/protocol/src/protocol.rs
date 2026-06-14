@@ -304,6 +304,36 @@ pub fn msg(subject: &str, sid: &str, reply_to: Option<&str>, payload: &[u8]) -> 
     frame
 }
 
+pub fn hmsg(
+    subject: &str,
+    sid: &str,
+    reply_to: Option<&str>,
+    headers: &[(&str, &str)],
+    payload: &[u8],
+) -> Vec<u8> {
+    let mut header_block = String::from("NATS/1.0\r\n");
+    for (name, value) in headers {
+        header_block.push_str(name);
+        header_block.push_str(": ");
+        header_block.push_str(value);
+        header_block.push_str("\r\n");
+    }
+    header_block.push_str("\r\n");
+
+    let headers_len = header_block.len();
+    let total_len = headers_len + payload.len();
+    let protocol_header = match reply_to {
+        Some(reply_to) => format!("HMSG {subject} {sid} {reply_to} {headers_len} {total_len}\r\n"),
+        None => format!("HMSG {subject} {sid} {headers_len} {total_len}\r\n"),
+    };
+    let mut frame = Vec::with_capacity(protocol_header.len() + total_len + 2);
+    frame.extend_from_slice(protocol_header.as_bytes());
+    frame.extend_from_slice(header_block.as_bytes());
+    frame.extend_from_slice(payload);
+    frame.extend_from_slice(b"\r\n");
+    frame
+}
+
 pub fn ack_subject(consumer_id: &str, seq: u64, delivery_id: u64) -> String {
     format!("_BROKER.ACK.{consumer_id}.{seq}.{delivery_id}")
 }
@@ -410,6 +440,20 @@ mod tests {
         assert_eq!(
             msg("orders.created", "1", None, b"ok"),
             b"MSG orders.created 1 2\r\nok\r\n"
+        );
+    }
+
+    #[test]
+    fn encodes_hmsg_frames() {
+        assert_eq!(
+            hmsg(
+                "orders.created",
+                "1",
+                Some("_INBOX.client.1"),
+                &[("Broker-Ack", "_BROKER.ACK.consumer.1.2")],
+                b"ok"
+            ),
+            b"HMSG orders.created 1 _INBOX.client.1 50 52\r\nNATS/1.0\r\nBroker-Ack: _BROKER.ACK.consumer.1.2\r\n\r\nok\r\n"
         );
     }
 

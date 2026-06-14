@@ -38,6 +38,7 @@ struct Inner {
     wal: Wal,
     clients: HashMap<u64, Client>,
     consumers: HashMap<String, Consumer>,
+    transient_subscriptions: HashMap<(u64, String), TransientSubscription>,
     messages: HashMap<u64, PublishRecord>,
 }
 
@@ -68,6 +69,12 @@ struct InFlight {
     attempt: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TransientSubscription {
+    subject: String,
+    sid: String,
+}
+
 struct Delivery {
     sender: mpsc::Sender<Vec<u8>>,
     frame: Vec<u8>,
@@ -92,6 +99,7 @@ impl Broker {
                 wal,
                 clients: HashMap::new(),
                 consumers,
+                transient_subscriptions: HashMap::new(),
                 messages: replay.messages,
             })),
             next_connection_id: Arc::new(AtomicU64::new(1)),
@@ -355,38 +363,57 @@ impl Broker {
 
         let should_deliver = {
             let mut inner = self.inner.lock().await;
-            let client = inner
-                .clients
-                .get(&connection_id)
-                .ok_or_else(|| BrokerError::msg("unknown connection"))?;
-            if let Some(durable_id) = &client.durable_id {
-                let consumer_id = consumer_id(durable_id, queue.as_deref(), &sub_subject, &sid);
-                let record = ConsumerRecord {
-                    consumer_id: consumer_id.clone(),
-                    filter_subject: sub_subject,
-                    queue_group: queue,
-                    ack_timeout_ms: client.ack_timeout_ms,
-                    max_in_flight: client.max_in_flight,
-                };
-                inner.wal.append_consumer_upsert(&record)?;
-                inner.wal.flush_due()?;
-                let consumer = inner
-                    .consumers
-                    .entry(consumer_id)
-                    .or_insert_with(|| Consumer {
-                        record: record.clone(),
-                        members: HashMap::new(),
-                        pending: BTreeSet::new(),
-                        pending_attempts: HashMap::new(),
-                        in_flight: HashMap::new(),
-                        acked: HashSet::new(),
-                        delivered: 0,
-                    });
-                consumer.record = record;
-                consumer.members.insert(connection_id, sid);
-                true
+            if is_inbox_subscription(&sub_subject) {
+                crate::broker_ensure!(
+                    queue.is_none(),
+                    "_INBOX subscriptions do not support queue groups"
+                );
+                inner
+                    .clients
+                    .get(&connection_id)
+                    .ok_or_else(|| BrokerError::msg("unknown connection"))?;
+                inner.transient_subscriptions.insert(
+                    (connection_id, sid.clone()),
+                    TransientSubscription {
+                        subject: sub_subject,
+                        sid,
+                    },
+                );
+                false
             } else {
-                crate::broker_bail!("CONNECT durable_id is required before SUB")
+                let client = inner
+                    .clients
+                    .get(&connection_id)
+                    .ok_or_else(|| BrokerError::msg("unknown connection"))?;
+                if let Some(durable_id) = &client.durable_id {
+                    let consumer_id = consumer_id(durable_id, queue.as_deref(), &sub_subject, &sid);
+                    let record = ConsumerRecord {
+                        consumer_id: consumer_id.clone(),
+                        filter_subject: sub_subject,
+                        queue_group: queue,
+                        ack_timeout_ms: client.ack_timeout_ms,
+                        max_in_flight: client.max_in_flight,
+                    };
+                    inner.wal.append_consumer_upsert(&record)?;
+                    inner.wal.flush_due()?;
+                    let consumer = inner
+                        .consumers
+                        .entry(consumer_id)
+                        .or_insert_with(|| Consumer {
+                            record: record.clone(),
+                            members: HashMap::new(),
+                            pending: BTreeSet::new(),
+                            pending_attempts: HashMap::new(),
+                            in_flight: HashMap::new(),
+                            acked: HashSet::new(),
+                            delivered: 0,
+                        });
+                    consumer.record = record;
+                    consumer.members.insert(connection_id, sid);
+                    true
+                } else {
+                    crate::broker_bail!("CONNECT durable_id is required before SUB")
+                }
             }
         };
 
@@ -404,6 +431,10 @@ impl Broker {
     ) -> Result<()> {
         let mut inner = self.inner.lock().await;
         let mut found = false;
+        found |= inner
+            .transient_subscriptions
+            .remove(&(connection_id, sid.to_string()))
+            .is_some();
         for consumer in inner.consumers.values_mut() {
             if consumer
                 .members
@@ -448,6 +479,32 @@ impl Broker {
             payload.len() <= self.config.max_payload,
             "payload exceeds max payload"
         );
+
+        if is_inbox_publish(&subject_name) {
+            let (deliveries, verbose) = {
+                let inner = self.inner.lock().await;
+                let verbose = inner
+                    .clients
+                    .get(&publisher_id)
+                    .map(|client| client.verbose)
+                    .unwrap_or(self.config.verbose);
+                (
+                    inner.prepare_transient_deliveries(
+                        &subject_name,
+                        reply_to.as_deref(),
+                        &payload,
+                    ),
+                    verbose,
+                )
+            };
+            for delivery in deliveries {
+                let _ = delivery.sender.send(delivery.frame).await;
+            }
+            if verbose {
+                self.send_to(publisher_id, protocol::ok().to_vec()).await?;
+            }
+            return Ok(());
+        }
 
         let (has_durable, verbose) = {
             let mut inner = self.inner.lock().await;
@@ -606,6 +663,9 @@ impl Broker {
     async fn remove_client(&self, connection_id: u64) -> Result<()> {
         let mut inner = self.inner.lock().await;
         inner.clients.remove(&connection_id);
+        inner
+            .transient_subscriptions
+            .retain(|(client_id, _), _| *client_id != connection_id);
         for consumer in inner.consumers.values_mut() {
             consumer.members.remove(&connection_id);
         }
@@ -614,6 +674,25 @@ impl Broker {
 }
 
 impl Inner {
+    fn prepare_transient_deliveries(
+        &self,
+        subject_name: &str,
+        reply_to: Option<&str>,
+        payload: &[u8],
+    ) -> Vec<Delivery> {
+        self.transient_subscriptions
+            .iter()
+            .filter(|(_, subscription)| subject::matches(&subscription.subject, subject_name))
+            .filter_map(|((connection_id, _), subscription)| {
+                let client = self.clients.get(connection_id)?;
+                Some(Delivery {
+                    sender: client.sender.clone(),
+                    frame: protocol::msg(subject_name, &subscription.sid, reply_to, payload),
+                })
+            })
+            .collect()
+    }
+
     fn prepare_durable_deliveries(&mut self) -> Result<Vec<Delivery>> {
         let now = now_ms();
         let mut deliveries = Vec::new();
@@ -649,14 +728,24 @@ impl Inner {
                     consumer.delivered += 1;
                 }
                 if let Some(client) = self.clients.get(&connection_id) {
-                    deliveries.push(Delivery {
-                        sender: client.sender.clone(),
-                        frame: protocol::msg(
+                    let frame = match message.reply_to.as_deref() {
+                        Some(reply_to) => protocol::hmsg(
+                            &message.subject,
+                            &sid,
+                            Some(reply_to),
+                            &[("Broker-Ack", &ack_subject)],
+                            &message.payload,
+                        ),
+                        None => protocol::msg(
                             &message.subject,
                             &sid,
                             Some(&ack_subject),
                             &message.payload,
                         ),
+                    };
+                    deliveries.push(Delivery {
+                        sender: client.sender.clone(),
+                        frame,
                     });
                 }
             }
@@ -745,6 +834,14 @@ fn consumer_id(durable_id: &str, queue: Option<&str>, subject: &str, sid: &str) 
         Some(queue) => format!("queue-{queue}-{}", hex(subject.as_bytes())),
         None => format!("durable-{durable_id}-{sid}"),
     }
+}
+
+fn is_inbox_subscription(subject: &str) -> bool {
+    subject == "_INBOX.>" || subject.starts_with("_INBOX.")
+}
+
+fn is_inbox_publish(subject: &str) -> bool {
+    subject.starts_with("_INBOX.")
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -923,6 +1020,76 @@ mod tests {
                 .in_flight
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn request_publish_delivers_hmsg_with_reply_subject_and_ack_header() {
+        let dir = TestDir::new();
+        let broker = Broker::open(test_config(dir.path())).unwrap();
+        let mut rx = durable_client(&broker, 1, "client1").await;
+        broker
+            .subscribe(1, "service.echo".into(), None, "sid1".into())
+            .await
+            .unwrap();
+        broker
+            .publish(
+                2,
+                "service.echo".into(),
+                Some("_INBOX.client.1".into()),
+                b"hello".to_vec(),
+            )
+            .await
+            .unwrap();
+
+        let frame = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let text = String::from_utf8(frame).unwrap();
+        assert!(text.starts_with("HMSG service.echo sid1 _INBOX.client.1 "));
+        assert!(text.contains("\r\nNATS/1.0\r\nBroker-Ack: _BROKER.ACK.durable-client1-sid1."));
+        assert!(text.ends_with("\r\n\r\nhello\r\n"));
+    }
+
+    #[tokio::test]
+    async fn inbox_subscription_is_transient_and_live_only() {
+        let dir = TestDir::new();
+        let broker = Broker::open(test_config(dir.path())).unwrap();
+        let (tx, mut rx) = mpsc::channel(8);
+        broker.add_client(1, tx).await.unwrap();
+        broker
+            .subscribe(1, "_INBOX.client.1".into(), None, "inbox1".into())
+            .await
+            .unwrap();
+        broker
+            .publish(2, "_INBOX.client.1".into(), None, b"response".to_vec())
+            .await
+            .unwrap();
+
+        let frame = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let text = String::from_utf8(frame).unwrap();
+        assert_eq!(text, "MSG _INBOX.client.1 inbox1 8\r\nresponse\r\n");
+        let inner = broker.inner.lock().await;
+        assert!(inner.consumers.is_empty());
+        assert!(inner.messages.is_empty());
+        assert_eq!(inner.transient_subscriptions.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn inactive_inbox_publish_is_not_retained() {
+        let dir = TestDir::new();
+        let broker = Broker::open(test_config(dir.path())).unwrap();
+        broker
+            .publish(2, "_INBOX.missing.1".into(), None, b"response".to_vec())
+            .await
+            .unwrap();
+        let inner = broker.inner.lock().await;
+        assert!(inner.consumers.is_empty());
+        assert!(inner.messages.is_empty());
+        assert!(inner.transient_subscriptions.is_empty());
     }
 
     #[tokio::test]

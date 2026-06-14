@@ -1,6 +1,6 @@
 use std::{
     error::Error, fmt, fs::File, io::BufReader as StdBufReader, net::SocketAddr, path::Path,
-    path::PathBuf, sync::Arc,
+    path::PathBuf, sync::Arc, time::Duration,
 };
 
 use tokio::{
@@ -20,6 +20,8 @@ pub use protocol;
 pub struct Client {
     stream: BufReader<Box<dyn ClientStream>>,
     max_payload: usize,
+    inbox_prefix: String,
+    inbox_counter: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -56,6 +58,8 @@ pub struct Message {
     pub subject: String,
     pub sid: String,
     pub reply_to: Option<String>,
+    pub ack_subject: Option<String>,
+    pub headers: Vec<(String, String)>,
     pub payload: Vec<u8>,
 }
 
@@ -90,6 +94,8 @@ impl Client {
         Ok(Self {
             stream: BufReader::new(Box::new(stream)),
             max_payload,
+            inbox_prefix: default_inbox_prefix(),
+            inbox_counter: 0,
         })
     }
 
@@ -112,6 +118,8 @@ impl Client {
         Ok(Self {
             stream: BufReader::new(Box::new(stream)),
             max_payload,
+            inbox_prefix: default_inbox_prefix(),
+            inbox_counter: 0,
         })
     }
 
@@ -177,7 +185,9 @@ impl Client {
             "ack_timeout_ms": ack_timeout_ms,
             "max_in_flight": max_in_flight,
         });
-        self.write_line(&format!("CONNECT {payload}")).await
+        self.write_line(&format!("CONNECT {payload}")).await?;
+        self.inbox_prefix = inbox_prefix(durable_id);
+        Ok(())
     }
 
     pub async fn connect_authenticated(
@@ -199,7 +209,9 @@ impl Client {
             "ack_timeout_ms": ack_timeout_ms,
             "max_in_flight": max_in_flight,
         });
-        self.write_line(&format!("CONNECT {payload}")).await
+        self.write_line(&format!("CONNECT {payload}")).await?;
+        self.inbox_prefix = inbox_prefix(&auth.client_id);
+        Ok(())
     }
 
     pub async fn subscribe(&mut self, subject: &str, sid: &str) -> Result<()> {
@@ -209,6 +221,10 @@ impl Client {
     pub async fn subscribe_queue(&mut self, subject: &str, queue: &str, sid: &str) -> Result<()> {
         self.write_line(&format!("SUB {subject} {queue} {sid}"))
             .await
+    }
+
+    pub async fn unsubscribe(&mut self, sid: &str) -> Result<()> {
+        self.write_line(&format!("UNSUB {sid}")).await
     }
 
     pub async fn publish(&mut self, subject: &str, payload: &[u8]) -> Result<()> {
@@ -252,6 +268,52 @@ impl Client {
 
     pub async fn ack(&mut self, ack_subject: &str) -> Result<()> {
         self.publish(ack_subject, b"").await
+    }
+
+    pub async fn request(
+        &mut self,
+        subject: &str,
+        payload: &[u8],
+        timeout: Duration,
+    ) -> Result<Message> {
+        self.inbox_counter = self.inbox_counter.saturating_add(1);
+        let inbox = format!("{}.{}", self.inbox_prefix, self.inbox_counter);
+        let sid = format!("inbox{}", self.inbox_counter);
+        self.subscribe(&inbox, &sid).await?;
+        self.ping_roundtrip().await?;
+        self.publish_with_reply(subject, Some(&inbox), payload)
+            .await?;
+
+        let response = match tokio::time::timeout(timeout, async {
+            loop {
+                let message = self.next_message().await?;
+                if message.subject == inbox {
+                    return Ok(message);
+                }
+            }
+        })
+        .await
+        {
+            Ok(response) => response?,
+            Err(_) => {
+                let _ = self.unsubscribe(&sid).await;
+                return Err(ClientError::msg("request timed out"));
+            }
+        };
+
+        if let Some(ack_subject) = &response.ack_subject {
+            self.ack(ack_subject).await?;
+        }
+        self.unsubscribe(&sid).await?;
+        Ok(response)
+    }
+
+    pub async fn respond(&mut self, message: &Message, payload: &[u8]) -> Result<()> {
+        let reply_to = message
+            .reply_to
+            .as_deref()
+            .ok_or_else(|| ClientError::msg("message does not contain a reply subject"))?;
+        self.publish(reply_to, payload).await
     }
 
     pub async fn ping(&mut self) -> Result<()> {
@@ -364,6 +426,7 @@ async fn parse_frame(
         "+OK" => Ok(Some(ServerFrame::Ok)),
         "-ERR" => Ok(Some(ServerFrame::Err(line.to_string()))),
         "MSG" => parse_msg(stream, parts, max_payload).await.map(Some),
+        "HMSG" => parse_hmsg(stream, parts, max_payload).await.map(Some),
         _ => Err(ClientError::msg(format!("unsupported server frame {op}"))),
     }
 }
@@ -429,12 +492,116 @@ async fn parse_msg<'a>(
         return Err(ClientError::msg("MSG payload must be followed by CRLF"));
     }
     payload.truncate(size);
+    let (reply_to, ack_subject) = match reply_to {
+        Some(reply_to) if protocol::parse_ack_subject(&reply_to).is_some() => {
+            (None, Some(reply_to))
+        }
+        reply_to => (reply_to, None),
+    };
     Ok(ServerFrame::Message(Message {
         subject,
         sid,
         reply_to,
+        ack_subject,
+        headers: Vec::new(),
         payload,
     }))
+}
+
+async fn parse_hmsg<'a>(
+    stream: &mut BufReader<Box<dyn ClientStream>>,
+    mut parts: impl Iterator<Item = &'a str>,
+    max_payload: usize,
+) -> Result<ServerFrame> {
+    let subject = parts
+        .next()
+        .ok_or_else(|| ClientError::msg("HMSG missing subject"))?
+        .to_string();
+    let sid = parts
+        .next()
+        .ok_or_else(|| ClientError::msg("HMSG missing sid"))?
+        .to_string();
+    let third = parts
+        .next()
+        .ok_or_else(|| ClientError::msg("HMSG missing headers length"))?;
+    let fourth = parts
+        .next()
+        .ok_or_else(|| ClientError::msg("HMSG missing total length"))?;
+    let fifth = parts.next();
+    if parts.next().is_some() {
+        return Err(ClientError::msg("HMSG has too many arguments"));
+    }
+    let (reply_to, headers_len_token, total_len_token) = match fifth {
+        Some(total_len) => (Some(third.to_string()), fourth, total_len),
+        None => (None, third, fourth),
+    };
+    let headers_len = parse_frame_len(headers_len_token, "HMSG headers length")?;
+    let total_len = parse_frame_len(total_len_token, "HMSG total length")?;
+    if headers_len > total_len {
+        return Err(ClientError::msg(
+            "HMSG headers length exceeds total frame length",
+        ));
+    }
+    if total_len > max_payload {
+        return Err(ClientError::msg(format!(
+            "HMSG total length {total_len} exceeds max payload {max_payload}"
+        )));
+    }
+
+    let mut frame = vec![0; total_len + 2];
+    stream
+        .read_exact(&mut frame)
+        .await
+        .map_err(|err| ClientError::with_source("reading HMSG payload", err))?;
+    if &frame[total_len..] != b"\r\n" {
+        return Err(ClientError::msg("HMSG payload must be followed by CRLF"));
+    }
+    frame.truncate(total_len);
+    let payload = frame.split_off(headers_len);
+    let headers = parse_headers(&frame)?;
+    let ack_subject = header_value(&headers, "Broker-Ack").map(str::to_string);
+    Ok(ServerFrame::Message(Message {
+        subject,
+        sid,
+        reply_to,
+        ack_subject,
+        headers,
+        payload,
+    }))
+}
+
+fn parse_frame_len(value: &str, field: &str) -> Result<usize> {
+    value
+        .parse::<usize>()
+        .map_err(|_| ClientError::msg(format!("{field} must be an integer")))
+}
+
+fn parse_headers(bytes: &[u8]) -> Result<Vec<(String, String)>> {
+    let text = std::str::from_utf8(bytes)
+        .map_err(|err| ClientError::with_source("HMSG headers are not UTF-8", err))?;
+    let mut lines = text.split("\r\n");
+    match lines.next() {
+        Some("NATS/1.0") => {}
+        _ => return Err(ClientError::msg("HMSG headers missing NATS/1.0 line")),
+    }
+    let mut headers = Vec::new();
+    for line in lines {
+        if line.is_empty() {
+            break;
+        }
+        let (name, value) = line
+            .split_once(':')
+            .ok_or_else(|| ClientError::msg("malformed HMSG header line"))?;
+        headers.push((name.trim().to_string(), value.trim().to_string()));
+    }
+    Ok(headers)
+}
+
+fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    headers
+        .iter()
+        .find(|(header_name, _)| header_name.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.as_str())
 }
 
 fn trim_crlf(line: &mut Vec<u8>) -> Result<()> {
@@ -517,6 +684,22 @@ fn hex(bytes: &[u8]) -> String {
     out
 }
 
+fn default_inbox_prefix() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("_INBOX.client.{:x}.{:x}", std::process::id(), nanos)
+}
+
+fn inbox_prefix(client_id: &str) -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("_INBOX.{client_id}.{:x}", nanos)
+}
+
 fn decode_fixed<const N: usize>(value: &str, field: &str) -> Result<[u8; N]> {
     let value = value.trim();
     if value.len() != N * 2 {
@@ -530,6 +713,90 @@ fn decode_fixed<const N: usize>(value: &str, field: &str) -> Result<[u8; N]> {
         out[idx] = (hex_value(chunk[0], field)? << 4) | hex_value(chunk[1], field)?;
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::io::AsyncWriteExt;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn parses_hmsg_with_reply_and_broker_ack_header() {
+        let (mut writer, reader) = tokio::io::duplex(128);
+        writer
+            .write_all(b"NATS/1.0\r\nBroker-Ack: _BROKER.ACK.consumer.1.2\r\n\r\nhello\r\n")
+            .await
+            .unwrap();
+        let mut reader = BufReader::new(Box::new(reader) as Box<dyn ClientStream>);
+
+        let frame = parse_frame(
+            &mut reader,
+            "HMSG service.echo sid1 _INBOX.client.1 50 55",
+            1024,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        let ServerFrame::Message(message) = frame else {
+            panic!("expected HMSG to parse as Message");
+        };
+        assert_eq!(message.subject, "service.echo");
+        assert_eq!(message.sid, "sid1");
+        assert_eq!(message.reply_to.as_deref(), Some("_INBOX.client.1"));
+        assert_eq!(
+            message.ack_subject.as_deref(),
+            Some("_BROKER.ACK.consumer.1.2")
+        );
+        assert_eq!(message.payload, b"hello");
+    }
+
+    #[tokio::test]
+    async fn parses_msg_ack_reply_as_ack_subject() {
+        let (mut writer, reader) = tokio::io::duplex(64);
+        writer.write_all(b"hello\r\n").await.unwrap();
+        let mut reader = BufReader::new(Box::new(reader) as Box<dyn ClientStream>);
+
+        let frame = parse_frame(
+            &mut reader,
+            "MSG orders.created sid1 _BROKER.ACK.consumer.1.2 5",
+            1024,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        let ServerFrame::Message(message) = frame else {
+            panic!("expected MSG to parse as Message");
+        };
+        assert!(message.reply_to.is_none());
+        assert_eq!(
+            message.ack_subject.as_deref(),
+            Some("_BROKER.ACK.consumer.1.2")
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_malformed_hmsg_lengths() {
+        let (_writer, reader) = tokio::io::duplex(64);
+        let mut reader = BufReader::new(Box::new(reader) as Box<dyn ClientStream>);
+
+        let err = parse_frame(&mut reader, "HMSG service.echo sid1 nope 5", 1024)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("headers length"));
+
+        let err = parse_frame(&mut reader, "HMSG service.echo sid1 6 5", 1024)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("exceeds total"));
+
+        let err = parse_frame(&mut reader, "HMSG service.echo sid1 1 2048", 1024)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("exceeds max payload"));
+    }
 }
 
 fn hex_value(byte: u8, field: &str) -> Result<u8> {

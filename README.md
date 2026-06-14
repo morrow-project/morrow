@@ -142,8 +142,22 @@ Subscribe and ack the first delivered message:
 cargo run --release -p cli -- --config client.json sub orders.* --ack --max-messages 1
 ```
 
+Send a request and print the first response:
+
+```bash
+cargo run --release -p cli -- --config client.json request service.echo hello --timeout-ms 30000
+```
+
+Run a simple responder. Each request is printed to stdout; each response is read
+as one line from stdin:
+
+```bash
+cargo run --release -p cli -- --config client.json reply service.echo
+```
+
 The CLI handles `INFO`, TLS, challenge-response auth, and `CONNECT` implicitly
-from `client.json`. User-visible commands are `ping`, `pub`, and `sub`.
+from `client.json`. User-visible commands are `ping`, `pub`, `sub`, `request`,
+and `reply`.
 
 ## Minimal Session
 
@@ -187,6 +201,45 @@ PUB _BROKER.ACK.durable-client1-sid1.1.1 0
 If the ack is not received before `ack_timeout_ms`, the broker redelivers the
 message to an active member of the same durable consumer.
 
+## Request/Response
+
+Request/response uses the NATS `PUB <subject> <reply-to> <size>` shape. The
+requester subscribes to a transient `_INBOX.*` subject, publishes the request
+with that inbox as the reply subject, then waits for the first response.
+
+```text
+SUB _INBOX.client1.1 inbox1
+PING
+PUB service.echo _INBOX.client1.1 5
+hello
+```
+
+A durable responder receives request messages as `HMSG` when the original
+publish includes a reply subject. The `HMSG` reply-to is the requester inbox;
+the broker ACK subject is carried in the `Broker-Ack` header:
+
+```text
+HMSG service.echo sid1 _INBOX.client1.1 65 70
+NATS/1.0
+Broker-Ack: _BROKER.ACK.durable-responder1-sid1.1.1
+
+hello
+```
+
+The responder publishes the response to the reply subject and then ACKs the
+request:
+
+```text
+PUB _INBOX.client1.1 5
+world
+PUB _BROKER.ACK.durable-responder1-sid1.1.1 0
+
+```
+
+`_INBOX.*` subscriptions are transient request/reply plumbing. They do not
+create durable consumers, are removed on disconnect or `UNSUB`, and messages
+published to inactive inboxes are not retained.
+
 ## Durable Consumers
 
 - `CONNECT` must establish a durable identity before `SUB`.
@@ -202,6 +255,8 @@ message to an active member of the same durable consumer.
   to that later consumer.
 - Ack subjects are reserved under `_BROKER.ACK.*`; publishing to other
   `_BROKER.*` subjects is rejected.
+- `_INBOX.*` subjects are reserved for transient request/reply inboxes and are
+  live-only.
 
 ## Supported Protocol Commands
 
@@ -213,12 +268,17 @@ The protocol uses CRLF-delimited NATS-style frames.
 INFO {...}
 MSG <subject> <sid> <size>
 MSG <subject> <sid> <reply-to> <size>
+HMSG <subject> <sid> <headers-len> <total-len>
+HMSG <subject> <sid> <reply-to> <headers-len> <total-len>
 PONG
 +OK
 -ERR '<message>'
 ```
 
 `+OK` is sent only when verbose mode is enabled for the connection.
+`HMSG` carries a NATS header block followed by the payload. Durable request
+deliveries use `Broker-Ack` to carry the ACK subject while preserving the NATS
+reply-to field for the requester's inbox.
 
 ### Client Commands
 
@@ -278,6 +338,11 @@ size must be less than or equal to `max_payload` from the config file.
 Publishing to `_BROKER.ACK.<consumer-id>.<seq>.<delivery-id>` records an ack for
 that durable delivery.
 
+Publishing with a reply subject is the request primitive. If the publish matches
+a durable consumer, the responder receives the original reply subject in an
+`HMSG` frame. Publishing to `_INBOX.*` is live-only and is dropped when no
+matching transient inbox subscription is active.
+
 #### SUB
 
 ```text
@@ -293,7 +358,8 @@ Subjects support NATS-style subscription wildcards:
 - `*` matches one token.
 - `>` matches the remaining tail.
 
-`SUB` requires a prior `CONNECT` with `durable_id`.
+`SUB` requires a prior `CONNECT` with `durable_id`, except for transient
+`_INBOX.*` subscriptions used for request/reply.
 
 #### UNSUB
 
@@ -306,7 +372,8 @@ UNSUB <sid> <max-messages>
 ```
 
 The broker detaches the current connection from the durable subscription member
-identified by `sid`. Durable consumer state remains in the WAL.
+or transient inbox identified by `sid`. Durable consumer state remains in the
+WAL.
 
 ## Development Checks
 
