@@ -5,6 +5,8 @@ use tokio::{
     net::TcpStream,
 };
 
+use ed25519_dalek::{Signer, SigningKey};
+
 pub use protocol;
 
 #[derive(Debug)]
@@ -26,6 +28,12 @@ pub struct Message {
     pub sid: String,
     pub reply_to: Option<String>,
     pub payload: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ClientAuth {
+    client_id: String,
+    signing_key: SigningKey,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,6 +81,28 @@ impl Client {
     ) -> Result<()> {
         let payload = serde_json::json!({
             "durable_id": durable_id,
+            "verbose": verbose,
+            "ack_timeout_ms": ack_timeout_ms,
+            "max_in_flight": max_in_flight,
+        });
+        self.write_line(&format!("CONNECT {payload}")).await
+    }
+
+    pub async fn connect_authenticated(
+        &mut self,
+        info: &Info,
+        auth: &ClientAuth,
+        verbose: bool,
+        ack_timeout_ms: u64,
+        max_in_flight: usize,
+    ) -> Result<()> {
+        let nonce = info
+            .nonce
+            .as_deref()
+            .ok_or_else(|| ClientError::msg("INFO frame does not contain an auth nonce"))?;
+        let payload = serde_json::json!({
+            "client_id": auth.client_id,
+            "signature": auth.sign_nonce(nonce),
             "verbose": verbose,
             "ack_timeout_ms": ack_timeout_ms,
             "max_in_flight": max_in_flight,
@@ -192,6 +222,31 @@ impl Client {
             .write_all(b"\r\n")
             .await
             .map_err(|err| ClientError::with_source("writing protocol line terminator", err))
+    }
+}
+
+impl ClientAuth {
+    pub fn new(client_id: impl Into<String>, signing_key: SigningKey) -> Self {
+        Self {
+            client_id: client_id.into(),
+            signing_key,
+        }
+    }
+
+    pub fn from_seed(client_id: impl Into<String>, seed: [u8; 32]) -> Self {
+        Self::new(client_id, SigningKey::from_bytes(&seed))
+    }
+
+    pub fn client_id(&self) -> &str {
+        &self.client_id
+    }
+
+    pub fn public_key_hex(&self) -> String {
+        hex(self.signing_key.verifying_key().as_bytes())
+    }
+
+    fn sign_nonce(&self, nonce: &str) -> String {
+        hex(&self.signing_key.sign(nonce.as_bytes()).to_bytes())
     }
 }
 
@@ -323,4 +378,14 @@ impl Error for ClientError {
             .as_deref()
             .map(|source| source as &(dyn Error + 'static))
     }
+}
+
+fn hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
 }
