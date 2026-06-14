@@ -1,0 +1,495 @@
+use super::*;
+
+#[tokio::test]
+async fn auth_enabled_generates_fresh_nonce_per_connection() {
+    let dir = TempDir::new().unwrap();
+    let mut config = test_config(dir.path());
+    config.auth.enabled = true;
+    let broker = Broker::open(config).unwrap();
+    let (tx1, _rx1) = mpsc::channel(8);
+    let (tx2, _rx2) = mpsc::channel(8);
+
+    broker.add_client(1, tx1, None).await.unwrap();
+    broker.add_client(2, tx2, None).await.unwrap();
+
+    let inner = broker.inner.lock().await;
+    let first = inner.clients.get(&1).unwrap().auth_nonce.as_ref().unwrap();
+    let second = inner.clients.get(&2).unwrap().auth_nonce.as_ref().unwrap();
+    assert_ne!(first, second);
+    assert_eq!(first.len(), 64);
+    assert_eq!(second.len(), 64);
+}
+#[tokio::test]
+async fn non_durable_connect_subscribes_as_transient_core() {
+    let scenario = Scenario::new();
+    let mut subscriber = scenario.connect().await;
+    let mut publisher = scenario.connect_durable("publisher1", 25).await;
+
+    subscriber.write_line("CONNECT {}").await;
+    subscriber.subscribe("orders.*", "sid1").await;
+    subscriber.ping_roundtrip().await;
+    publisher.publish("orders.created", b"hello").await;
+
+    let frame = subscriber.expect_msg().await;
+    assert_eq!(frame, "MSG orders.created sid1 5\r\nhello\r\n");
+    let inner = scenario.broker().inner.lock().await;
+    assert!(inner.consumers.is_empty());
+    assert_eq!(inner.transient_subscriptions.len(), 1);
+}
+#[tokio::test]
+async fn durable_subscribe_publish_delivery_and_ack_are_deterministic() {
+    let scenario = Scenario::new();
+    let mut subscriber = scenario.connect_durable("client1", 25).await;
+    let mut publisher = scenario.connect_durable("publisher1", 25).await;
+
+    subscriber.subscribe("orders.*", "sid1").await;
+    subscriber.ping_roundtrip().await;
+    publisher.publish("orders.created", b"hello").await;
+
+    let frame = subscriber.expect_msg().await;
+    assert!(frame.starts_with("MSG orders.created sid1 _BROKER.ACK.durable-client1-sid1."));
+    assert!(frame.ends_with("5\r\nhello\r\n"));
+    publisher.publish(&ack_subject(&frame), b"").await;
+    publisher.ping_roundtrip().await;
+
+    let inner = scenario.broker().inner.lock().await;
+    let consumer = inner.consumers.get("durable-client1-sid1").unwrap();
+    assert!(consumer.pending.is_empty());
+    assert!(consumer.in_flight.is_empty());
+    assert!(consumer.acked.contains(&1));
+    assert!(inner.messages.is_empty());
+}
+#[tokio::test]
+async fn redelivery_waits_for_manual_clock_deadline() {
+    let scenario = Scenario::new();
+    let mut subscriber = scenario.connect_durable("client1", 25).await;
+    let mut publisher = scenario.connect_durable("publisher1", 25).await;
+
+    subscriber.subscribe("orders.*", "sid1").await;
+    subscriber.ping_roundtrip().await;
+    publisher.publish("orders.created", b"hello").await;
+    let first = subscriber.expect_msg().await;
+    assert!(first.contains(".1.1 "));
+
+    scenario.advance_ms(24);
+    scenario.tick_redelivery().await;
+    {
+        let inner = scenario.broker().inner.lock().await;
+        let consumer = inner.consumers.get("durable-client1-sid1").unwrap();
+        assert!(consumer.pending.is_empty());
+        assert_eq!(consumer.in_flight.get(&1).unwrap().delivery_id, 1);
+    }
+    subscriber.expect_no_frame_short().await;
+
+    scenario.advance_ms(1);
+    scenario.tick_redelivery().await;
+    let second = subscriber.expect_msg().await;
+    assert!(second.starts_with("MSG orders.created sid1 _BROKER.ACK.durable-client1-sid1.1.2"));
+    assert!(second.ends_with("5\r\nhello\r\n"));
+}
+#[tokio::test]
+async fn acked_message_does_not_redeliver_after_manual_ticks() {
+    let scenario = Scenario::new();
+    let mut subscriber = scenario.connect_durable("client1", 25).await;
+    let mut publisher = scenario.connect_durable("publisher1", 25).await;
+
+    subscriber.subscribe("orders.*", "sid1").await;
+    subscriber.ping_roundtrip().await;
+    publisher.publish("orders.created", b"hello").await;
+    let frame = subscriber.expect_msg().await;
+    publisher.publish(&ack_subject(&frame), b"").await;
+    publisher.ping_roundtrip().await;
+
+    scenario.advance_ms(1_000);
+    scenario.tick_redelivery().await;
+    subscriber.expect_no_frame_short().await;
+    let inner = scenario.broker().inner.lock().await;
+    assert!(inner.messages.is_empty());
+    let consumer = inner.consumers.get("durable-client1-sid1").unwrap();
+    assert!(consumer.pending.is_empty());
+    assert!(consumer.in_flight.is_empty());
+}
+#[tokio::test]
+async fn wal_replay_preserves_unacked_delivery_state_and_next_ids() {
+    let mut scenario = Scenario::new();
+    {
+        let mut subscriber = scenario.connect_durable("client1", 25).await;
+        let mut publisher = scenario.connect_durable("publisher1", 25).await;
+        subscriber.subscribe("orders.*", "sid1").await;
+        subscriber.ping_roundtrip().await;
+        publisher.publish("orders.created", b"hello").await;
+        let first = subscriber.expect_msg().await;
+        assert!(first.contains(".1.1 "));
+        subscriber.disconnect().await;
+        publisher.disconnect().await;
+    }
+
+    scenario.restart_broker().await;
+    scenario.advance_ms(25);
+    let mut subscriber = scenario.connect_durable("client1", 25).await;
+    subscriber.subscribe("orders.*", "sid1").await;
+    scenario.tick_redelivery().await;
+
+    let redelivery = subscriber.expect_msg().await;
+    assert!(redelivery.starts_with("MSG orders.created sid1 _BROKER.ACK.durable-client1-sid1.1.2"));
+}
+#[tokio::test]
+async fn acked_message_does_not_redeliver_after_restart() {
+    let mut scenario = Scenario::new();
+    {
+        let mut subscriber = scenario.connect_durable("client1", 25).await;
+        let mut publisher = scenario.connect_durable("publisher1", 25).await;
+        subscriber.subscribe("orders.*", "sid1").await;
+        subscriber.ping_roundtrip().await;
+        publisher.publish("orders.created", b"hello").await;
+        let frame = subscriber.expect_msg().await;
+        publisher.publish(&ack_subject(&frame), b"").await;
+        publisher.ping_roundtrip().await;
+        subscriber.disconnect().await;
+        publisher.disconnect().await;
+    }
+
+    scenario.restart_broker().await;
+    let mut subscriber = scenario.connect_durable("client1", 25).await;
+    subscriber.subscribe("orders.*", "sid1").await;
+    subscriber.ping_roundtrip().await;
+    scenario.advance_ms(1_000);
+    scenario.tick_redelivery().await;
+    subscriber.expect_no_frame_short().await;
+    let inner = scenario.broker().inner.lock().await;
+    assert!(inner.consumers["durable-client1-sid1"].pending.is_empty());
+    assert!(inner.consumers["durable-client1-sid1"].in_flight.is_empty());
+    assert!(inner.consumers["durable-client1-sid1"].acked.contains(&1));
+}
+#[tokio::test]
+async fn request_reply_inbox_delivery_is_transient() {
+    let scenario = Scenario::new();
+    let mut responder = scenario.connect_durable("responder1", 25).await;
+    let mut requester = scenario.connect_durable("requester1", 25).await;
+
+    responder.subscribe("service.echo", "sid1").await;
+    responder.ping_roundtrip().await;
+    requester.subscribe("_INBOX.requester.1", "inbox1").await;
+    requester.ping_roundtrip().await;
+    requester
+        .publish_with_reply("service.echo", Some("_INBOX.requester.1"), b"hello")
+        .await;
+
+    let request = responder.expect_hmsg().await;
+    assert!(request.starts_with("HMSG service.echo sid1 _INBOX.requester.1 "));
+    assert!(request.contains("\r\nBroker-Ack: _BROKER.ACK.durable-responder1-sid1."));
+    responder.publish("_INBOX.requester.1", b"world").await;
+
+    let response = requester.expect_msg().await;
+    assert_eq!(response, "MSG _INBOX.requester.1 inbox1 5\r\nworld\r\n");
+    let inner = scenario.broker().inner.lock().await;
+    assert!(inner.messages.contains_key(&1));
+    assert_eq!(inner.transient_subscriptions.len(), 1);
+    assert_eq!(inner.consumers.len(), 1);
+}
+#[tokio::test]
+async fn publish_without_matching_durable_consumer_is_not_retained() {
+    let scenario = Scenario::new();
+    let mut publisher = scenario.connect_durable("publisher1", 25).await;
+
+    publisher.publish("orders.created", b"hello").await;
+    publisher.ping_roundtrip().await;
+    assert!(scenario.broker().inner.lock().await.messages.is_empty());
+}
+#[tokio::test]
+async fn durable_queue_group_delivers_one_copy() {
+    let scenario = Scenario::new();
+    let mut first = scenario.connect_durable("client1", 25).await;
+    let mut second = scenario.connect_durable("client2", 25).await;
+    let mut publisher = scenario.connect_durable("publisher1", 25).await;
+
+    first.subscribe_queue("orders.*", "workers", "a").await;
+    first.ping_roundtrip().await;
+    second.subscribe_queue("orders.*", "workers", "b").await;
+    second.ping_roundtrip().await;
+    publisher.publish("orders.created", b"hello").await;
+    publisher.ping_roundtrip().await;
+
+    let inner = scenario.broker().inner.lock().await;
+    let consumer = inner
+        .consumers
+        .get("queue-workers-6f72646572732e2a")
+        .unwrap();
+    assert_eq!(consumer.delivered, 1);
+    assert_eq!(consumer.in_flight.len(), 1);
+}
+#[tokio::test]
+async fn unsub_with_max_receives_one_more_durable_delivery_then_detaches() {
+    let scenario = Scenario::new();
+    let mut subscriber = scenario.connect_durable("client1", 25).await;
+    let mut publisher = scenario.connect_durable("publisher1", 25).await;
+
+    subscriber.subscribe("orders.*", "sid1").await;
+    subscriber.ping_roundtrip().await;
+    subscriber.write_line("UNSUB sid1 1").await;
+    publisher.publish("orders.created", b"one").await;
+    let first = subscriber.expect_msg().await;
+    assert!(first.ends_with("3\r\none\r\n"));
+
+    publisher.publish("orders.created", b"two").await;
+    publisher.ping_roundtrip().await;
+    subscriber.expect_no_frame_short().await;
+    let inner = scenario.broker().inner.lock().await;
+    assert!(inner.consumers["durable-client1-sid1"].members.is_empty());
+}
+#[tokio::test]
+async fn queue_unsub_with_max_detaches_only_that_member_after_count() {
+    let scenario = Scenario::new();
+    let mut first = scenario.connect_durable("client1", 25).await;
+    let mut second = scenario.connect_durable("client2", 25).await;
+    let mut publisher = scenario.connect_durable("publisher1", 25).await;
+
+    first.subscribe_queue("orders.*", "workers", "a").await;
+    first.ping_roundtrip().await;
+    second.subscribe_queue("orders.*", "workers", "b").await;
+    second.ping_roundtrip().await;
+    first.write_line("UNSUB a 2").await;
+
+    publisher.publish("orders.created", b"one").await;
+    assert!(first.expect_msg().await.ends_with("3\r\none\r\n"));
+    publisher.publish("orders.created", b"two").await;
+    assert!(first.expect_msg().await.ends_with("3\r\ntwo\r\n"));
+    publisher.publish("orders.created", b"three").await;
+    assert!(second.expect_msg().await.ends_with("5\r\nthree\r\n"));
+    first.expect_no_frame_short().await;
+
+    let inner = scenario.broker().inner.lock().await;
+    let consumer = inner
+        .consumers
+        .get("queue-workers-6f72646572732e2a")
+        .unwrap();
+    assert_eq!(consumer.members.len(), 1);
+    assert!(consumer.members.values().any(|member| member.sid == "b"));
+}
+#[tokio::test]
+async fn transient_unsub_with_max_receives_one_more_live_message_then_detaches() {
+    let scenario = Scenario::new();
+    let mut subscriber = scenario.connect_durable("client1", 25).await;
+    let mut publisher = scenario.connect_durable("publisher1", 25).await;
+
+    subscriber.subscribe("_INBOX.client1.1", "inbox1").await;
+    subscriber.ping_roundtrip().await;
+    subscriber.write_line("UNSUB inbox1 1").await;
+    publisher.publish("_INBOX.client1.1", b"one").await;
+    let first = subscriber.expect_msg().await;
+    assert_eq!(first, "MSG _INBOX.client1.1 inbox1 3\r\none\r\n");
+
+    publisher.publish("_INBOX.client1.1", b"two").await;
+    publisher.ping_roundtrip().await;
+    subscriber.expect_no_frame_short().await;
+    assert!(
+        scenario
+            .broker()
+            .inner
+            .lock()
+            .await
+            .transient_subscriptions
+            .is_empty()
+    );
+}
+#[tokio::test]
+async fn route_origin_publish_delivers_only_to_transient_subscribers() {
+    let scenario = Scenario::new();
+    let mut transient = scenario.connect().await;
+    let mut durable = scenario.connect_durable("client1", 25).await;
+
+    transient.write_line("CONNECT {}").await;
+    transient.subscribe("orders.*", "sid1").await;
+    durable.subscribe("orders.*", "durable1").await;
+    transient.ping_roundtrip().await;
+    durable.ping_roundtrip().await;
+
+    scenario
+        .broker()
+        .deliver_route_publish("orders.created", None, b"hello")
+        .await
+        .unwrap();
+
+    let frame = transient.expect_msg().await;
+    assert_eq!(frame, "MSG orders.created sid1 5\r\nhello\r\n");
+    durable.expect_no_frame_short().await;
+    let inner = scenario.broker().inner.lock().await;
+    assert!(inner.messages.is_empty());
+    assert!(
+        inner.consumers["durable-client1-durable1"]
+            .pending
+            .is_empty()
+    );
+}
+#[tokio::test]
+async fn disconnected_in_flight_message_redelivers_after_reconnect() {
+    let scenario = Scenario::new();
+    let mut subscriber = scenario.connect_durable("client1", 25).await;
+    let mut publisher = scenario.connect_durable("publisher1", 25).await;
+
+    subscriber.subscribe("orders.*", "sid1").await;
+    subscriber.ping_roundtrip().await;
+    publisher.publish("orders.created", b"hello").await;
+    let first = subscriber.expect_msg().await;
+    assert!(first.starts_with("MSG orders.created sid1 _BROKER.ACK.durable-client1-sid1.1.1"));
+    subscriber.disconnect().await;
+
+    scenario.advance_ms(25);
+    let mut subscriber = scenario.connect_durable("client1", 25).await;
+    subscriber.subscribe("orders.*", "sid1").await;
+    subscriber.ping_roundtrip().await;
+    scenario.tick_redelivery().await;
+
+    let redelivery = subscriber.expect_msg().await;
+    assert!(redelivery.starts_with("MSG orders.created sid1 _BROKER.ACK.durable-client1-sid1.1.2"));
+    assert!(redelivery.ends_with("5\r\nhello\r\n"));
+}
+#[tokio::test]
+async fn disconnected_in_flight_message_does_not_redeliver_before_deadline() {
+    let scenario = Scenario::new();
+    let mut subscriber = scenario.connect_durable("client1", 25).await;
+    let mut publisher = scenario.connect_durable("publisher1", 25).await;
+
+    subscriber.subscribe("orders.*", "sid1").await;
+    subscriber.ping_roundtrip().await;
+    publisher.publish("orders.created", b"hello").await;
+    let first = subscriber.expect_msg().await;
+    assert!(first.starts_with("MSG orders.created sid1 _BROKER.ACK.durable-client1-sid1.1.1"));
+    subscriber.disconnect().await;
+
+    scenario.advance_ms(24);
+    let mut subscriber = scenario.connect_durable("client1", 25).await;
+    subscriber.subscribe("orders.*", "sid1").await;
+    subscriber.ping_roundtrip().await;
+    scenario.tick_redelivery().await;
+    subscriber.expect_no_frame_short().await;
+    {
+        let inner = scenario.broker().inner.lock().await;
+        let consumer = inner.consumers.get("durable-client1-sid1").unwrap();
+        assert!(consumer.pending.is_empty());
+        assert_eq!(consumer.in_flight.get(&1).unwrap().delivery_id, 1);
+    }
+
+    scenario.advance_ms(1);
+    scenario.tick_redelivery().await;
+    let redelivery = subscriber.expect_msg().await;
+    assert!(redelivery.starts_with("MSG orders.created sid1 _BROKER.ACK.durable-client1-sid1.1.2"));
+}
+#[tokio::test]
+async fn ack_after_reconnect_survives_restart() {
+    let mut scenario = Scenario::new();
+    let mut subscriber = scenario.connect_durable("client1", 25).await;
+    let mut publisher = scenario.connect_durable("publisher1", 25).await;
+
+    subscriber.subscribe("orders.*", "sid1").await;
+    subscriber.ping_roundtrip().await;
+    publisher.publish("orders.created", b"hello").await;
+    let first = subscriber.expect_msg().await;
+    assert!(first.starts_with("MSG orders.created sid1 _BROKER.ACK.durable-client1-sid1.1.1"));
+    subscriber.disconnect().await;
+
+    scenario.advance_ms(25);
+    let mut subscriber = scenario.connect_durable("client1", 25).await;
+    subscriber.subscribe("orders.*", "sid1").await;
+    subscriber.ping_roundtrip().await;
+    scenario.tick_redelivery().await;
+    let redelivery = subscriber.expect_msg().await;
+    assert!(redelivery.starts_with("MSG orders.created sid1 _BROKER.ACK.durable-client1-sid1.1.2"));
+    publisher.publish(&ack_subject(&redelivery), b"").await;
+    publisher.ping_roundtrip().await;
+    subscriber.disconnect().await;
+    publisher.disconnect().await;
+
+    scenario.restart_broker().await;
+    let mut subscriber = scenario.connect_durable("client1", 25).await;
+    subscriber.subscribe("orders.*", "sid1").await;
+    subscriber.ping_roundtrip().await;
+    scenario.advance_ms(1_000);
+    scenario.tick_redelivery().await;
+    subscriber.expect_no_frame_short().await;
+
+    let inner = scenario.broker().inner.lock().await;
+    let consumer = inner.consumers.get("durable-client1-sid1").unwrap();
+    assert!(consumer.pending.is_empty());
+    assert!(consumer.in_flight.is_empty());
+    assert!(consumer.acked.contains(&1));
+}
+#[tokio::test]
+async fn fake_cluster_runtime_drives_broker_flow_across_100_nodes() {
+    let scenario = Scenario::new_fake_cluster(100);
+    let mut subscriber = scenario.connect_durable("client1", 25).await;
+    let mut publisher = scenario.connect_durable("publisher1", 25).await;
+
+    assert_eq!(scenario.fake_cluster().node_count(), 100);
+    assert_eq!(scenario.broker().cluster_leader().await, Some(1));
+
+    subscriber.subscribe("orders.*", "sid1").await;
+    subscriber.ping_roundtrip().await;
+    publisher.publish("orders.created", b"hello").await;
+
+    let delivery = subscriber.expect_msg().await;
+    assert!(delivery.starts_with("MSG orders.created sid1 _BROKER.ACK.durable-client1-sid1.1.1"));
+    assert!(delivery.ends_with("5\r\nhello\r\n"));
+
+    publisher.publish(&ack_subject(&delivery), b"").await;
+    publisher.ping_roundtrip().await;
+
+    let durable = scenario.fake_cluster().durable_state();
+    let consumer = durable.consumers.get("durable-client1-sid1").unwrap();
+    assert!(consumer.pending.is_empty());
+    assert!(consumer.in_flight.is_empty());
+    assert!(consumer.acked.contains(&1));
+    assert!(durable.messages.is_empty());
+    assert_eq!(scenario.fake_cluster().write_count(), 4);
+}
+#[tokio::test]
+async fn http_cluster_endpoint_reports_standalone_node() {
+    let scenario = Scenario::new();
+
+    let response = http_request(scenario.broker(), "/cluster").await;
+
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+    assert!(response.contains("\"cluster_size\":1"));
+    assert!(response.contains("\"cluster_status\":\"standalone\""));
+    assert!(response.contains("\"node_id\":null"));
+    assert!(response.contains("\"role\":\"standalone\""));
+    assert!(response.contains("\"leader_id\":null"));
+    assert!(response.contains("\"peers\":[]"));
+}
+#[tokio::test]
+async fn http_cluster_endpoint_reports_cluster_role_and_leader() {
+    let scenario = Scenario::new_fake_cluster_local_node(3, 1, Some(1));
+
+    let response = http_request(scenario.broker(), "/cluster").await;
+
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+    assert!(response.contains("\"cluster_size\":3"));
+    assert!(response.contains("\"cluster_status\":\"ready\""));
+    assert!(response.contains("\"node_id\":1"));
+    assert!(response.contains("\"role\":\"leader\""));
+    assert!(response.contains("\"leader_id\":1"));
+}
+#[tokio::test]
+async fn cluster_response_reports_follower_role_and_leader() {
+    let scenario = Scenario::new_fake_cluster_local_node(3, 2, Some(1));
+
+    let status = scenario.broker().cluster_response().await;
+
+    assert_eq!(status.cluster_size, 3);
+    assert_eq!(status.cluster_status, "ready");
+    assert_eq!(status.node_id, Some(2));
+    assert_eq!(status.role, "follower");
+    assert_eq!(status.leader_id, Some(1));
+}
+#[tokio::test]
+async fn cluster_response_reports_forming_without_leader() {
+    let scenario = Scenario::new_fake_cluster_local_node(3, 2, None);
+
+    let status = scenario.broker().cluster_response().await;
+
+    assert_eq!(status.cluster_size, 3);
+    assert_eq!(status.cluster_status, "forming");
+    assert_eq!(status.node_id, Some(2));
+    assert_eq!(status.role, "unknown");
+    assert_eq!(status.leader_id, None);
+}

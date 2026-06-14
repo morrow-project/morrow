@@ -24,6 +24,18 @@ Workspace crates:
 - Use `apply_patch` for manual file edits.
 - Do not stage, commit, or rewrite history unless the user explicitly asks.
 
+## Rust Source Layout
+
+- Keep Rust source and tests in separate files. Do not add inline
+  `#[cfg(test)] mod tests` blocks to production source files.
+- Put unit and deterministic in-process tests in sibling or crate-local test
+  modules/files, and keep production modules focused on runtime code.
+- No Rust source or test file may exceed 600 lines. When a change would push a
+  file over that limit, split the code or tests into smaller focused modules as
+  part of the same change.
+- When touching an existing Rust file that is already over 600 lines, do not add
+  more code to it; first move the relevant code or tests into smaller files.
+
 ## Standard Verification
 
 For server or broker semantics changes, run:
@@ -40,8 +52,8 @@ For narrower changes, at minimum run the affected package tests plus
 
 ## Testing Strategy
 
-- Prefer deterministic, in-process tests in `crates/server/src/broker.rs` for
-  broker semantics.
+- Prefer deterministic, in-process server tests for broker semantics, but keep
+  those tests in separate test files rather than inline in production modules.
 - Keep full TCP/OpenRaft tests in `crates/integration` as smoke coverage, not as
   the primary place for timing-sensitive behavior.
 - Deterministic broker tests should avoid real ports, wall-clock sleeps,

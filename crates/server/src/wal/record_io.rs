@@ -1,0 +1,161 @@
+use super::*;
+
+pub(super) fn write_publish_to(file: &mut File, record: &PublishRecord) -> Result<()> {
+    let mut body = Vec::new();
+    put_u64(&mut body, record.seq);
+    put_string(&mut body, &record.subject)?;
+    put_option_string(&mut body, record.reply_to.as_deref())?;
+    put_bytes(&mut body, &record.payload)?;
+    write_record_to(file, KIND_PUBLISH, &body)
+}
+pub(super) fn write_consumer_upsert_to(file: &mut File, record: &ConsumerRecord) -> Result<()> {
+    let mut body = Vec::new();
+    put_string(&mut body, &record.consumer_id)?;
+    put_string(&mut body, &record.filter_subject)?;
+    put_option_string(&mut body, record.queue_group.as_deref())?;
+    put_u64(&mut body, record.ack_timeout_ms);
+    put_u32(
+        &mut body,
+        record
+            .max_in_flight
+            .try_into()
+            .context("max_in_flight too large")?,
+    );
+    write_record_to(file, KIND_CONSUMER_UPSERT, &body)
+}
+pub(super) fn write_delivery_attempt_to(
+    file: &mut File,
+    record: &DeliveryAttemptRecord,
+) -> Result<()> {
+    let mut body = Vec::new();
+    put_u64(&mut body, record.seq);
+    put_string(&mut body, &record.consumer_id)?;
+    put_u64(&mut body, record.delivery_id);
+    put_u64(&mut body, record.deadline_ms);
+    put_u32(&mut body, record.attempt);
+    write_record_to(file, KIND_DELIVERY_ATTEMPT, &body)
+}
+pub(super) fn write_record_to(file: &mut File, kind: u8, body: &[u8]) -> Result<()> {
+    let len = body.len() + 1;
+    let len: u32 = len.try_into().context("WAL record too large")?;
+    file.write_all(&len.to_le_bytes())?;
+    file.write_all(&[kind])?;
+    file.write_all(body)?;
+    let mut hasher = crc32fast::Hasher::new();
+    hasher.update(&[kind]);
+    hasher.update(body);
+    file.write_all(&hasher.finalize().to_le_bytes())?;
+    Ok(())
+}
+pub(super) fn read_record(file: &mut File) -> io::Result<Option<(u8, Vec<u8>, u64)>> {
+    let mut len_bytes = [0; 4];
+    match file.read_exact(&mut len_bytes) {
+        Ok(()) => {}
+        Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(err) => return Err(err),
+    }
+    let len = u32::from_le_bytes(len_bytes) as usize;
+    if len == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "zero-length WAL record",
+        ));
+    }
+    let mut record = vec![0; len];
+    file.read_exact(&mut record)?;
+    let mut crc_bytes = [0; 4];
+    file.read_exact(&mut crc_bytes)?;
+    let expected = u32::from_le_bytes(crc_bytes);
+    let actual = crc32fast::hash(&record);
+    if expected != actual {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "WAL checksum mismatch",
+        ));
+    }
+    let kind = record[0];
+    Ok(Some((kind, record[1..].to_vec(), 4 + len as u64 + 4)))
+}
+pub(super) fn decode_publish(body: &[u8]) -> Result<PublishRecord> {
+    let mut cursor = Cursor {
+        bytes: body,
+        pos: 0,
+    };
+    let record = PublishRecord {
+        seq: cursor.u64()?,
+        subject: cursor.string()?,
+        reply_to: cursor.option_string()?,
+        payload: cursor.bytes()?,
+    };
+    cursor.finish()?;
+    Ok(record)
+}
+pub(super) fn decode_consumer_upsert(body: &[u8]) -> Result<ConsumerRecord> {
+    let mut cursor = Cursor {
+        bytes: body,
+        pos: 0,
+    };
+    let record = ConsumerRecord {
+        consumer_id: cursor.string()?,
+        filter_subject: cursor.string()?,
+        queue_group: cursor.option_string()?,
+        ack_timeout_ms: cursor.u64()?,
+        max_in_flight: cursor.u32()? as usize,
+    };
+    cursor.finish()?;
+    Ok(record)
+}
+pub(super) fn decode_delivery_attempt(body: &[u8]) -> Result<DeliveryAttemptRecord> {
+    let mut cursor = Cursor {
+        bytes: body,
+        pos: 0,
+    };
+    let record = DeliveryAttemptRecord {
+        seq: cursor.u64()?,
+        consumer_id: cursor.string()?,
+        delivery_id: cursor.u64()?,
+        deadline_ms: cursor.u64()?,
+        attempt: cursor.u32()?,
+    };
+    cursor.finish()?;
+    Ok(record)
+}
+pub(super) fn decode_ack(body: &[u8]) -> Result<AckRecord> {
+    let mut cursor = Cursor {
+        bytes: body,
+        pos: 0,
+    };
+    let record = AckRecord {
+        seq: cursor.u64()?,
+        consumer_id: cursor.string()?,
+        delivery_id: cursor.u64()?,
+    };
+    cursor.finish()?;
+    Ok(record)
+}
+pub(super) fn put_u32(out: &mut Vec<u8>, value: u32) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+pub(super) fn put_u64(out: &mut Vec<u8>, value: u64) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+pub(super) fn put_string(out: &mut Vec<u8>, value: &str) -> Result<()> {
+    put_bytes(out, value.as_bytes())
+}
+pub(super) fn put_option_string(out: &mut Vec<u8>, value: Option<&str>) -> Result<()> {
+    match value {
+        Some(value) => {
+            out.push(1);
+            put_string(out, value)
+        }
+        None => {
+            out.push(0);
+            Ok(())
+        }
+    }
+}
+pub(super) fn put_bytes(out: &mut Vec<u8>, value: &[u8]) -> Result<()> {
+    put_u32(out, value.len().try_into().context("field too large")?);
+    out.extend_from_slice(value);
+    Ok(())
+}

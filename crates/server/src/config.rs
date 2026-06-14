@@ -1,3 +1,4 @@
+use crate::error::{BrokerError, Result, ResultExt};
 use std::{
     collections::HashMap,
     ffi::OsString,
@@ -5,11 +6,7 @@ use std::{
     path::{Path, PathBuf},
     time::Duration,
 };
-
-use crate::error::{BrokerError, Result, ResultExt};
-
 const DEFAULT_CONFIG_PATH: &str = "broker.json";
-
 #[derive(Debug, Clone)]
 pub struct Config {
     pub listen: SocketAddr,
@@ -22,20 +19,17 @@ pub struct Config {
     pub auth: AuthConfig,
     pub cluster: Option<ClusterConfig>,
 }
-
 #[derive(Debug, Clone)]
 pub struct TlsConfig {
     pub cert_file: PathBuf,
     pub key_file: PathBuf,
     pub handshake_timeout_ms: u64,
 }
-
 #[derive(Debug, Clone, Default)]
 pub struct AuthConfig {
     pub enabled: bool,
     pub clients: HashMap<String, String>,
 }
-
 #[derive(Debug, Clone)]
 pub struct ClusterConfig {
     pub enabled: bool,
@@ -52,14 +46,12 @@ pub struct ClusterConfig {
     pub heartbeat_interval_ms: u64,
     pub snapshot_threshold: u64,
 }
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClusterNodeConfig {
     pub node_id: u64,
     pub raft_addr: SocketAddr,
     pub client_addr: SocketAddr,
 }
-
 impl Config {
     pub fn load_from_args() -> Result<Self> {
         let mut args = std::env::args_os();
@@ -144,7 +136,6 @@ impl Config {
         Ok(())
     }
 }
-
 impl ClusterConfig {
     fn validate(&self) -> Result<()> {
         crate::broker_ensure!(
@@ -201,7 +192,6 @@ impl ClusterConfig {
         self.nodes.iter().find(|node| node.node_id == self.node_id)
     }
 }
-
 fn get_auth_config(value: &serde_json::Value) -> Result<AuthConfig> {
     let Some(auth) = value.get("auth") else {
         return Ok(AuthConfig::default());
@@ -247,7 +237,6 @@ fn get_auth_config(value: &serde_json::Value) -> Result<AuthConfig> {
     }
     Ok(AuthConfig { enabled, clients })
 }
-
 impl TlsConfig {
     fn validate(&self) -> Result<()> {
         crate::broker_ensure!(
@@ -265,7 +254,6 @@ impl TlsConfig {
         Ok(())
     }
 }
-
 fn get_string<'a>(value: &'a serde_json::Value, key: &str) -> Result<Option<&'a str>> {
     match value.get(key) {
         Some(serde_json::Value::String(value)) => Ok(Some(value)),
@@ -275,7 +263,6 @@ fn get_string<'a>(value: &'a serde_json::Value, key: &str) -> Result<Option<&'a 
         None => Ok(None),
     }
 }
-
 fn get_u64(value: &serde_json::Value, key: &str) -> Result<Option<u64>> {
     match value.get(key) {
         Some(serde_json::Value::Number(value)) => value
@@ -288,7 +275,6 @@ fn get_u64(value: &serde_json::Value, key: &str) -> Result<Option<u64>> {
         None => Ok(None),
     }
 }
-
 fn get_bool(value: &serde_json::Value, key: &str) -> Result<Option<bool>> {
     match value.get(key) {
         Some(serde_json::Value::Bool(value)) => Ok(Some(*value)),
@@ -298,7 +284,6 @@ fn get_bool(value: &serde_json::Value, key: &str) -> Result<Option<bool>> {
         None => Ok(None),
     }
 }
-
 fn get_tls_config(value: &serde_json::Value) -> Result<Option<TlsConfig>> {
     let Some(tls) = value.get("tls") else {
         return Ok(None);
@@ -320,7 +305,6 @@ fn get_tls_config(value: &serde_json::Value) -> Result<Option<TlsConfig>> {
         handshake_timeout_ms,
     }))
 }
-
 fn get_http_listen(value: &serde_json::Value) -> Result<Option<SocketAddr>> {
     match value.get("http_listen") {
         Some(serde_json::Value::String(value)) => value
@@ -333,7 +317,6 @@ fn get_http_listen(value: &serde_json::Value) -> Result<Option<SocketAddr>> {
         )),
     }
 }
-
 fn get_cluster_config(value: &serde_json::Value) -> Result<Option<ClusterConfig>> {
     let Some(cluster) = value.get("cluster") else {
         return Ok(None);
@@ -385,7 +368,6 @@ fn get_cluster_config(value: &serde_json::Value) -> Result<Option<ClusterConfig>
     config.validate()?;
     Ok(Some(config))
 }
-
 fn get_cluster_nodes(value: &serde_json::Value) -> Result<Vec<ClusterNodeConfig>> {
     let nodes = value
         .get("nodes")
@@ -422,7 +404,6 @@ fn get_cluster_nodes(value: &serde_json::Value) -> Result<Vec<ClusterNodeConfig>
     }
     Ok(out)
 }
-
 fn get_optional_socket_addr(value: &serde_json::Value, key: &str) -> Result<Option<SocketAddr>> {
     match value.get(key) {
         Some(serde_json::Value::String(value)) => value
@@ -435,7 +416,6 @@ fn get_optional_socket_addr(value: &serde_json::Value, key: &str) -> Result<Opti
         ))),
     }
 }
-
 fn get_socket_addr_array(value: &serde_json::Value, key: &str) -> Result<Vec<SocketAddr>> {
     match value.get(key) {
         Some(serde_json::Value::Array(values)) => values
@@ -457,7 +437,6 @@ fn get_socket_addr_array(value: &serde_json::Value, key: &str) -> Result<Vec<Soc
         ))),
     }
 }
-
 impl From<OsString> for BrokerError {
     fn from(value: OsString) -> Self {
         BrokerError::msg(format!("invalid argument {:?}", value))
@@ -465,158 +444,4 @@ impl From<OsString> for BrokerError {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parses_json_config() {
-        let value = serde_json::json!({
-            "listen": "127.0.0.1:4223",
-            "http_listen": "127.0.0.1:8223",
-            "wal_dir": "./target/test-wal-config",
-            "fsync_interval_ms": 10,
-            "max_payload": 2048,
-            "verbose": true,
-            "tls": null,
-            "auth": null
-        });
-
-        let config = Config::from_json(&value).unwrap();
-        assert_eq!(config.listen, "127.0.0.1:4223".parse().unwrap());
-        assert_eq!(config.http_listen, Some("127.0.0.1:8223".parse().unwrap()));
-        assert_eq!(config.wal_dir, PathBuf::from("./target/test-wal-config"));
-        assert_eq!(config.fsync_interval_ms, 10);
-        assert_eq!(config.max_payload, 2048);
-        assert!(config.verbose);
-        assert!(config.tls.is_none());
-        assert!(!config.auth.enabled);
-        assert!(config.cluster.is_none());
-    }
-
-    #[test]
-    fn parses_cluster_route_mesh_config() {
-        let value = serde_json::json!({
-            "listen": "127.0.0.1:4221",
-            "wal_dir": "./target/test-wal-config-routes/wal",
-            "cluster": {
-                "enabled": true,
-                "node_id": 1,
-                "raft_listen": "127.0.0.1:5221",
-                "route_listen": "127.0.0.1:6221",
-                "routes": ["127.0.0.1:6222", "127.0.0.1:6223"],
-                "raft_dir": "./target/test-wal-config-routes/raft",
-                "bootstrap": true,
-                "nodes": [
-                    {
-                        "node_id": 1,
-                        "raft_addr": "127.0.0.1:5221",
-                        "client_addr": "127.0.0.1:4221"
-                    }
-                ]
-            }
-        });
-
-        let config = Config::from_json(&value).unwrap();
-        let cluster = config.cluster.unwrap();
-        assert_eq!(
-            cluster.route_listen,
-            Some("127.0.0.1:6221".parse().unwrap())
-        );
-        assert_eq!(
-            cluster.routes,
-            vec![
-                "127.0.0.1:6222".parse().unwrap(),
-                "127.0.0.1:6223".parse().unwrap()
-            ]
-        );
-        assert_eq!(cluster.route_reconnect_ms, 500);
-    }
-
-    #[test]
-    fn rejects_invalid_field_types() {
-        let value = serde_json::json!({
-            "listen": 4222
-        });
-
-        let err = Config::from_json(&value).unwrap_err();
-        assert!(err.to_string().contains("listen"));
-    }
-
-    #[test]
-    fn parses_tls_config_without_validation() {
-        let value = serde_json::json!({
-            "tls": {
-                "cert_file": "./server-cert.pem",
-                "key_file": "./server-key.pem",
-                "handshake_timeout_ms": 5000
-            }
-        });
-
-        let tls = get_tls_config(&value).unwrap().unwrap();
-        assert_eq!(tls.cert_file, PathBuf::from("./server-cert.pem"));
-        assert_eq!(tls.key_file, PathBuf::from("./server-key.pem"));
-        assert_eq!(tls.handshake_timeout_ms, 5000);
-    }
-
-    #[test]
-    fn parses_cluster_config() {
-        let value = serde_json::json!({
-            "wal_dir": "./target/test-wal-cluster-config",
-            "cluster": {
-                "enabled": true,
-                "node_id": 1,
-                "raft_listen": "127.0.0.1:5221",
-                "raft_dir": "./target/test-wal-cluster-config/raft",
-                "bootstrap": true,
-                "nodes": [
-                    {"node_id": 1, "raft_addr": "127.0.0.1:5221", "client_addr": "127.0.0.1:4221"},
-                    {"node_id": 2, "raft_addr": "127.0.0.1:5222", "client_addr": "127.0.0.1:4222"}
-                ],
-                "election_timeout_min_ms": 200,
-                "election_timeout_max_ms": 400,
-                "heartbeat_interval_ms": 50,
-                "snapshot_threshold": 100
-            }
-        });
-
-        let config = Config::from_json(&value).unwrap();
-        let cluster = config.cluster.unwrap();
-        assert_eq!(cluster.node_id, 1);
-        assert_eq!(cluster.nodes.len(), 2);
-        assert!(cluster.bootstrap);
-    }
-
-    #[test]
-    fn rejects_cluster_missing_self_node() {
-        let err = Config::from_json(&serde_json::json!({
-            "wal_dir": "./target/test-wal-cluster-missing-self",
-            "cluster": {
-                "enabled": true,
-                "node_id": 3,
-                "raft_listen": "127.0.0.1:5221",
-                "raft_dir": "./target/test-wal-cluster-missing-self/raft",
-                "nodes": [
-                    {"node_id": 1, "raft_addr": "127.0.0.1:5221", "client_addr": "127.0.0.1:4221"}
-                ]
-            }
-        }))
-        .unwrap_err();
-        assert!(err.to_string().contains("cluster.node_id"));
-    }
-
-    #[test]
-    fn parses_auth_config() {
-        let value = serde_json::json!({
-            "auth": {
-                "enabled": true,
-                "clients": [
-                    {"client_id": "client1", "public_key": "ABCD"}
-                ]
-            }
-        });
-
-        let auth = get_auth_config(&value).unwrap();
-        assert!(auth.enabled);
-        assert_eq!(auth.clients["client1"], "abcd");
-    }
-}
+mod tests;
