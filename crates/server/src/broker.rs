@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     net::SocketAddr,
     sync::{
         Arc,
@@ -11,7 +11,7 @@ use std::{
 use tokio::{
     io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream},
-    sync::{Mutex, mpsc},
+    sync::{Mutex, mpsc, oneshot},
 };
 use tokio_rustls::TlsAcceptor;
 
@@ -152,8 +152,19 @@ struct FakeClusterState {
     leader: Option<u64>,
     tls_enabled: bool,
     nodes: HashMap<u64, SocketAddr>,
+    available_nodes: BTreeSet<u64>,
     state: DurableState,
     writes: usize,
+    delay_writes: bool,
+    queued_writes: VecDeque<QueuedWrite>,
+    next_write_id: u64,
+}
+
+#[cfg(test)]
+struct QueuedWrite {
+    id: u64,
+    command: BrokerCommand,
+    response: oneshot::Sender<BrokerResponse>,
 }
 
 #[cfg(test)]
@@ -176,20 +187,37 @@ impl FakeClusterRuntime {
                 local_node_id,
                 leader,
                 tls_enabled: false,
+                available_nodes: nodes.keys().copied().collect(),
                 nodes,
                 state: DurableState::new(raft_nodes),
                 writes: 0,
+                delay_writes: false,
+                queued_writes: VecDeque::new(),
+                next_write_id: 1,
             })),
         }
     }
 
     async fn client_write(&self, command: BrokerCommand) -> Result<BrokerResponse> {
-        let mut inner = self.inner.lock().unwrap();
-        if inner.leader != Some(inner.local_node_id) {
-            crate::broker_bail!("not leader");
-        }
-        inner.writes += 1;
-        Ok(inner.state.apply_command(command))
+        let pending = {
+            let mut inner = self.inner.lock().unwrap();
+            inner.ensure_writable()?;
+            if !inner.delay_writes {
+                return Ok(inner.apply_command(command));
+            }
+            let (tx, rx) = oneshot::channel();
+            let id = inner.next_write_id;
+            inner.next_write_id += 1;
+            inner.queued_writes.push_back(QueuedWrite {
+                id,
+                command,
+                response: tx,
+            });
+            rx
+        };
+        pending
+            .await
+            .map_err(|_| BrokerError::msg("queued write canceled"))
     }
 
     fn durable_state(&self) -> DurableState {
@@ -221,6 +249,78 @@ impl FakeClusterRuntime {
 
     fn node_count(&self) -> usize {
         self.inner.lock().unwrap().nodes.len()
+    }
+
+    fn queued_write_count(&self) -> usize {
+        self.inner.lock().unwrap().queued_writes.len()
+    }
+
+    fn set_leader(&self, leader: Option<u64>) {
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(leader) = leader {
+            assert!(inner.nodes.contains_key(&leader));
+        }
+        inner.leader = leader;
+    }
+
+    fn partition_available(&self, nodes: impl IntoIterator<Item = u64>) {
+        let mut inner = self.inner.lock().unwrap();
+        let available = nodes.into_iter().collect::<BTreeSet<_>>();
+        for node_id in &available {
+            assert!(inner.nodes.contains_key(node_id));
+        }
+        inner.available_nodes = available;
+    }
+
+    fn restore_all_nodes(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.available_nodes = inner.nodes.keys().copied().collect();
+    }
+
+    fn set_delay_writes(&self, delay_writes: bool) {
+        self.inner.lock().unwrap().delay_writes = delay_writes;
+    }
+
+    fn drain_one(&self) -> Option<u64> {
+        let queued = self.inner.lock().unwrap().queued_writes.pop_front()?;
+        let response = {
+            let mut inner = self.inner.lock().unwrap();
+            inner.apply_command(queued.command)
+        };
+        let _ = queued.response.send(response);
+        Some(queued.id)
+    }
+
+    fn drain_all(&self) -> usize {
+        let mut drained = 0;
+        while self.drain_one().is_some() {
+            drained += 1;
+        }
+        drained
+    }
+}
+
+#[cfg(test)]
+impl FakeClusterState {
+    fn quorum_size(&self) -> usize {
+        (self.nodes.len() / 2) + 1
+    }
+
+    fn ensure_writable(&self) -> Result<()> {
+        if self.leader != Some(self.local_node_id) {
+            crate::broker_bail!("not leader");
+        }
+        if !self.available_nodes.contains(&self.local_node_id)
+            || self.available_nodes.len() < self.quorum_size()
+        {
+            crate::broker_bail!("quorum unavailable");
+        }
+        Ok(())
+    }
+
+    fn apply_command(&mut self, command: BrokerCommand) -> BrokerResponse {
+        self.writes += 1;
+        self.state.apply_command(command)
     }
 }
 
@@ -1429,6 +1529,34 @@ mod tests {
             self.fake_cluster.as_ref().unwrap()
         }
 
+        fn set_leader(&self, leader: Option<u64>) {
+            self.fake_cluster().set_leader(leader);
+        }
+
+        fn partition_available(&self, nodes: impl IntoIterator<Item = u64>) {
+            self.fake_cluster().partition_available(nodes);
+        }
+
+        fn restore_all_nodes(&self) {
+            self.fake_cluster().restore_all_nodes();
+        }
+
+        fn set_delay_writes(&self, delay_writes: bool) {
+            self.fake_cluster().set_delay_writes(delay_writes);
+        }
+
+        fn drain_one(&self) -> Option<u64> {
+            self.fake_cluster().drain_one()
+        }
+
+        fn drain_all(&self) -> usize {
+            self.fake_cluster().drain_all()
+        }
+
+        fn queued_write_count(&self) -> usize {
+            self.fake_cluster().queued_write_count()
+        }
+
         async fn connect(&self) -> TestClient {
             TestClient::connect(&self.broker).await
         }
@@ -1565,6 +1693,16 @@ mod tests {
         async fn expect_hmsg(&mut self) -> String {
             let frame = self.read_frame().await;
             assert!(frame.starts_with("HMSG "), "expected HMSG, got {frame:?}");
+            frame
+        }
+
+        async fn expect_err_contains(&mut self, expected: &str) -> String {
+            let frame = self.read_frame().await;
+            assert!(frame.starts_with("-ERR "), "expected -ERR, got {frame:?}");
+            assert!(
+                frame.contains(expected),
+                "expected error containing {expected:?}, got {frame:?}"
+            );
             frame
         }
 
@@ -1996,5 +2134,166 @@ mod tests {
         assert!(consumer.acked.contains(&1));
         assert!(durable.messages.is_empty());
         assert_eq!(scenario.fake_cluster().write_count(), 4);
+    }
+
+    #[tokio::test]
+    async fn fake_cluster_quorum_loss_rejects_subscribe() {
+        let scenario = Scenario::new_fake_cluster(5);
+        scenario.partition_available([1, 2]);
+        let mut subscriber = scenario.connect_durable("client1", 25).await;
+
+        subscriber.subscribe("orders.*", "sid1").await;
+
+        subscriber.expect_err_contains("quorum unavailable").await;
+        assert!(scenario.fake_cluster().durable_state().consumers.is_empty());
+        assert_eq!(scenario.fake_cluster().write_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn fake_cluster_not_leader_rejects_publish() {
+        let scenario = Scenario::new_fake_cluster(5);
+        let mut subscriber = scenario.connect_durable("client1", 25).await;
+        let mut publisher = scenario.connect_durable("publisher1", 25).await;
+        subscriber.subscribe("orders.*", "sid1").await;
+        subscriber.ping_roundtrip().await;
+
+        scenario.set_leader(Some(2));
+        publisher.publish("orders.created", b"hello").await;
+
+        publisher.expect_err_contains("not leader").await;
+        subscriber.expect_no_frame_short().await;
+        assert_eq!(scenario.fake_cluster().write_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn fake_cluster_partition_blocks_then_restore_allows_write() {
+        let scenario = Scenario::new_fake_cluster(5);
+        let mut subscriber = scenario.connect_durable("client1", 25).await;
+        let mut publisher = scenario.connect_durable("publisher1", 25).await;
+        subscriber.subscribe("orders.*", "sid1").await;
+        subscriber.ping_roundtrip().await;
+
+        scenario.partition_available([1, 2]);
+        publisher.publish("orders.created", b"blocked").await;
+        publisher.expect_err_contains("quorum unavailable").await;
+        subscriber.expect_no_frame_short().await;
+
+        scenario.restore_all_nodes();
+        publisher.publish("orders.created", b"hello").await;
+        let delivery = subscriber.expect_msg().await;
+        assert!(delivery.ends_with("5\r\nhello\r\n"));
+    }
+
+    #[tokio::test]
+    async fn fake_cluster_delays_consumer_upsert_until_drained() {
+        let scenario = Scenario::new_fake_cluster(5);
+        scenario.set_delay_writes(true);
+        let mut subscriber = scenario.connect_durable("client1", 25).await;
+
+        subscriber.subscribe("orders.*", "sid1").await;
+        subscriber.write_line("PING").await;
+
+        subscriber.expect_no_frame_short().await;
+        assert_eq!(scenario.queued_write_count(), 1);
+        assert!(
+            !scenario
+                .broker()
+                .inner
+                .lock()
+                .await
+                .consumers
+                .contains_key("durable-client1-sid1")
+        );
+
+        assert!(scenario.drain_one().is_some());
+        subscriber.expect_pong().await;
+        assert!(
+            scenario
+                .broker()
+                .inner
+                .lock()
+                .await
+                .consumers
+                .contains_key("durable-client1-sid1")
+        );
+    }
+
+    #[tokio::test]
+    async fn fake_cluster_delays_publish_delivery_until_drained() {
+        let scenario = Scenario::new_fake_cluster(5);
+        let mut subscriber = scenario.connect_durable("client1", 25).await;
+        let mut publisher = scenario.connect_durable("publisher1", 25).await;
+        subscriber.subscribe("orders.*", "sid1").await;
+        subscriber.ping_roundtrip().await;
+
+        scenario.set_delay_writes(true);
+        publisher.publish("orders.created", b"hello").await;
+        publisher.write_line("PING").await;
+
+        subscriber.expect_no_frame_short().await;
+        assert_eq!(scenario.queued_write_count(), 1);
+        assert!(scenario.drain_one().is_some());
+        tokio::task::yield_now().await;
+        subscriber.expect_no_frame_short().await;
+        assert_eq!(scenario.queued_write_count(), 1);
+        assert!(scenario.drain_one().is_some());
+
+        let delivery = subscriber.expect_msg().await;
+        assert!(delivery.ends_with("5\r\nhello\r\n"));
+        publisher.expect_pong().await;
+    }
+
+    #[tokio::test]
+    async fn fake_cluster_delays_ack_until_drained() {
+        let scenario = Scenario::new_fake_cluster(5);
+        let mut subscriber = scenario.connect_durable("client1", 25).await;
+        let mut publisher = scenario.connect_durable("publisher1", 25).await;
+        subscriber.subscribe("orders.*", "sid1").await;
+        subscriber.ping_roundtrip().await;
+        publisher.publish("orders.created", b"hello").await;
+        let delivery = subscriber.expect_msg().await;
+
+        scenario.set_delay_writes(true);
+        publisher.publish(&ack_subject(&delivery), b"").await;
+        publisher.write_line("PING").await;
+        publisher.expect_no_frame_short().await;
+        assert_eq!(scenario.queued_write_count(), 1);
+        {
+            let durable = scenario.fake_cluster().durable_state();
+            assert!(
+                durable.consumers["durable-client1-sid1"]
+                    .in_flight
+                    .contains_key(&1)
+            );
+        }
+
+        assert!(scenario.drain_one().is_some());
+        publisher.expect_pong().await;
+        let durable = scenario.fake_cluster().durable_state();
+        let consumer = durable.consumers.get("durable-client1-sid1").unwrap();
+        assert!(consumer.in_flight.is_empty());
+        assert!(consumer.acked.contains(&1));
+    }
+
+    #[tokio::test]
+    async fn fake_cluster_leader_change_back_to_local_allows_writes() {
+        let scenario = Scenario::new_fake_cluster(5);
+        scenario.set_leader(Some(2));
+        let mut subscriber = scenario.connect_durable("client1", 25).await;
+
+        subscriber.subscribe("orders.*", "sid1").await;
+        subscriber.expect_err_contains("not leader").await;
+        assert!(scenario.fake_cluster().durable_state().consumers.is_empty());
+
+        scenario.set_leader(Some(1));
+        subscriber.subscribe("orders.*", "sid1").await;
+        subscriber.ping_roundtrip().await;
+        assert!(
+            scenario
+                .fake_cluster()
+                .durable_state()
+                .consumers
+                .contains_key("durable-client1-sid1")
+        );
     }
 }
