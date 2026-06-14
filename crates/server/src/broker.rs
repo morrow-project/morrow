@@ -34,6 +34,68 @@ pub struct Broker {
     config: Config,
     tls_acceptor: Option<TlsAcceptor>,
     cluster: Arc<Mutex<Option<RaftRuntime>>>,
+    hooks: BrokerHooks,
+}
+
+#[derive(Clone)]
+pub(crate) struct BrokerHooks {
+    clock: Arc<dyn Clock>,
+    start_redelivery_loop: bool,
+    durable_publish_flush_mode: DurablePublishFlushMode,
+}
+
+pub(crate) trait Clock: Send + Sync {
+    fn now_ms(&self) -> u64;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DurablePublishFlushMode {
+    SleepThenFlush,
+    FlushImmediately,
+}
+
+struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now_ms(&self) -> u64 {
+        now_ms()
+    }
+}
+
+impl Default for BrokerHooks {
+    fn default() -> Self {
+        Self {
+            clock: Arc::new(SystemClock),
+            start_redelivery_loop: true,
+            durable_publish_flush_mode: DurablePublishFlushMode::SleepThenFlush,
+        }
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub(crate) struct ManualClock {
+    now_ms: AtomicU64,
+}
+
+#[cfg(test)]
+impl ManualClock {
+    fn new(now_ms: u64) -> Self {
+        Self {
+            now_ms: AtomicU64::new(now_ms),
+        }
+    }
+
+    fn advance_ms(&self, millis: u64) {
+        self.now_ms.fetch_add(millis, Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+impl Clock for ManualClock {
+    fn now_ms(&self) -> u64 {
+        self.now_ms.load(Ordering::Relaxed)
+    }
 }
 
 struct Inner {
@@ -84,6 +146,10 @@ struct Delivery {
 
 impl Broker {
     pub fn open(config: Config) -> Result<Self> {
+        Self::open_with_hooks(config, BrokerHooks::default())
+    }
+
+    pub(crate) fn open_with_hooks(config: Config, hooks: BrokerHooks) -> Result<Self> {
         config.validate()?;
         let (wal, replay) = Wal::open(&config.wal_dir, config.fsync_interval())?;
         let tls_acceptor = config
@@ -108,6 +174,7 @@ impl Broker {
             config,
             tls_acceptor,
             cluster: Arc::new(Mutex::new(None)),
+            hooks,
         })
     }
 
@@ -124,10 +191,12 @@ impl Broker {
 
     async fn serve_inner(self, listener: TcpListener, handle_shutdown: bool) -> Result<()> {
         self.start_cluster().await?;
-        let redeliver = self.clone();
-        tokio::spawn(async move {
-            redeliver.redelivery_loop().await;
-        });
+        if self.hooks.start_redelivery_loop {
+            let redeliver = self.clone();
+            tokio::spawn(async move {
+                redeliver.redelivery_loop().await;
+            });
+        }
 
         loop {
             if handle_shutdown {
@@ -159,6 +228,19 @@ impl Broker {
 
     pub async fn cluster_leader(&self) -> Option<u64> {
         self.cluster_runtime().await?.current_leader().await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn tick_redelivery_for_test(&self) -> Result<()> {
+        self.expire_and_redeliver().await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn handle_client_for_test<S>(&self, stream: S) -> Result<()>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        self.handle_client(stream).await
     }
 
     fn spawn_accepted(&self, stream: TcpStream) {
@@ -592,9 +674,17 @@ impl Broker {
         };
 
         if has_durable {
-            tokio::time::sleep(self.config.fsync_interval()).await;
-            let mut inner = self.inner.lock().await;
-            inner.wal.flush()?;
+            match self.hooks.durable_publish_flush_mode {
+                DurablePublishFlushMode::SleepThenFlush => {
+                    tokio::time::sleep(self.config.fsync_interval()).await;
+                    let mut inner = self.inner.lock().await;
+                    inner.wal.flush()?;
+                }
+                DurablePublishFlushMode::FlushImmediately => {
+                    let mut inner = self.inner.lock().await;
+                    inner.wal.flush()?;
+                }
+            }
         }
 
         self.deliver_pending().await?;
@@ -664,7 +754,7 @@ impl Broker {
         }
         let deliveries = {
             let mut inner = self.inner.lock().await;
-            inner.prepare_durable_deliveries()?
+            inner.prepare_durable_deliveries(self.hooks.clock.now_ms())?
         };
 
         for delivery in deliveries {
@@ -690,7 +780,7 @@ impl Broker {
         }
         {
             let mut inner = self.inner.lock().await;
-            let now = now_ms();
+            let now = self.hooks.clock.now_ms();
             for consumer in inner.consumers.values_mut() {
                 let expired: Vec<_> = consumer
                     .in_flight
@@ -763,7 +853,7 @@ impl Broker {
         loop {
             let candidate = {
                 let inner = self.inner.lock().await;
-                inner.next_cluster_delivery(now_ms())
+                inner.next_cluster_delivery(self.hooks.clock.now_ms())
             };
             let Some(candidate) = candidate else {
                 break;
@@ -833,8 +923,7 @@ impl Inner {
             .collect()
     }
 
-    fn prepare_durable_deliveries(&mut self) -> Result<Vec<Delivery>> {
-        let now = now_ms();
+    fn prepare_durable_deliveries(&mut self, now: u64) -> Result<Vec<Delivery>> {
         let mut deliveries = Vec::new();
         let consumer_ids: Vec<_> = self.consumers.keys().cloned().collect();
         for consumer_id in consumer_ids {
@@ -1121,47 +1210,132 @@ fn now_ms() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        path::Path,
-        sync::atomic::{AtomicU64, Ordering},
-        time::{Duration, SystemTime, UNIX_EPOCH},
-    };
+    use std::{path::Path, sync::Arc, time::Duration};
 
-    use tokio::sync::mpsc;
+    use tempfile::TempDir;
+    use tokio::{
+        io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, DuplexStream},
+        sync::mpsc,
+        task::JoinHandle,
+    };
 
     use super::*;
 
-    static TEST_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-    struct TestDir(std::path::PathBuf);
-
-    impl TestDir {
-        fn new() -> Self {
-            let nanos = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos();
-            let counter = TEST_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
-            let path = std::env::temp_dir().join(format!(
-                "broker-test-{}-{nanos}-{counter}",
-                std::process::id(),
-            ));
-            std::fs::create_dir_all(&path).unwrap();
-            Self(path)
-        }
-
-        fn path(&self) -> &Path {
-            &self.0
-        }
+    struct TestClient {
+        stream: BufReader<DuplexStream>,
+        task: JoinHandle<()>,
     }
 
-    impl Drop for TestDir {
+    impl Drop for TestClient {
         fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
+            self.task.abort();
         }
     }
 
-    fn test_config(dir: &std::path::Path) -> Config {
+    impl TestClient {
+        async fn connect(broker: &Broker) -> Self {
+            let (client_stream, server_stream) = tokio::io::duplex(4096);
+            let server = broker.clone();
+            let task = tokio::spawn(async move {
+                server.handle_client_for_test(server_stream).await.unwrap();
+            });
+            let mut client = Self {
+                stream: BufReader::new(client_stream),
+                task,
+            };
+            let info = client.read_frame().await;
+            assert!(info.starts_with("INFO "));
+            client
+        }
+
+        async fn connect_durable(broker: &Broker, durable_id: &str, ack_timeout_ms: u64) -> Self {
+            let mut client = Self::connect(broker).await;
+            let payload = serde_json::json!({
+                "durable_id": durable_id,
+                "verbose": false,
+                "ack_timeout_ms": ack_timeout_ms,
+                "max_in_flight": 1024,
+            });
+            client.write_line(&format!("CONNECT {payload}")).await;
+            client
+        }
+
+        async fn write_line(&mut self, line: &str) {
+            self.stream
+                .get_mut()
+                .write_all(line.as_bytes())
+                .await
+                .unwrap();
+            self.stream.get_mut().write_all(b"\r\n").await.unwrap();
+        }
+
+        async fn subscribe(&mut self, subject: &str, sid: &str) {
+            self.write_line(&format!("SUB {subject} {sid}")).await;
+        }
+
+        async fn publish(&mut self, subject: &str, payload: &[u8]) {
+            self.publish_with_reply(subject, None, payload).await;
+        }
+
+        async fn publish_with_reply(
+            &mut self,
+            subject: &str,
+            reply_to: Option<&str>,
+            payload: &[u8],
+        ) {
+            match reply_to {
+                Some(reply_to) => {
+                    self.write_line(&format!("PUB {subject} {reply_to} {}", payload.len()))
+                        .await;
+                }
+                None => {
+                    self.write_line(&format!("PUB {subject} {}", payload.len()))
+                        .await;
+                }
+            }
+            self.stream.get_mut().write_all(payload).await.unwrap();
+            self.stream.get_mut().write_all(b"\r\n").await.unwrap();
+        }
+
+        async fn ping_roundtrip(&mut self) {
+            self.write_line("PING").await;
+            assert_eq!(self.read_frame().await, "PONG\r\n");
+        }
+
+        async fn read_frame(&mut self) -> String {
+            tokio::time::timeout(Duration::from_secs(1), self.read_frame_inner())
+                .await
+                .expect("timed out reading frame")
+        }
+
+        async fn read_frame_inner(&mut self) -> String {
+            let mut frame = Vec::new();
+            self.stream.read_until(b'\n', &mut frame).await.unwrap();
+            assert!(!frame.is_empty(), "connection closed before frame");
+            let line = std::str::from_utf8(&frame).unwrap().to_string();
+            let mut parts = line.split_whitespace();
+            match parts.next() {
+                Some("MSG") => {
+                    let tokens = line.split_whitespace().collect::<Vec<_>>();
+                    let size = tokens.last().unwrap().parse::<usize>().unwrap();
+                    let mut body = vec![0; size + 2];
+                    self.stream.read_exact(&mut body).await.unwrap();
+                    frame.extend_from_slice(&body);
+                }
+                Some("HMSG") => {
+                    let tokens = line.split_whitespace().collect::<Vec<_>>();
+                    let total_size = tokens.last().unwrap().parse::<usize>().unwrap();
+                    let mut body = vec![0; total_size + 2];
+                    self.stream.read_exact(&mut body).await.unwrap();
+                    frame.extend_from_slice(&body);
+                }
+                _ => {}
+            }
+            String::from_utf8(frame).unwrap()
+        }
+    }
+
+    fn test_config(dir: &Path) -> Config {
         Config {
             listen: "127.0.0.1:0".parse().unwrap(),
             wal_dir: dir.to_path_buf(),
@@ -1174,30 +1348,25 @@ mod tests {
         }
     }
 
-    async fn durable_client(
-        broker: &Broker,
-        connection_id: u64,
-        durable_id: &str,
-    ) -> mpsc::Receiver<Vec<u8>> {
-        let (tx, rx) = mpsc::channel(8);
-        broker.add_client(connection_id, tx).await.unwrap();
-        broker
-            .configure_client(
-                connection_id,
-                false,
-                Some(durable_id.into()),
-                Some(25),
-                Some(1024),
-                None,
-            )
-            .await
-            .unwrap();
-        rx
+    fn deterministic_broker(dir: &Path, clock: Arc<ManualClock>) -> Broker {
+        Broker::open_with_hooks(
+            test_config(dir),
+            BrokerHooks {
+                clock,
+                start_redelivery_loop: false,
+                durable_publish_flush_mode: DurablePublishFlushMode::FlushImmediately,
+            },
+        )
+        .unwrap()
+    }
+
+    fn ack_subject(frame: &str) -> String {
+        frame.split_whitespace().nth(3).unwrap().to_string()
     }
 
     #[tokio::test]
     async fn auth_enabled_generates_fresh_nonce_per_connection() {
-        let dir = TestDir::new();
+        let dir = TempDir::new().unwrap();
         let mut config = test_config(dir.path());
         config.auth.enabled = true;
         let broker = Broker::open(config).unwrap();
@@ -1217,215 +1386,223 @@ mod tests {
 
     #[tokio::test]
     async fn sub_requires_durable_connect() {
-        let dir = TestDir::new();
-        let broker = Broker::open(test_config(dir.path())).unwrap();
-        let (tx, _rx) = mpsc::channel(8);
-        broker.add_client(1, tx).await.unwrap();
-        let err = broker
-            .subscribe(1, "orders.*".into(), None, "sid1".into())
-            .await
-            .unwrap_err();
-        assert!(err.to_string().contains("durable_id is required"));
+        let dir = TempDir::new().unwrap();
+        let clock = Arc::new(ManualClock::new(1_000));
+        let broker = deterministic_broker(dir.path(), clock);
+        let mut client = TestClient::connect(&broker).await;
+
+        client.subscribe("orders.*", "sid1").await;
+        let error = client.read_frame().await;
+        assert!(error.contains("durable_id is required"));
     }
 
     #[tokio::test]
-    async fn publish_without_matching_durable_consumer_is_not_retained() {
-        let dir = TestDir::new();
-        let broker = Broker::open(test_config(dir.path())).unwrap();
-        broker
-            .publish(2, "orders.created".into(), None, b"hello".to_vec())
-            .await
-            .unwrap();
-        assert!(broker.inner.lock().await.messages.is_empty());
+    async fn durable_subscribe_publish_delivery_and_ack_are_deterministic() {
+        let dir = TempDir::new().unwrap();
+        let clock = Arc::new(ManualClock::new(1_000));
+        let broker = deterministic_broker(dir.path(), clock);
+        let mut subscriber = TestClient::connect_durable(&broker, "client1", 25).await;
+        let mut publisher = TestClient::connect_durable(&broker, "publisher1", 25).await;
+
+        subscriber.subscribe("orders.*", "sid1").await;
+        subscriber.ping_roundtrip().await;
+        publisher.publish("orders.created", b"hello").await;
+
+        let frame = subscriber.read_frame().await;
+        assert!(frame.starts_with("MSG orders.created sid1 _BROKER.ACK.durable-client1-sid1."));
+        assert!(frame.ends_with("5\r\nhello\r\n"));
+        publisher.publish(&ack_subject(&frame), b"").await;
+        publisher.ping_roundtrip().await;
+
+        let inner = broker.inner.lock().await;
+        let consumer = inner.consumers.get("durable-client1-sid1").unwrap();
+        assert!(consumer.pending.is_empty());
+        assert!(consumer.in_flight.is_empty());
+        assert!(consumer.acked.contains(&1));
+        assert!(inner.messages.is_empty());
     }
 
     #[tokio::test]
-    async fn durable_delivery_requires_ack() {
-        let dir = TestDir::new();
-        let broker = Broker::open(test_config(dir.path())).unwrap();
-        let mut rx = durable_client(&broker, 1, "client1").await;
-        broker
-            .subscribe(1, "orders.*".into(), None, "sid1".into())
-            .await
-            .unwrap();
-        broker
-            .publish(2, "orders.created".into(), None, b"hello".to_vec())
-            .await
-            .unwrap();
+    async fn redelivery_waits_for_manual_clock_deadline() {
+        let dir = TempDir::new().unwrap();
+        let clock = Arc::new(ManualClock::new(1_000));
+        let broker = deterministic_broker(dir.path(), clock.clone());
+        let mut subscriber = TestClient::connect_durable(&broker, "client1", 25).await;
+        let mut publisher = TestClient::connect_durable(&broker, "publisher1", 25).await;
 
-        let frame = tokio::time::timeout(Duration::from_secs(1), rx.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        let text = String::from_utf8(frame).unwrap();
-        assert!(text.starts_with("MSG orders.created sid1 _BROKER.ACK.durable-client1-sid1."));
-        assert!(text.ends_with("5\r\nhello\r\n"));
+        subscriber.subscribe("orders.*", "sid1").await;
+        subscriber.ping_roundtrip().await;
+        publisher.publish("orders.created", b"hello").await;
+        let first = subscriber.read_frame().await;
+        assert!(first.contains(".1.1 "));
 
-        let ack_subject = text.split_whitespace().nth(3).unwrap().to_string();
-        broker
-            .publish(2, ack_subject, None, Vec::new())
-            .await
-            .unwrap();
+        clock.advance_ms(24);
+        broker.tick_redelivery_for_test().await.unwrap();
+        {
+            let inner = broker.inner.lock().await;
+            let consumer = inner.consumers.get("durable-client1-sid1").unwrap();
+            assert!(consumer.pending.is_empty());
+            assert_eq!(consumer.in_flight.get(&1).unwrap().delivery_id, 1);
+        }
+
+        clock.advance_ms(1);
+        broker.tick_redelivery_for_test().await.unwrap();
+        let second = subscriber.read_frame().await;
+        assert!(second.starts_with("MSG orders.created sid1 _BROKER.ACK.durable-client1-sid1.1.2"));
+        assert!(second.ends_with("5\r\nhello\r\n"));
+    }
+
+    #[tokio::test]
+    async fn acked_message_does_not_redeliver_after_manual_ticks() {
+        let dir = TempDir::new().unwrap();
+        let clock = Arc::new(ManualClock::new(1_000));
+        let broker = deterministic_broker(dir.path(), clock.clone());
+        let mut subscriber = TestClient::connect_durable(&broker, "client1", 25).await;
+        let mut publisher = TestClient::connect_durable(&broker, "publisher1", 25).await;
+
+        subscriber.subscribe("orders.*", "sid1").await;
+        subscriber.ping_roundtrip().await;
+        publisher.publish("orders.created", b"hello").await;
+        let frame = subscriber.read_frame().await;
+        publisher.publish(&ack_subject(&frame), b"").await;
+        publisher.ping_roundtrip().await;
+
+        clock.advance_ms(1_000);
+        broker.tick_redelivery_for_test().await.unwrap();
+        let inner = broker.inner.lock().await;
+        assert!(inner.messages.is_empty());
+        let consumer = inner.consumers.get("durable-client1-sid1").unwrap();
+        assert!(consumer.pending.is_empty());
+        assert!(consumer.in_flight.is_empty());
+    }
+
+    #[tokio::test]
+    async fn wal_replay_preserves_unacked_delivery_state_and_next_ids() {
+        let dir = TempDir::new().unwrap();
+        {
+            let clock = Arc::new(ManualClock::new(1_000));
+            let broker = deterministic_broker(dir.path(), clock);
+            let mut subscriber = TestClient::connect_durable(&broker, "client1", 25).await;
+            let mut publisher = TestClient::connect_durable(&broker, "publisher1", 25).await;
+            subscriber.subscribe("orders.*", "sid1").await;
+            subscriber.ping_roundtrip().await;
+            publisher.publish("orders.created", b"hello").await;
+            let first = subscriber.read_frame().await;
+            assert!(first.contains(".1.1 "));
+            broker.shutdown().await.unwrap();
+        }
+
+        let clock = Arc::new(ManualClock::new(2_000));
+        let broker = deterministic_broker(dir.path(), clock.clone());
+        let mut subscriber = TestClient::connect_durable(&broker, "client1", 25).await;
+        subscriber.subscribe("orders.*", "sid1").await;
+        clock.advance_ms(25);
+        broker.tick_redelivery_for_test().await.unwrap();
+
+        let redelivery = subscriber.read_frame().await;
         assert!(
-            broker
-                .inner
-                .lock()
-                .await
-                .consumers
-                .get("durable-client1-sid1")
-                .unwrap()
-                .in_flight
-                .is_empty()
+            redelivery.starts_with("MSG orders.created sid1 _BROKER.ACK.durable-client1-sid1.1.2")
         );
     }
 
     #[tokio::test]
-    async fn request_publish_delivers_hmsg_with_reply_subject_and_ack_header() {
-        let dir = TestDir::new();
-        let broker = Broker::open(test_config(dir.path())).unwrap();
-        let mut rx = durable_client(&broker, 1, "client1").await;
-        broker
-            .subscribe(1, "service.echo".into(), None, "sid1".into())
-            .await
-            .unwrap();
-        broker
-            .publish(
-                2,
-                "service.echo".into(),
-                Some("_INBOX.client.1".into()),
-                b"hello".to_vec(),
-            )
-            .await
-            .unwrap();
+    async fn acked_message_does_not_redeliver_after_restart() {
+        let dir = TempDir::new().unwrap();
+        {
+            let clock = Arc::new(ManualClock::new(1_000));
+            let broker = deterministic_broker(dir.path(), clock);
+            let mut subscriber = TestClient::connect_durable(&broker, "client1", 25).await;
+            let mut publisher = TestClient::connect_durable(&broker, "publisher1", 25).await;
+            subscriber.subscribe("orders.*", "sid1").await;
+            subscriber.ping_roundtrip().await;
+            publisher.publish("orders.created", b"hello").await;
+            let frame = subscriber.read_frame().await;
+            publisher.publish(&ack_subject(&frame), b"").await;
+            publisher.ping_roundtrip().await;
+            broker.shutdown().await.unwrap();
+        }
 
-        let frame = tokio::time::timeout(Duration::from_secs(1), rx.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        let text = String::from_utf8(frame).unwrap();
-        assert!(text.starts_with("HMSG service.echo sid1 _INBOX.client.1 "));
-        assert!(text.contains("\r\nNATS/1.0\r\nBroker-Ack: _BROKER.ACK.durable-client1-sid1."));
-        assert!(text.ends_with("\r\n\r\nhello\r\n"));
+        let clock = Arc::new(ManualClock::new(2_000));
+        let broker = deterministic_broker(dir.path(), clock.clone());
+        let _subscriber = TestClient::connect_durable(&broker, "client1", 25).await;
+        clock.advance_ms(1_000);
+        broker.tick_redelivery_for_test().await.unwrap();
+        let inner = broker.inner.lock().await;
+        assert!(inner.consumers["durable-client1-sid1"].pending.is_empty());
+        assert!(inner.consumers["durable-client1-sid1"].in_flight.is_empty());
+        assert!(inner.consumers["durable-client1-sid1"].acked.contains(&1));
     }
 
     #[tokio::test]
-    async fn inbox_subscription_is_transient_and_live_only() {
-        let dir = TestDir::new();
-        let broker = Broker::open(test_config(dir.path())).unwrap();
-        let (tx, mut rx) = mpsc::channel(8);
-        broker.add_client(1, tx).await.unwrap();
-        broker
-            .subscribe(1, "_INBOX.client.1".into(), None, "inbox1".into())
-            .await
-            .unwrap();
-        broker
-            .publish(2, "_INBOX.client.1".into(), None, b"response".to_vec())
-            .await
-            .unwrap();
+    async fn request_reply_inbox_delivery_is_transient() {
+        let dir = TempDir::new().unwrap();
+        let clock = Arc::new(ManualClock::new(1_000));
+        let broker = deterministic_broker(dir.path(), clock);
+        let mut responder = TestClient::connect_durable(&broker, "responder1", 25).await;
+        let mut requester = TestClient::connect_durable(&broker, "requester1", 25).await;
 
-        let frame = tokio::time::timeout(Duration::from_secs(1), rx.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        let text = String::from_utf8(frame).unwrap();
-        assert_eq!(text, "MSG _INBOX.client.1 inbox1 8\r\nresponse\r\n");
+        responder.subscribe("service.echo", "sid1").await;
+        responder.ping_roundtrip().await;
+        requester.subscribe("_INBOX.requester.1", "inbox1").await;
+        requester.ping_roundtrip().await;
+        requester
+            .publish_with_reply("service.echo", Some("_INBOX.requester.1"), b"hello")
+            .await;
+
+        let request = responder.read_frame().await;
+        assert!(request.starts_with("HMSG service.echo sid1 _INBOX.requester.1 "));
+        assert!(request.contains("\r\nBroker-Ack: _BROKER.ACK.durable-responder1-sid1."));
+        responder.publish("_INBOX.requester.1", b"world").await;
+
+        let response = requester.read_frame().await;
+        assert_eq!(response, "MSG _INBOX.requester.1 inbox1 5\r\nworld\r\n");
         let inner = broker.inner.lock().await;
-        assert!(inner.consumers.is_empty());
-        assert!(inner.messages.is_empty());
+        assert!(inner.messages.contains_key(&1));
         assert_eq!(inner.transient_subscriptions.len(), 1);
+        assert_eq!(inner.consumers.len(), 1);
     }
 
     #[tokio::test]
-    async fn inactive_inbox_publish_is_not_retained() {
-        let dir = TestDir::new();
-        let broker = Broker::open(test_config(dir.path())).unwrap();
-        broker
-            .publish(2, "_INBOX.missing.1".into(), None, b"response".to_vec())
-            .await
-            .unwrap();
-        let inner = broker.inner.lock().await;
-        assert!(inner.consumers.is_empty());
-        assert!(inner.messages.is_empty());
-        assert!(inner.transient_subscriptions.is_empty());
-    }
+    async fn publish_without_matching_durable_consumer_is_not_retained() {
+        let dir = TempDir::new().unwrap();
+        let clock = Arc::new(ManualClock::new(1_000));
+        let broker = deterministic_broker(dir.path(), clock);
+        let mut publisher = TestClient::connect_durable(&broker, "publisher1", 25).await;
 
-    #[tokio::test]
-    async fn unacked_message_redelivers_after_timeout() {
-        let dir = TestDir::new();
-        let broker = Broker::open(test_config(dir.path())).unwrap();
-        let mut rx = durable_client(&broker, 1, "client1").await;
-        broker
-            .subscribe(1, "orders.*".into(), None, "sid1".into())
-            .await
-            .unwrap();
-        broker
-            .publish(2, "orders.created".into(), None, b"hello".to_vec())
-            .await
-            .unwrap();
-        rx.recv().await.unwrap();
-
-        tokio::time::sleep(Duration::from_millis(30)).await;
-        broker.expire_and_redeliver().await.unwrap();
-        let redelivery = tokio::time::timeout(Duration::from_secs(1), rx.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(String::from_utf8(redelivery).unwrap().contains("hello"));
+        publisher.publish("orders.created", b"hello").await;
+        publisher.ping_roundtrip().await;
+        assert!(broker.inner.lock().await.messages.is_empty());
     }
 
     #[tokio::test]
     async fn durable_queue_group_delivers_one_copy() {
-        let dir = TestDir::new();
-        let broker = Broker::open(test_config(dir.path())).unwrap();
-        let mut rx1 = durable_client(&broker, 1, "client1").await;
-        let mut rx2 = durable_client(&broker, 2, "client2").await;
-        broker
-            .subscribe(1, "orders.*".into(), Some("workers".into()), "a".into())
-            .await
-            .unwrap();
-        broker
-            .subscribe(2, "orders.*".into(), Some("workers".into()), "b".into())
-            .await
-            .unwrap();
-        broker
-            .publish(3, "orders.created".into(), None, b"hello".to_vec())
-            .await
-            .unwrap();
+        let dir = TempDir::new().unwrap();
+        let clock = Arc::new(ManualClock::new(1_000));
+        let broker = deterministic_broker(dir.path(), clock);
+        let mut first = TestClient::connect_durable(&broker, "client1", 25).await;
+        let mut second = TestClient::connect_durable(&broker, "client2", 25).await;
+        let mut publisher = TestClient::connect_durable(&broker, "publisher1", 25).await;
 
-        let first = rx1.try_recv().ok();
-        let second = rx2.try_recv().ok();
-        assert_eq!(first.is_some() as usize + second.is_some() as usize, 1);
+        first.subscribe_queue("orders.*", "workers", "a").await;
+        first.ping_roundtrip().await;
+        second.subscribe_queue("orders.*", "workers", "b").await;
+        second.ping_roundtrip().await;
+        publisher.publish("orders.created", b"hello").await;
+        publisher.ping_roundtrip().await;
+
+        let inner = broker.inner.lock().await;
+        let consumer = inner
+            .consumers
+            .get("queue-workers-6f72646572732e2a")
+            .unwrap();
+        assert_eq!(consumer.delivered, 1);
+        assert_eq!(consumer.in_flight.len(), 1);
     }
 
-    #[tokio::test]
-    async fn acked_message_does_not_redeliver_after_restart() {
-        let dir = TestDir::new();
-        {
-            let broker = Broker::open(test_config(dir.path())).unwrap();
-            let mut rx = durable_client(&broker, 1, "client1").await;
-            broker
-                .subscribe(1, "orders.*".into(), None, "sid1".into())
-                .await
-                .unwrap();
-            broker
-                .publish(2, "orders.created".into(), None, b"hello".to_vec())
-                .await
-                .unwrap();
-            let frame = String::from_utf8(rx.recv().await.unwrap()).unwrap();
-            let ack_subject = frame.split_whitespace().nth(3).unwrap().to_string();
-            broker
-                .publish(2, ack_subject, None, Vec::new())
-                .await
-                .unwrap();
-            broker.shutdown().await.unwrap();
+    impl TestClient {
+        async fn subscribe_queue(&mut self, subject: &str, queue: &str, sid: &str) {
+            self.write_line(&format!("SUB {subject} {queue} {sid}"))
+                .await;
         }
-
-        let broker = Broker::open(test_config(dir.path())).unwrap();
-        let mut rx = durable_client(&broker, 1, "client1").await;
-        broker
-            .subscribe(1, "orders.*".into(), None, "sid1".into())
-            .await
-            .unwrap();
-        assert!(rx.try_recv().is_err());
     }
 }
