@@ -80,10 +80,11 @@ Clients can connect to any node. Leaders serve the broker protocol directly;
 followers proxy raw client TCP bytes to the current leader, so TLS clients still
 complete TLS with the leader.
 
-When `http_listen` is set, `GET /status` returns JSON with `cluster_size`,
-`cluster_status`, `node_id`, `role`, and `leader_id`. Cluster status is
-`ready` after a leader is known, `forming` before leader discovery, and
-`standalone` when clustering is disabled.
+When `http_listen` is set, the broker exposes unauthenticated JSON admin
+endpoints. Bind this listener to loopback or a trusted private interface.
+`GET /cluster` reports cluster size, status, this node's role, and leader ID.
+`GET /connections` reports live client connections. `GET /subscriptions`
+reports durable consumers and transient inbox subscriptions.
 
 TLS is disabled when `tls` is `null` or omitted. To enable TLS-first client
 connections:

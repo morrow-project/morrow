@@ -391,8 +391,11 @@ struct Inner {
 
 struct Client {
     sender: mpsc::Sender<Vec<u8>>,
+    remote_addr: Option<SocketAddr>,
+    connected_at_ms: u64,
     verbose: bool,
     durable_id: Option<String>,
+    authenticated: bool,
     auth_nonce: Option<String>,
     ack_timeout_ms: u64,
     max_in_flight: usize,
@@ -435,12 +438,77 @@ struct Delivery {
 }
 
 #[derive(Debug, serde::Serialize)]
-struct StatusResponse {
+struct ClusterResponse {
     cluster_size: usize,
     cluster_status: &'static str,
     node_id: Option<u64>,
     role: &'static str,
     leader_id: Option<u64>,
+    peers: Vec<ClusterPeerResponse>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct ClusterPeerResponse {
+    node_id: u64,
+    client_addr: String,
+    raft_addr: String,
+    is_self: bool,
+    is_leader: bool,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct ConnectionsResponse {
+    count: usize,
+    connections: Vec<ConnectionResponse>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct ConnectionResponse {
+    id: u64,
+    remote_addr: Option<String>,
+    durable_id: Option<String>,
+    authenticated: bool,
+    verbose: bool,
+    connected_at_ms: u64,
+    ack_timeout_ms: u64,
+    max_in_flight: usize,
+    subscriptions: usize,
+    transient_subscriptions: usize,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct SubscriptionsResponse {
+    durable_consumers: Vec<DurableConsumerResponse>,
+    transient_subscriptions: Vec<TransientSubscriptionResponse>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct DurableConsumerResponse {
+    consumer_id: String,
+    filter_subject: String,
+    queue_group: Option<String>,
+    members: Vec<ConsumerMemberResponse>,
+    pending: usize,
+    in_flight: usize,
+    acked: usize,
+    delivered: usize,
+    ack_timeout_ms: u64,
+    max_in_flight: usize,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct ConsumerMemberResponse {
+    connection_id: u64,
+    sid: String,
+    remaining_deliveries: Option<usize>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct TransientSubscriptionResponse {
+    connection_id: u64,
+    sid: String,
+    subject: String,
+    remaining_deliveries: Option<usize>,
 }
 
 impl Broker {
@@ -540,7 +608,7 @@ impl Broker {
         self.cluster_runtime().await?.current_leader().await
     }
 
-    async fn cluster_status_response(&self) -> StatusResponse {
+    async fn cluster_response(&self) -> ClusterResponse {
         let cluster_config = self.config.cluster.as_ref();
         let cluster = self.cluster_runtime().await;
         let cluster_size = cluster
@@ -568,13 +636,37 @@ impl Broker {
         } else {
             "forming"
         };
-        StatusResponse {
+        let peers = cluster_config
+            .map(|cluster| {
+                cluster
+                    .nodes
+                    .iter()
+                    .map(|peer| ClusterPeerResponse {
+                        node_id: peer.node_id,
+                        client_addr: peer.client_addr.to_string(),
+                        raft_addr: peer.raft_addr.to_string(),
+                        is_self: Some(peer.node_id) == node_id,
+                        is_leader: Some(peer.node_id) == leader_id,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        ClusterResponse {
             cluster_size,
             cluster_status,
             node_id,
             role,
             leader_id,
+            peers,
         }
+    }
+
+    async fn connections_response(&self) -> ConnectionsResponse {
+        self.inner.lock().await.connections_response()
+    }
+
+    async fn subscriptions_response(&self) -> SubscriptionsResponse {
+        self.inner.lock().await.subscriptions_response()
     }
 
     fn spawn_http_status_listener(&self) {
@@ -629,20 +721,27 @@ impl Broker {
             .and_then(|line| std::str::from_utf8(line).ok())
             .map(str::trim_end)
             .unwrap_or("");
-        if request_line != "GET /status HTTP/1.1" && request_line != "GET /status HTTP/1.0" {
-            write_http_response(
-                &mut stream,
-                "404 Not Found",
-                "application/json",
-                br#"{"error":"not found"}"#,
-            )
-            .await?;
-            return Ok(());
+        let Some(path) = http_request_path(request_line) else {
+            return write_http_not_found(&mut stream).await;
+        };
+        match path {
+            "/cluster" => {
+                let body = serde_json::to_vec(&self.cluster_response().await)
+                    .context("serializing HTTP cluster response")?;
+                write_http_response(&mut stream, "200 OK", "application/json", &body).await
+            }
+            "/connections" => {
+                let body = serde_json::to_vec(&self.connections_response().await)
+                    .context("serializing HTTP connections response")?;
+                write_http_response(&mut stream, "200 OK", "application/json", &body).await
+            }
+            "/subscriptions" => {
+                let body = serde_json::to_vec(&self.subscriptions_response().await)
+                    .context("serializing HTTP subscriptions response")?;
+                write_http_response(&mut stream, "200 OK", "application/json", &body).await
+            }
+            _ => write_http_not_found(&mut stream).await,
         }
-
-        let body = serde_json::to_vec(&self.cluster_status_response().await)
-            .context("serializing HTTP status response")?;
-        write_http_response(&mut stream, "200 OK", "application/json", &body).await
     }
 
     #[cfg(test)]
@@ -679,6 +778,7 @@ impl Broker {
     }
 
     async fn handle_accepted(&self, stream: TcpStream) -> Result<()> {
+        let remote_addr = stream.peer_addr().ok();
         let Some(stream) = self.route_cluster_stream(stream).await? else {
             return Ok(());
         };
@@ -694,9 +794,11 @@ impl Broker {
                     .await
                     .map_err(|_| BrokerError::msg("TLS handshake timed out"))?
                     .context("accepting TLS client connection")?;
-            self.handle_client(stream).await
+            self.handle_client_with_remote_addr(stream, remote_addr)
+                .await
         } else {
-            self.handle_client(stream).await
+            self.handle_client_with_remote_addr(stream, remote_addr)
+                .await
         }
     }
 
@@ -724,14 +826,26 @@ impl Broker {
         Ok(Some(stream))
     }
 
+    #[cfg(test)]
     async fn handle_client<S>(&self, stream: S) -> Result<()>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        self.handle_client_with_remote_addr(stream, None).await
+    }
+
+    async fn handle_client_with_remote_addr<S>(
+        &self,
+        stream: S,
+        remote_addr: Option<SocketAddr>,
+    ) -> Result<()>
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
         let id = self.next_connection_id.fetch_add(1, Ordering::Relaxed);
         let (reader, mut writer) = tokio::io::split(stream);
         let (sender, mut receiver) = mpsc::channel::<Vec<u8>>(256);
-        self.add_client(id, sender).await?;
+        self.add_client(id, sender, remote_addr).await?;
         let nonce = {
             let inner = self.inner.lock().await;
             inner
@@ -814,14 +928,22 @@ impl Broker {
         }
     }
 
-    async fn add_client(&self, id: u64, sender: mpsc::Sender<Vec<u8>>) -> Result<()> {
+    async fn add_client(
+        &self,
+        id: u64,
+        sender: mpsc::Sender<Vec<u8>>,
+        remote_addr: Option<SocketAddr>,
+    ) -> Result<()> {
         let mut inner = self.inner.lock().await;
         inner.clients.insert(
             id,
             Client {
                 sender,
+                remote_addr,
+                connected_at_ms: self.hooks.clock.now_ms(),
                 verbose: self.config.verbose,
                 durable_id: None,
+                authenticated: false,
                 auth_nonce: if self.config.auth.enabled {
                     Some(auth::nonce()?)
                 } else {
@@ -869,6 +991,7 @@ impl Broker {
                     "CONNECT durable_id must match authenticated client_id"
                 );
             }
+            client.authenticated = true;
             Some(client_id)
         } else {
             durable_id
@@ -1347,6 +1470,92 @@ impl Broker {
 }
 
 impl Inner {
+    fn connections_response(&self) -> ConnectionsResponse {
+        let mut connections = self
+            .clients
+            .iter()
+            .map(|(id, client)| {
+                let subscriptions = self
+                    .consumers
+                    .values()
+                    .filter(|consumer| consumer.members.contains_key(id))
+                    .count();
+                let transient_subscriptions = self
+                    .transient_subscriptions
+                    .keys()
+                    .filter(|(connection_id, _)| connection_id == id)
+                    .count();
+                ConnectionResponse {
+                    id: *id,
+                    remote_addr: client.remote_addr.map(|addr| addr.to_string()),
+                    durable_id: client.durable_id.clone(),
+                    authenticated: client.authenticated,
+                    verbose: client.verbose,
+                    connected_at_ms: client.connected_at_ms,
+                    ack_timeout_ms: client.ack_timeout_ms,
+                    max_in_flight: client.max_in_flight,
+                    subscriptions,
+                    transient_subscriptions,
+                }
+            })
+            .collect::<Vec<_>>();
+        connections.sort_by_key(|connection| connection.id);
+        ConnectionsResponse {
+            count: connections.len(),
+            connections,
+        }
+    }
+
+    fn subscriptions_response(&self) -> SubscriptionsResponse {
+        let mut durable_consumers = self
+            .consumers
+            .iter()
+            .map(|(consumer_id, consumer)| {
+                let mut members = consumer
+                    .members
+                    .iter()
+                    .map(|(connection_id, member)| ConsumerMemberResponse {
+                        connection_id: *connection_id,
+                        sid: member.sid.clone(),
+                        remaining_deliveries: member.remaining_deliveries,
+                    })
+                    .collect::<Vec<_>>();
+                members.sort_by_key(|member| (member.connection_id, member.sid.clone()));
+                DurableConsumerResponse {
+                    consumer_id: consumer_id.clone(),
+                    filter_subject: consumer.record.filter_subject.clone(),
+                    queue_group: consumer.record.queue_group.clone(),
+                    members,
+                    pending: consumer.pending.len(),
+                    in_flight: consumer.in_flight.len(),
+                    acked: consumer.acked.len(),
+                    delivered: consumer.delivered,
+                    ack_timeout_ms: consumer.record.ack_timeout_ms,
+                    max_in_flight: consumer.record.max_in_flight,
+                }
+            })
+            .collect::<Vec<_>>();
+        durable_consumers.sort_by(|left, right| left.consumer_id.cmp(&right.consumer_id));
+        let mut transient_subscriptions = self
+            .transient_subscriptions
+            .iter()
+            .map(
+                |((connection_id, _), subscription)| TransientSubscriptionResponse {
+                    connection_id: *connection_id,
+                    sid: subscription.sid.clone(),
+                    subject: subscription.subject.clone(),
+                    remaining_deliveries: subscription.remaining_deliveries,
+                },
+            )
+            .collect::<Vec<_>>();
+        transient_subscriptions
+            .sort_by_key(|subscription| (subscription.connection_id, subscription.sid.clone()));
+        SubscriptionsResponse {
+            durable_consumers,
+            transient_subscriptions,
+        }
+    }
+
     fn upsert_consumer(&mut self, record: ConsumerRecord) -> &mut Consumer {
         let consumer_id = record.consumer_id.clone();
         let consumer = self
@@ -1650,6 +1859,31 @@ fn decrement_remaining(remaining: &mut Option<usize>) -> Option<bool> {
     let remaining = remaining.as_mut()?;
     *remaining = remaining.saturating_sub(1);
     Some(*remaining == 0)
+}
+
+fn http_request_path(request_line: &str) -> Option<&str> {
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next()?;
+    let path = parts.next()?;
+    let version = parts.next()?;
+    if parts.next().is_some() || method != "GET" || (version != "HTTP/1.1" && version != "HTTP/1.0")
+    {
+        return None;
+    }
+    Some(path)
+}
+
+async fn write_http_not_found<W>(writer: &mut W) -> Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    write_http_response(
+        writer,
+        "404 Not Found",
+        "application/json",
+        br#"{"error":"not found"}"#,
+    )
+    .await
 }
 
 async fn write_http_response<W>(
@@ -2088,6 +2322,25 @@ mod tests {
         frame.split_whitespace().nth(3).unwrap().to_string()
     }
 
+    async fn http_request(broker: &Broker, path: &str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let broker = broker.clone();
+        let server_task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            broker.handle_http_status(stream).await.unwrap();
+        });
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client
+            .write_all(format!("GET {path} HTTP/1.1\r\nhost: localhost\r\n\r\n").as_bytes())
+            .await
+            .unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).await.unwrap();
+        server_task.await.unwrap();
+        String::from_utf8(response).unwrap()
+    }
+
     #[tokio::test]
     async fn auth_enabled_generates_fresh_nonce_per_connection() {
         let dir = TempDir::new().unwrap();
@@ -2097,8 +2350,8 @@ mod tests {
         let (tx1, _rx1) = mpsc::channel(8);
         let (tx2, _rx2) = mpsc::channel(8);
 
-        broker.add_client(1, tx1).await.unwrap();
-        broker.add_client(2, tx2).await.unwrap();
+        broker.add_client(1, tx1, None).await.unwrap();
+        broker.add_client(2, tx2, None).await.unwrap();
 
         let inner = broker.inner.lock().await;
         let first = inner.clients.get(&1).unwrap().auth_nonce.as_ref().unwrap();
@@ -2521,38 +2774,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn status_reports_standalone_node() {
+    async fn http_cluster_endpoint_reports_standalone_node() {
         let scenario = Scenario::new();
 
-        let status = scenario.broker().cluster_status_response().await;
+        let response = http_request(scenario.broker(), "/cluster").await;
 
-        assert_eq!(status.cluster_size, 1);
-        assert_eq!(status.cluster_status, "standalone");
-        assert_eq!(status.node_id, None);
-        assert_eq!(status.role, "standalone");
-        assert_eq!(status.leader_id, None);
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(response.contains("\"cluster_size\":1"));
+        assert!(response.contains("\"cluster_status\":\"standalone\""));
+        assert!(response.contains("\"node_id\":null"));
+        assert!(response.contains("\"role\":\"standalone\""));
+        assert!(response.contains("\"leader_id\":null"));
+        assert!(response.contains("\"peers\":[]"));
     }
 
     #[tokio::test]
-    async fn http_status_endpoint_returns_status_json() {
+    async fn http_cluster_endpoint_reports_cluster_role_and_leader() {
         let scenario = Scenario::new_fake_cluster_local_node(3, 1, Some(1));
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let broker = scenario.broker().clone();
-        let server_task = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
-            broker.handle_http_status(stream).await.unwrap();
-        });
 
-        let mut client = TcpStream::connect(addr).await.unwrap();
-        client
-            .write_all(b"GET /status HTTP/1.1\r\nhost: localhost\r\n\r\n")
-            .await
-            .unwrap();
-        let mut response = Vec::new();
-        client.read_to_end(&mut response).await.unwrap();
-        server_task.await.unwrap();
-        let response = String::from_utf8(response).unwrap();
+        let response = http_request(scenario.broker(), "/cluster").await;
 
         assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
         assert!(response.contains("\"cluster_size\":3"));
@@ -2563,10 +2803,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn status_reports_cluster_role_and_leader() {
+    async fn cluster_response_reports_follower_role_and_leader() {
         let scenario = Scenario::new_fake_cluster_local_node(3, 2, Some(1));
 
-        let status = scenario.broker().cluster_status_response().await;
+        let status = scenario.broker().cluster_response().await;
 
         assert_eq!(status.cluster_size, 3);
         assert_eq!(status.cluster_status, "ready");
@@ -2576,16 +2816,82 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn status_reports_cluster_forming_without_leader() {
+    async fn cluster_response_reports_forming_without_leader() {
         let scenario = Scenario::new_fake_cluster_local_node(3, 2, None);
 
-        let status = scenario.broker().cluster_status_response().await;
+        let status = scenario.broker().cluster_response().await;
 
         assert_eq!(status.cluster_size, 3);
         assert_eq!(status.cluster_status, "forming");
         assert_eq!(status.node_id, Some(2));
         assert_eq!(status.role, "unknown");
         assert_eq!(status.leader_id, None);
+    }
+
+    #[tokio::test]
+    async fn http_connections_endpoint_reports_live_client_metadata() {
+        let scenario = Scenario::new();
+        let mut client = scenario.connect_durable("client1", 25).await;
+        client.subscribe("orders.*", "sid1").await;
+        client.subscribe("_INBOX.client1.1", "inbox1").await;
+        client.ping_roundtrip().await;
+
+        let response = http_request(scenario.broker(), "/connections").await;
+
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(response.contains("\"count\":1"));
+        assert!(response.contains("\"id\":1"));
+        assert!(response.contains("\"remote_addr\":null"));
+        assert!(response.contains("\"durable_id\":\"client1\""));
+        assert!(response.contains("\"authenticated\":false"));
+        assert!(response.contains("\"connected_at_ms\":1000"));
+        assert!(response.contains("\"ack_timeout_ms\":25"));
+        assert!(response.contains("\"max_in_flight\":1024"));
+        assert!(response.contains("\"subscriptions\":1"));
+        assert!(response.contains("\"transient_subscriptions\":1"));
+    }
+
+    #[tokio::test]
+    async fn http_subscriptions_endpoint_reports_durable_and_transient_state() {
+        let scenario = Scenario::new();
+        let mut first = scenario.connect_durable("client1", 25).await;
+        let mut second = scenario.connect_durable("client2", 50).await;
+        first.subscribe("orders.*", "sid1").await;
+        first.subscribe("_INBOX.client1.1", "inbox1").await;
+        second
+            .subscribe_queue("orders.*", "workers", "worker1")
+            .await;
+        first.ping_roundtrip().await;
+        second.ping_roundtrip().await;
+
+        let response = http_request(scenario.broker(), "/subscriptions").await;
+
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(response.contains("\"durable_consumers\""));
+        assert!(response.contains("\"consumer_id\":\"durable-client1-sid1\""));
+        assert!(response.contains("\"filter_subject\":\"orders.*\""));
+        assert!(response.contains("\"queue_group\":null"));
+        assert!(response.contains("\"connection_id\":1"));
+        assert!(response.contains("\"sid\":\"sid1\""));
+        assert!(response.contains("\"consumer_id\":\"queue-workers-6f72646572732e2a\""));
+        assert!(response.contains("\"queue_group\":\"workers\""));
+        assert!(response.contains("\"sid\":\"worker1\""));
+        assert!(response.contains("\"transient_subscriptions\""));
+        assert!(response.contains("\"subject\":\"_INBOX.client1.1\""));
+        assert!(response.contains("\"sid\":\"inbox1\""));
+    }
+
+    #[tokio::test]
+    async fn http_status_and_unknown_paths_return_not_found() {
+        let scenario = Scenario::new();
+
+        let status = http_request(scenario.broker(), "/status").await;
+        let unknown = http_request(scenario.broker(), "/nope").await;
+
+        assert!(status.starts_with("HTTP/1.1 404 Not Found\r\n"));
+        assert!(status.ends_with("{\"error\":\"not found\"}"));
+        assert!(unknown.starts_with("HTTP/1.1 404 Not Found\r\n"));
+        assert!(unknown.ends_with("{\"error\":\"not found\"}"));
     }
 
     #[tokio::test]
