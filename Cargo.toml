@@ -20,8 +20,10 @@ server = { path = "crates/server" }
 crc32fast = { version = "1.5.0", default-features = false, features = ["std"] }
 ed25519-dalek = { version = "2.2.0", default-features = false, features = ["alloc"] }
 getrandom = { version = "0.3.4", default-features = false, features = ["std"] }
+openraft = { version = "=0.9.24", default-features = false, features = ["generic-snapshot-data", "serde", "storage-v2"] }
 rustls = { version = "0.23.40", default-features = false, features = ["aws_lc_rs", "std"] }
 rustls-pemfile = { version = "2.2.0", default-features = false, features = ["std"] }
+serde = { version = "1.0.228", default-features = false, features = ["derive", "std"] }
 serde_json = { version = "1.0.150", default-features = false, features = ["std"] }
 tokio = { version = "1.52.3", default-features = false, features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-rustls = { version = "0.26.4", default-features = false }

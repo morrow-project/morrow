@@ -19,6 +19,7 @@ pub struct Config {
     pub verbose: bool,
     pub tls: Option<TlsConfig>,
     pub auth: AuthConfig,
+    pub cluster: Option<ClusterConfig>,
 }
 
 #[derive(Debug, Clone)]
@@ -32,6 +33,27 @@ pub struct TlsConfig {
 pub struct AuthConfig {
     pub enabled: bool,
     pub clients: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ClusterConfig {
+    pub enabled: bool,
+    pub node_id: u64,
+    pub raft_listen: SocketAddr,
+    pub raft_dir: PathBuf,
+    pub bootstrap: bool,
+    pub nodes: Vec<ClusterNodeConfig>,
+    pub election_timeout_min_ms: u64,
+    pub election_timeout_max_ms: u64,
+    pub heartbeat_interval_ms: u64,
+    pub snapshot_threshold: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClusterNodeConfig {
+    pub node_id: u64,
+    pub raft_addr: SocketAddr,
+    pub client_addr: SocketAddr,
 }
 
 impl Config {
@@ -71,6 +93,7 @@ impl Config {
         let verbose = get_bool(value, "verbose")?.unwrap_or(false);
         let tls = get_tls_config(value)?;
         let auth = get_auth_config(value)?;
+        let cluster = get_cluster_config(value)?;
 
         let config = Self {
             listen,
@@ -82,6 +105,7 @@ impl Config {
             verbose,
             tls,
             auth,
+            cluster,
         };
         config.validate()?;
         Ok(config)
@@ -103,9 +127,68 @@ impl Config {
         if let Some(tls) = &self.tls {
             tls.validate()?;
         }
+        if let Some(cluster) = &self.cluster {
+            cluster.validate()?;
+            std::fs::create_dir_all(&cluster.raft_dir).with_context(|| {
+                format!("creating Raft directory {}", cluster.raft_dir.display())
+            })?;
+        }
         std::fs::create_dir_all(&self.wal_dir)
             .with_context(|| format!("creating WAL directory {}", self.wal_dir.display()))?;
         Ok(())
+    }
+}
+
+impl ClusterConfig {
+    fn validate(&self) -> Result<()> {
+        crate::broker_ensure!(
+            self.enabled,
+            "cluster.enabled must be true when cluster is present"
+        );
+        crate::broker_ensure!(
+            self.node_id > 0,
+            "cluster.node_id must be greater than zero"
+        );
+        crate::broker_ensure!(
+            self.heartbeat_interval_ms > 0,
+            "cluster.heartbeat_interval_ms must be greater than zero"
+        );
+        crate::broker_ensure!(
+            self.election_timeout_min_ms > self.heartbeat_interval_ms,
+            "cluster.election_timeout_min_ms must be greater than heartbeat_interval_ms"
+        );
+        crate::broker_ensure!(
+            self.election_timeout_max_ms > self.election_timeout_min_ms,
+            "cluster.election_timeout_max_ms must be greater than election_timeout_min_ms"
+        );
+        crate::broker_ensure!(
+            self.snapshot_threshold > 0,
+            "cluster.snapshot_threshold must be greater than zero"
+        );
+        crate::broker_ensure!(
+            !self.nodes.is_empty(),
+            "cluster.nodes must contain at least one node"
+        );
+
+        let mut ids = std::collections::HashSet::new();
+        let mut has_self = false;
+        for node in &self.nodes {
+            crate::broker_ensure!(
+                node.node_id > 0,
+                "cluster.nodes[].node_id must be greater than zero"
+            );
+            crate::broker_ensure!(
+                ids.insert(node.node_id),
+                "cluster.nodes contains duplicate node_id"
+            );
+            has_self |= node.node_id == self.node_id;
+        }
+        crate::broker_ensure!(has_self, "cluster.node_id must be present in cluster.nodes");
+        Ok(())
+    }
+
+    pub fn self_node(&self) -> Option<&ClusterNodeConfig> {
+        self.nodes.iter().find(|node| node.node_id == self.node_id)
     }
 }
 
@@ -228,6 +311,89 @@ fn get_tls_config(value: &serde_json::Value) -> Result<Option<TlsConfig>> {
     }))
 }
 
+fn get_cluster_config(value: &serde_json::Value) -> Result<Option<ClusterConfig>> {
+    let Some(cluster) = value.get("cluster") else {
+        return Ok(None);
+    };
+    if cluster.is_null() {
+        return Ok(None);
+    }
+    let serde_json::Value::Object(_) = cluster else {
+        return Err(BrokerError::msg("config field cluster must be an object"));
+    };
+    let enabled = get_bool(cluster, "enabled")?.unwrap_or(false);
+    if !enabled {
+        return Ok(None);
+    }
+    let node_id = get_u64(cluster, "node_id")?
+        .ok_or_else(|| BrokerError::msg("config field cluster.node_id is required"))?;
+    let raft_listen = get_string(cluster, "raft_listen")?
+        .ok_or_else(|| BrokerError::msg("config field cluster.raft_listen is required"))?
+        .parse()
+        .context("config field cluster.raft_listen must be a socket address")?;
+    let raft_dir = PathBuf::from(
+        get_string(cluster, "raft_dir")?
+            .ok_or_else(|| BrokerError::msg("config field cluster.raft_dir is required"))?,
+    );
+    let bootstrap = get_bool(cluster, "bootstrap")?.unwrap_or(false);
+    let election_timeout_min_ms = get_u64(cluster, "election_timeout_min_ms")?.unwrap_or(150);
+    let election_timeout_max_ms = get_u64(cluster, "election_timeout_max_ms")?.unwrap_or(300);
+    let heartbeat_interval_ms = get_u64(cluster, "heartbeat_interval_ms")?.unwrap_or(50);
+    let snapshot_threshold = get_u64(cluster, "snapshot_threshold")?.unwrap_or(10_000);
+    let nodes = get_cluster_nodes(cluster)?;
+    let config = ClusterConfig {
+        enabled,
+        node_id,
+        raft_listen,
+        raft_dir,
+        bootstrap,
+        nodes,
+        election_timeout_min_ms,
+        election_timeout_max_ms,
+        heartbeat_interval_ms,
+        snapshot_threshold,
+    };
+    config.validate()?;
+    Ok(Some(config))
+}
+
+fn get_cluster_nodes(value: &serde_json::Value) -> Result<Vec<ClusterNodeConfig>> {
+    let nodes = value
+        .get("nodes")
+        .ok_or_else(|| BrokerError::msg("config field cluster.nodes is required"))?;
+    let serde_json::Value::Array(nodes) = nodes else {
+        return Err(BrokerError::msg(
+            "config field cluster.nodes must be an array",
+        ));
+    };
+    let mut out = Vec::with_capacity(nodes.len());
+    for node in nodes {
+        let serde_json::Value::Object(_) = node else {
+            return Err(BrokerError::msg(
+                "config field cluster.nodes must contain only objects",
+            ));
+        };
+        let node_id = get_u64(node, "node_id")?
+            .ok_or_else(|| BrokerError::msg("config field cluster.nodes[].node_id is required"))?;
+        let raft_addr = get_string(node, "raft_addr")?
+            .ok_or_else(|| BrokerError::msg("config field cluster.nodes[].raft_addr is required"))?
+            .parse()
+            .context("config field cluster.nodes[].raft_addr must be a socket address")?;
+        let client_addr = get_string(node, "client_addr")?
+            .ok_or_else(|| {
+                BrokerError::msg("config field cluster.nodes[].client_addr is required")
+            })?
+            .parse()
+            .context("config field cluster.nodes[].client_addr must be a socket address")?;
+        out.push(ClusterNodeConfig {
+            node_id,
+            raft_addr,
+            client_addr,
+        });
+    }
+    Ok(out)
+}
+
 impl From<OsString> for BrokerError {
     fn from(value: OsString) -> Self {
         BrokerError::msg(format!("invalid argument {:?}", value))
@@ -258,6 +424,7 @@ mod tests {
         assert!(config.verbose);
         assert!(config.tls.is_none());
         assert!(!config.auth.enabled);
+        assert!(config.cluster.is_none());
     }
 
     #[test]
@@ -284,6 +451,52 @@ mod tests {
         assert_eq!(tls.cert_file, PathBuf::from("./server-cert.pem"));
         assert_eq!(tls.key_file, PathBuf::from("./server-key.pem"));
         assert_eq!(tls.handshake_timeout_ms, 5000);
+    }
+
+    #[test]
+    fn parses_cluster_config() {
+        let value = serde_json::json!({
+            "wal_dir": "./target/test-wal-cluster-config",
+            "cluster": {
+                "enabled": true,
+                "node_id": 1,
+                "raft_listen": "127.0.0.1:5221",
+                "raft_dir": "./target/test-wal-cluster-config/raft",
+                "bootstrap": true,
+                "nodes": [
+                    {"node_id": 1, "raft_addr": "127.0.0.1:5221", "client_addr": "127.0.0.1:4221"},
+                    {"node_id": 2, "raft_addr": "127.0.0.1:5222", "client_addr": "127.0.0.1:4222"}
+                ],
+                "election_timeout_min_ms": 200,
+                "election_timeout_max_ms": 400,
+                "heartbeat_interval_ms": 50,
+                "snapshot_threshold": 100
+            }
+        });
+
+        let config = Config::from_json(&value).unwrap();
+        let cluster = config.cluster.unwrap();
+        assert_eq!(cluster.node_id, 1);
+        assert_eq!(cluster.nodes.len(), 2);
+        assert!(cluster.bootstrap);
+    }
+
+    #[test]
+    fn rejects_cluster_missing_self_node() {
+        let err = Config::from_json(&serde_json::json!({
+            "wal_dir": "./target/test-wal-cluster-missing-self",
+            "cluster": {
+                "enabled": true,
+                "node_id": 3,
+                "raft_listen": "127.0.0.1:5221",
+                "raft_dir": "./target/test-wal-cluster-missing-self/raft",
+                "nodes": [
+                    {"node_id": 1, "raft_addr": "127.0.0.1:5221", "client_addr": "127.0.0.1:4221"}
+                ]
+            }
+        }))
+        .unwrap_err();
+        assert!(err.to_string().contains("cluster.node_id"));
     }
 
     #[test]

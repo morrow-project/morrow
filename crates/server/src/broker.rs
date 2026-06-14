@@ -19,6 +19,7 @@ use protocol::{AckSubject, Command, ConnectAuth, auth, subject};
 use crate::{
     config::Config,
     error::{BrokerError, Result, ResultExt},
+    raft::{BrokerCommand, DurableState, RaftRuntime, proxy_to_leader},
     wal::{ConsumerRecord, PublishRecord, ReplayedConsumer, Wal},
 };
 
@@ -32,6 +33,7 @@ pub struct Broker {
     next_connection_id: Arc<AtomicU64>,
     config: Config,
     tls_acceptor: Option<TlsAcceptor>,
+    cluster: Arc<Mutex<Option<RaftRuntime>>>,
 }
 
 struct Inner {
@@ -105,6 +107,7 @@ impl Broker {
             next_connection_id: Arc::new(AtomicU64::new(1)),
             config,
             tls_acceptor,
+            cluster: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -120,6 +123,7 @@ impl Broker {
     }
 
     async fn serve_inner(self, listener: TcpListener, handle_shutdown: bool) -> Result<()> {
+        self.start_cluster().await?;
         let redeliver = self.clone();
         tokio::spawn(async move {
             redeliver.redelivery_loop().await;
@@ -153,6 +157,10 @@ impl Broker {
         Ok(())
     }
 
+    pub async fn cluster_leader(&self) -> Option<u64> {
+        self.cluster_runtime().await?.current_leader().await
+    }
+
     fn spawn_accepted(&self, stream: TcpStream) {
         let broker = self.clone();
         tokio::spawn(async move {
@@ -163,6 +171,22 @@ impl Broker {
     }
 
     async fn handle_accepted(&self, stream: TcpStream) -> Result<()> {
+        if let Some(cluster) = self.cluster_runtime().await {
+            if !cluster.is_leader().await {
+                if let Some(leader) = cluster.leader_client_addr().await {
+                    return proxy_to_leader(stream, leader).await;
+                }
+                if cluster.tls_enabled() {
+                    return Ok(());
+                }
+                let mut stream = stream;
+                stream
+                    .write_all(&protocol::err("no known leader"))
+                    .await
+                    .context("writing no-leader error")?;
+                return Ok(());
+            }
+        }
         if let Some(acceptor) = &self.tls_acceptor {
             let timeout_ms = self
                 .config
@@ -361,7 +385,7 @@ impl Broker {
             protocol::validate_identifier("queue group", queue)?;
         }
 
-        let should_deliver = {
+        let durable_record = {
             let mut inner = self.inner.lock().await;
             if is_inbox_subscription(&sub_subject) {
                 crate::broker_ensure!(
@@ -379,7 +403,7 @@ impl Broker {
                         sid,
                     },
                 );
-                false
+                None
             } else {
                 let client = inner
                     .clients
@@ -394,30 +418,31 @@ impl Broker {
                         ack_timeout_ms: client.ack_timeout_ms,
                         max_in_flight: client.max_in_flight,
                     };
-                    inner.wal.append_consumer_upsert(&record)?;
-                    inner.wal.flush_due()?;
-                    let consumer = inner
-                        .consumers
-                        .entry(consumer_id)
-                        .or_insert_with(|| Consumer {
-                            record: record.clone(),
-                            members: HashMap::new(),
-                            pending: BTreeSet::new(),
-                            pending_attempts: HashMap::new(),
-                            in_flight: HashMap::new(),
-                            acked: HashSet::new(),
-                            delivered: 0,
-                        });
-                    consumer.record = record;
-                    consumer.members.insert(connection_id, sid);
-                    true
+                    Some((consumer_id, record, sid))
                 } else {
                     crate::broker_bail!("CONNECT durable_id is required before SUB")
                 }
             }
         };
 
-        if should_deliver {
+        if let Some((_consumer_id, record, sid)) = durable_record {
+            if let Some(cluster) = self.cluster_runtime().await {
+                cluster
+                    .client_write(BrokerCommand::ConsumerUpsert {
+                        record: record.clone(),
+                    })
+                    .await?;
+                self.sync_from_cluster(&cluster).await;
+            } else {
+                let mut inner = self.inner.lock().await;
+                inner.wal.append_consumer_upsert(&record)?;
+                inner.wal.flush_due()?;
+                inner.upsert_consumer(record.clone());
+            }
+            let mut inner = self.inner.lock().await;
+            let consumer = inner.upsert_consumer(record);
+            consumer.members.insert(connection_id, sid);
+            drop(inner);
             self.deliver_pending().await?;
         }
         Ok(())
@@ -506,6 +531,30 @@ impl Broker {
             return Ok(());
         }
 
+        if let Some(cluster) = self.cluster_runtime().await {
+            let verbose = {
+                let inner = self.inner.lock().await;
+                inner
+                    .clients
+                    .get(&publisher_id)
+                    .map(|client| client.verbose)
+                    .unwrap_or(self.config.verbose)
+            };
+            cluster
+                .client_write(BrokerCommand::Publish {
+                    subject: subject_name,
+                    reply_to,
+                    payload,
+                })
+                .await?;
+            self.sync_from_cluster(&cluster).await;
+            self.deliver_pending().await?;
+            if verbose {
+                self.send_to(publisher_id, protocol::ok().to_vec()).await?;
+            }
+            return Ok(());
+        }
+
         let (has_durable, verbose) = {
             let mut inner = self.inner.lock().await;
             let verbose = inner
@@ -558,6 +607,17 @@ impl Broker {
     }
 
     async fn ack(&self, ack: AckSubject) -> Result<()> {
+        if let Some(cluster) = self.cluster_runtime().await {
+            cluster
+                .client_write(BrokerCommand::Ack {
+                    seq: ack.seq,
+                    consumer_id: ack.consumer_id,
+                    delivery_id: ack.delivery_id,
+                })
+                .await?;
+            self.sync_from_cluster(&cluster).await;
+            return Ok(());
+        }
         let mut inner = self.inner.lock().await;
         let mut should_cleanup = false;
         let valid = inner
@@ -599,6 +659,9 @@ impl Broker {
     }
 
     async fn deliver_pending(&self) -> Result<()> {
+        if let Some(cluster) = self.cluster_runtime().await {
+            return self.deliver_pending_clustered(cluster).await;
+        }
         let deliveries = {
             let mut inner = self.inner.lock().await;
             inner.prepare_durable_deliveries()?
@@ -622,6 +685,9 @@ impl Broker {
     }
 
     async fn expire_and_redeliver(&self) -> Result<()> {
+        if self.cluster_runtime().await.is_some() {
+            return self.deliver_pending().await;
+        }
         {
             let mut inner = self.inner.lock().await;
             let now = now_ms();
@@ -671,9 +737,83 @@ impl Broker {
         }
         Ok(())
     }
+
+    async fn start_cluster(&self) -> Result<()> {
+        let Some(cluster_config) = &self.config.cluster else {
+            return Ok(());
+        };
+        let runtime = RaftRuntime::open(cluster_config, self.tls_acceptor.is_some()).await?;
+        runtime.spawn_listener(cluster_config.raft_listen);
+        self.sync_from_cluster(&runtime).await;
+        *self.cluster.lock().await = Some(runtime);
+        Ok(())
+    }
+
+    async fn cluster_runtime(&self) -> Option<RaftRuntime> {
+        self.cluster.lock().await.clone()
+    }
+
+    async fn sync_from_cluster(&self, cluster: &RaftRuntime) {
+        let state = cluster.durable_state();
+        let mut inner = self.inner.lock().await;
+        inner.sync_durable_state(state);
+    }
+
+    async fn deliver_pending_clustered(&self, cluster: RaftRuntime) -> Result<()> {
+        loop {
+            let candidate = {
+                let inner = self.inner.lock().await;
+                inner.next_cluster_delivery(now_ms())
+            };
+            let Some(candidate) = candidate else {
+                break;
+            };
+            let response = cluster
+                .client_write(BrokerCommand::DeliveryAttempt {
+                    seq: candidate.seq,
+                    consumer_id: candidate.consumer_id.clone(),
+                    deadline_ms: candidate.deadline_ms,
+                    attempt: candidate.attempt,
+                })
+                .await?;
+            self.sync_from_cluster(&cluster).await;
+            let crate::raft::BrokerResponse::DeliveryAttempt {
+                record: Some(record),
+            } = response
+            else {
+                continue;
+            };
+            let delivery = {
+                let mut inner = self.inner.lock().await;
+                inner.delivery_for_record(&record, candidate.connection_id, &candidate.sid)
+            };
+            if let Some(delivery) = delivery {
+                let _ = delivery.sender.send(delivery.frame).await;
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Inner {
+    fn upsert_consumer(&mut self, record: ConsumerRecord) -> &mut Consumer {
+        let consumer_id = record.consumer_id.clone();
+        let consumer = self
+            .consumers
+            .entry(consumer_id)
+            .or_insert_with(|| Consumer {
+                record: record.clone(),
+                members: HashMap::new(),
+                pending: BTreeSet::new(),
+                pending_attempts: HashMap::new(),
+                in_flight: HashMap::new(),
+                acked: HashSet::new(),
+                delivered: 0,
+            });
+        consumer.record = record;
+        consumer
+    }
+
     fn prepare_transient_deliveries(
         &self,
         subject_name: &str,
@@ -775,6 +915,113 @@ impl Inner {
         Some((seq, *connection_id, sid.clone(), attempt, deadline_ms))
     }
 
+    fn next_cluster_delivery(&self, now: u64) -> Option<ClusterDeliveryCandidate> {
+        for consumer_id in self.consumers.keys() {
+            let consumer = self.consumers.get(consumer_id)?;
+            if consumer.in_flight.len() >= consumer.record.max_in_flight
+                || consumer.members.is_empty()
+            {
+                continue;
+            }
+            let seq = consumer.pending.iter().next().copied().or_else(|| {
+                consumer
+                    .in_flight
+                    .iter()
+                    .filter(|(_, in_flight)| in_flight.deadline_ms <= now)
+                    .map(|(seq, _)| *seq)
+                    .min()
+            })?;
+            let (connection_id, sid) = consumer
+                .members
+                .iter()
+                .filter(|(connection_id, _)| self.clients.contains_key(connection_id))
+                .min_by_key(|(connection_id, _)| **connection_id)?;
+            let attempt = consumer
+                .in_flight
+                .get(&seq)
+                .map(|in_flight| in_flight.attempt.saturating_add(1))
+                .or_else(|| consumer.pending_attempts.get(&seq).copied())
+                .unwrap_or(1);
+            let deadline_ms = now.saturating_add(consumer.record.ack_timeout_ms);
+            return Some(ClusterDeliveryCandidate {
+                consumer_id: consumer_id.clone(),
+                seq,
+                connection_id: *connection_id,
+                sid: sid.clone(),
+                attempt,
+                deadline_ms,
+            });
+        }
+        None
+    }
+
+    fn delivery_for_record(
+        &mut self,
+        record: &crate::wal::DeliveryAttemptRecord,
+        connection_id: u64,
+        sid: &str,
+    ) -> Option<Delivery> {
+        let message = self.messages.get(&record.seq)?.clone();
+        let client = self.clients.get(&connection_id)?;
+        if let Some(consumer) = self.consumers.get_mut(&record.consumer_id) {
+            consumer.delivered += 1;
+        }
+        let ack_subject =
+            protocol::ack_subject(&record.consumer_id, record.seq, record.delivery_id);
+        let frame = match message.reply_to.as_deref() {
+            Some(reply_to) => protocol::hmsg(
+                &message.subject,
+                sid,
+                Some(reply_to),
+                &[("Broker-Ack", &ack_subject)],
+                &message.payload,
+            ),
+            None => protocol::msg(&message.subject, sid, Some(&ack_subject), &message.payload),
+        };
+        Some(Delivery {
+            sender: client.sender.clone(),
+            frame,
+        })
+    }
+
+    fn sync_durable_state(&mut self, state: DurableState) {
+        self.messages = state.messages;
+        let mut next = HashMap::new();
+        for (consumer_id, durable) in state.consumers {
+            let (members, delivered) = self
+                .consumers
+                .remove(&consumer_id)
+                .map(|consumer| (consumer.members, consumer.delivered))
+                .unwrap_or_default();
+            next.insert(
+                consumer_id,
+                Consumer {
+                    record: durable.record,
+                    members,
+                    pending: durable.pending,
+                    pending_attempts: durable.pending_attempts,
+                    in_flight: durable
+                        .in_flight
+                        .into_iter()
+                        .map(|(seq, attempt)| {
+                            (
+                                seq,
+                                InFlight {
+                                    delivery_id: attempt.delivery_id,
+                                    deadline_ms: attempt.deadline_ms,
+                                    attempt: attempt.attempt,
+                                },
+                            )
+                        })
+                        .collect(),
+                    acked: durable.acked,
+                    delivered,
+                },
+            );
+        }
+        self.consumers = next;
+    }
+
     fn cleanup_acked_messages(&mut self) {
         let removable: Vec<_> = self
             .messages
@@ -800,6 +1047,15 @@ impl Inner {
             self.messages.remove(&seq);
         }
     }
+}
+
+struct ClusterDeliveryCandidate {
+    consumer_id: String,
+    seq: u64,
+    connection_id: u64,
+    sid: String,
+    attempt: u32,
+    deadline_ms: u64,
 }
 
 impl Consumer {
@@ -914,6 +1170,7 @@ mod tests {
             verbose: false,
             tls: None,
             auth: Default::default(),
+            cluster: None,
         }
     }
 

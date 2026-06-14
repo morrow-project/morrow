@@ -1,6 +1,7 @@
 pub mod broker;
 pub mod config;
 pub mod error;
+pub mod raft;
 pub mod tls;
 pub mod wal;
 

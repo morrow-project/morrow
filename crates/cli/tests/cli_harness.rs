@@ -288,6 +288,7 @@ impl Harness {
             verbose: false,
             tls,
             auth,
+            cluster: None,
         };
         let broker = Broker::open(config).unwrap();
         let server = broker.clone();

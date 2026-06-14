@@ -1,9 +1,10 @@
 # Broker
 
-A single-node, WAL-backed broker with a NATS-style text protocol. Durable
-consumers are the core primitive: clients must declare a durable identity before
-subscribing, delivered messages require explicit acks, and unacked messages are
-redelivered after their ack timeout.
+A WAL-backed broker with a NATS-style text protocol. Durable consumers are the
+core primitive: clients must declare a durable identity before subscribing,
+delivered messages require explicit acks, and unacked messages are redelivered
+after their ack timeout. By default the broker runs as a single node; clustered
+mode uses OpenRaft for replicated durability and leader election.
 
 ## Configuration
 
@@ -24,7 +25,8 @@ cp broker.json.example broker.json
   "auth": {
     "enabled": false,
     "clients": []
-  }
+  },
+  "cluster": null
 }
 ```
 
@@ -38,8 +40,43 @@ Fields:
   `CONNECT`.
 - `tls`: optional TLS-first listener config.
 - `auth`: optional Ed25519 challenge-response authentication config.
+- `cluster`: optional OpenRaft cluster config.
 
 If a field is omitted, the value shown above is used.
+
+When `cluster` is `null` or omitted, the broker uses the local WAL directly.
+When `cluster.enabled` is true, Raft quorum commit becomes the durability
+boundary for durable consumers, publishes, delivery attempts, and ACKs:
+
+```json
+{
+  "listen": "127.0.0.1:4221",
+  "wal_dir": "./broker-wal/node1",
+  "cluster": {
+    "enabled": true,
+    "node_id": 1,
+    "raft_listen": "127.0.0.1:5221",
+    "raft_dir": "./broker-wal/node1/raft",
+    "bootstrap": true,
+    "nodes": [
+      {"node_id": 1, "raft_addr": "127.0.0.1:5221", "client_addr": "127.0.0.1:4221"},
+      {"node_id": 2, "raft_addr": "127.0.0.1:5222", "client_addr": "127.0.0.1:4222"},
+      {"node_id": 3, "raft_addr": "127.0.0.1:5223", "client_addr": "127.0.0.1:4223"}
+    ],
+    "election_timeout_min_ms": 150,
+    "election_timeout_max_ms": 300,
+    "heartbeat_interval_ms": 50,
+    "snapshot_threshold": 10000
+  }
+}
+```
+
+Exactly one fresh node should use `"bootstrap": true`; every node must list the
+same static membership and set its own `node_id`, `listen`, `wal_dir`,
+`raft_listen`, and `raft_dir`. Dynamic membership is not implemented yet.
+Clients can connect to any node. Leaders serve the broker protocol directly;
+followers proxy raw client TCP bytes to the current leader, so TLS clients still
+complete TLS with the leader.
 
 TLS is disabled when `tls` is `null` or omitted. To enable TLS-first client
 connections:

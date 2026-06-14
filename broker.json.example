@@ -8,5 +8,6 @@
   "auth": {
     "enabled": false,
     "clients": []
-  }
+  },
+  "cluster": null
 }

@@ -16,7 +16,7 @@ const KIND_CONSUMER_UPSERT: u8 = 2;
 const KIND_DELIVERY_ATTEMPT: u8 = 3;
 const KIND_ACK: u8 = 4;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct PublishRecord {
     pub seq: u64,
     pub subject: String,
@@ -24,7 +24,7 @@ pub struct PublishRecord {
     pub payload: Vec<u8>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct ConsumerRecord {
     pub consumer_id: String,
     pub filter_subject: String,
@@ -33,7 +33,7 @@ pub struct ConsumerRecord {
     pub max_in_flight: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct DeliveryAttemptRecord {
     pub seq: u64,
     pub consumer_id: String,
@@ -42,14 +42,14 @@ pub struct DeliveryAttemptRecord {
     pub attempt: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct AckRecord {
     pub seq: u64,
     pub consumer_id: String,
     pub delivery_id: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct ReplayedConsumer {
     pub record: ConsumerRecord,
     pub pending: BTreeSet<u64>,
