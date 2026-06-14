@@ -107,6 +107,14 @@ impl ClusterRuntime {
         }
     }
 
+    async fn client_write_forwarded(&self, command: BrokerCommand) -> Result<BrokerResponse> {
+        match self {
+            Self::Real(runtime) => runtime.client_write(command).await,
+            #[cfg(test)]
+            Self::Fake(runtime) => runtime.client_write_forwarded(command).await,
+        }
+    }
+
     fn durable_state(&self) -> DurableState {
         match self {
             Self::Real(runtime) => runtime.durable_state(),
@@ -759,6 +767,28 @@ impl FakeClusterRuntime {
             .map_err(|_| BrokerError::msg("queued write canceled"))
     }
 
+    async fn client_write_forwarded(&self, command: BrokerCommand) -> Result<BrokerResponse> {
+        let pending = {
+            let mut inner = self.inner.lock().unwrap();
+            inner.ensure_forwardable()?;
+            if !inner.delay_writes {
+                return Ok(inner.apply_command(command));
+            }
+            let (tx, rx) = oneshot::channel();
+            let id = inner.next_write_id;
+            inner.next_write_id += 1;
+            inner.queued_writes.push_back(QueuedWrite {
+                id,
+                command,
+                response: tx,
+            });
+            rx
+        };
+        pending
+            .await
+            .map_err(|_| BrokerError::msg("queued write canceled"))
+    }
+
     fn durable_state(&self) -> DurableState {
         self.inner.lock().unwrap().state.clone()
     }
@@ -859,6 +889,15 @@ impl FakeClusterState {
         if self.leader != Some(self.local_node_id) {
             crate::broker_bail!("not leader");
         }
+        self.ensure_quorum()
+    }
+
+    fn ensure_forwardable(&self) -> Result<()> {
+        crate::broker_ensure!(self.leader.is_some(), "not leader");
+        self.ensure_quorum()
+    }
+
+    fn ensure_quorum(&self) -> Result<()> {
         if !self.available_nodes.contains(&self.local_node_id)
             || self.available_nodes.len() < self.quorum_size()
         {
@@ -1598,11 +1637,13 @@ impl Broker {
 
         if let Some((_consumer_id, record, sid)) = durable_record {
             if let Some(cluster) = self.cluster_runtime().await {
-                cluster
-                    .client_write(BrokerCommand::ConsumerUpsert {
+                self.cluster_write(
+                    &cluster,
+                    BrokerCommand::ConsumerUpsert {
                         record: record.clone(),
-                    })
-                    .await?;
+                    },
+                )
+                .await?;
                 self.sync_from_cluster(&cluster).await;
             } else {
                 let mut inner = self.inner.lock().await;
@@ -1730,13 +1771,25 @@ impl Broker {
         }
 
         if let Some(cluster) = self.cluster_runtime().await {
-            cluster
-                .client_write(BrokerCommand::Publish {
+            let has_durable = {
+                let inner = self.inner.lock().await;
+                inner.has_matching_durable_consumer(&subject_name)
+            };
+            if !has_durable {
+                if verbose {
+                    self.send_to(publisher_id, protocol::ok().to_vec()).await?;
+                }
+                return Ok(());
+            }
+            self.cluster_write(
+                &cluster,
+                BrokerCommand::Publish {
                     subject: subject_name,
                     reply_to,
                     payload,
-                })
-                .await?;
+                },
+            )
+            .await?;
             self.sync_from_cluster(&cluster).await;
             self.deliver_pending().await?;
             if verbose {
@@ -1747,14 +1800,7 @@ impl Broker {
 
         let has_durable = {
             let mut inner = self.inner.lock().await;
-            let matching_consumers: Vec<String> = inner
-                .consumers
-                .iter()
-                .filter(|(_, consumer)| {
-                    subject::matches(&consumer.record.filter_subject, &subject_name)
-                })
-                .map(|(consumer_id, _)| consumer_id.clone())
-                .collect();
+            let matching_consumers = inner.matching_durable_consumers(&subject_name);
             let has_durable = !matching_consumers.is_empty();
             if has_durable {
                 let record =
@@ -1825,13 +1871,15 @@ impl Broker {
 
     async fn ack(&self, ack: AckSubject) -> Result<()> {
         if let Some(cluster) = self.cluster_runtime().await {
-            cluster
-                .client_write(BrokerCommand::Ack {
+            self.cluster_write(
+                &cluster,
+                BrokerCommand::Ack {
                     seq: ack.seq,
                     consumer_id: ack.consumer_id,
                     delivery_id: ack.delivery_id,
-                })
-                .await?;
+                },
+            )
+            .await?;
             self.sync_from_cluster(&cluster).await;
             return Ok(());
         }
@@ -2058,6 +2106,18 @@ impl Broker {
         route_mesh.set_local_interests(interests).await;
     }
 
+    async fn cluster_write(
+        &self,
+        cluster: &ClusterRuntime,
+        command: BrokerCommand,
+    ) -> Result<BrokerResponse> {
+        if self.route_mesh.is_some() {
+            cluster.client_write_forwarded(command).await
+        } else {
+            cluster.client_write(command).await
+        }
+    }
+
     async fn deliver_pending_clustered(&self, cluster: ClusterRuntime) -> Result<()> {
         loop {
             let candidate = {
@@ -2067,13 +2127,16 @@ impl Broker {
             let Some(candidate) = candidate else {
                 break;
             };
-            let response = cluster
-                .client_write(BrokerCommand::DeliveryAttempt {
-                    seq: candidate.seq,
-                    consumer_id: candidate.consumer_id.clone(),
-                    deadline_ms: candidate.deadline_ms,
-                    attempt: candidate.attempt,
-                })
+            let response = self
+                .cluster_write(
+                    &cluster,
+                    BrokerCommand::DeliveryAttempt {
+                        seq: candidate.seq,
+                        consumer_id: candidate.consumer_id.clone(),
+                        deadline_ms: candidate.deadline_ms,
+                        attempt: candidate.attempt,
+                    },
+                )
                 .await?;
             self.sync_from_cluster(&cluster).await;
             let crate::raft::BrokerResponse::DeliveryAttempt {
@@ -2190,6 +2253,20 @@ impl Inner {
         interests.sort();
         interests.dedup();
         interests
+    }
+
+    fn has_matching_durable_consumer(&self, subject_name: &str) -> bool {
+        self.consumers
+            .values()
+            .any(|consumer| subject::matches(&consumer.record.filter_subject, subject_name))
+    }
+
+    fn matching_durable_consumers(&self, subject_name: &str) -> Vec<String> {
+        self.consumers
+            .iter()
+            .filter(|(_, consumer)| subject::matches(&consumer.record.filter_subject, subject_name))
+            .map(|(consumer_id, _)| consumer_id.clone())
+            .collect()
     }
 
     fn upsert_consumer(&mut self, record: ConsumerRecord) -> &mut Consumer {
@@ -2620,6 +2697,7 @@ fn format_leader_id(leader_id: Option<u64>) -> String {
 mod tests {
     use std::{path::Path, sync::Arc, time::Duration};
 
+    use crate::config::{ClusterConfig, ClusterNodeConfig};
     use tempfile::TempDir;
     use tokio::{
         io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, DuplexStream},
@@ -2640,7 +2718,7 @@ mod tests {
         fn new() -> Self {
             let dir = TempDir::new().unwrap();
             let clock = Arc::new(ManualClock::new(1_000));
-            let broker = deterministic_broker(dir.path(), clock.clone(), None);
+            let broker = deterministic_broker(test_config(dir.path()), clock.clone(), None);
             Self {
                 _dir: dir,
                 clock,
@@ -2658,11 +2736,32 @@ mod tests {
             local_node_id: u64,
             leader: Option<u64>,
         ) -> Self {
+            Self::new_fake_cluster_local_node_with_routes(node_count, local_node_id, leader, false)
+        }
+
+        fn new_fake_route_cluster_local_node(
+            node_count: u64,
+            local_node_id: u64,
+            leader: Option<u64>,
+        ) -> Self {
+            Self::new_fake_cluster_local_node_with_routes(node_count, local_node_id, leader, true)
+        }
+
+        fn new_fake_cluster_local_node_with_routes(
+            node_count: u64,
+            local_node_id: u64,
+            leader: Option<u64>,
+            route_mesh: bool,
+        ) -> Self {
             let dir = TempDir::new().unwrap();
             let clock = Arc::new(ManualClock::new(1_000));
             let fake_cluster = FakeClusterRuntime::new(node_count, local_node_id, leader);
+            let mut config = test_config(dir.path());
+            if route_mesh {
+                config.cluster = Some(fake_cluster_config(dir.path(), node_count, local_node_id));
+            }
             let broker = deterministic_broker(
-                dir.path(),
+                config,
                 clock.clone(),
                 Some(ClusterRuntime::Fake(fake_cluster.clone())),
             );
@@ -2737,7 +2836,7 @@ mod tests {
         async fn restart_broker(&mut self) {
             self.broker.shutdown().await.unwrap();
             self.broker = deterministic_broker(
-                self._dir.path(),
+                test_config(self._dir.path()),
                 self.clock.clone(),
                 self.fake_cluster.clone().map(ClusterRuntime::Fake),
             );
@@ -2944,12 +3043,12 @@ mod tests {
     }
 
     fn deterministic_broker(
-        dir: &Path,
+        config: Config,
         clock: Arc<ManualClock>,
         initial_cluster: Option<ClusterRuntime>,
     ) -> Broker {
         Broker::open_with_hooks(
-            test_config(dir),
+            config,
             BrokerHooks {
                 clock,
                 start_redelivery_loop: false,
@@ -2958,6 +3057,33 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    fn fake_cluster_config(dir: &Path, node_count: u64, local_node_id: u64) -> ClusterConfig {
+        ClusterConfig {
+            enabled: true,
+            node_id: local_node_id,
+            raft_listen: SocketAddr::from(([127, 0, 0, 1], 20_000 + local_node_id as u16)),
+            route_listen: Some(SocketAddr::from((
+                [127, 0, 0, 1],
+                30_000 + local_node_id as u16,
+            ))),
+            routes: Vec::new(),
+            route_reconnect_ms: 50,
+            raft_dir: dir.join("raft"),
+            bootstrap: local_node_id == 1,
+            nodes: (1..=node_count)
+                .map(|node_id| ClusterNodeConfig {
+                    node_id,
+                    raft_addr: SocketAddr::from(([127, 0, 0, 1], 20_000 + node_id as u16)),
+                    client_addr: SocketAddr::from(([127, 0, 0, 1], 10_000 + node_id as u16)),
+                })
+                .collect(),
+            election_timeout_min_ms: 150,
+            election_timeout_max_ms: 300,
+            heartbeat_interval_ms: 50,
+            snapshot_threshold: 100,
+        }
     }
 
     fn ack_subject(frame: &str) -> String {
@@ -3700,6 +3826,42 @@ mod tests {
         publisher.expect_err_contains("not leader").await;
         subscriber.expect_no_frame_short().await;
         assert_eq!(scenario.fake_cluster().write_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn route_enabled_follower_forwards_durable_writes_to_leader() {
+        let scenario = Scenario::new_fake_route_cluster_local_node(3, 2, Some(1));
+        let mut subscriber = scenario.connect_durable("client1", 25).await;
+        let mut publisher = scenario.connect_durable("publisher1", 25).await;
+
+        subscriber.subscribe("orders.*", "sid1").await;
+        subscriber.ping_roundtrip().await;
+        publisher.publish("orders.created", b"hello").await;
+        publisher.ping_roundtrip().await;
+
+        let delivery = subscriber.expect_msg().await;
+        assert!(delivery.starts_with("MSG orders.created sid1 _BROKER.ACK.durable-client1-sid1."));
+        assert!(delivery.ends_with("5\r\nhello\r\n"));
+        assert_eq!(scenario.fake_cluster().write_count(), 3);
+    }
+
+    #[tokio::test]
+    async fn clustered_transient_publish_without_durable_match_does_not_propose_raft() {
+        let scenario = Scenario::new_fake_cluster_local_node(3, 2, Some(1));
+        let mut subscriber = scenario.connect().await;
+        let mut publisher = scenario.connect().await;
+
+        subscriber.write_line("CONNECT {}").await;
+        publisher.write_line("CONNECT {}").await;
+        subscriber.subscribe("topic", "sid1").await;
+        subscriber.ping_roundtrip().await;
+
+        publisher.publish("topic", b"hello").await;
+        publisher.ping_roundtrip().await;
+
+        let delivery = subscriber.expect_msg().await;
+        assert_eq!(delivery, "MSG topic sid1 5\r\nhello\r\n");
+        assert_eq!(scenario.fake_cluster().write_count(), 0);
     }
 
     #[tokio::test]

@@ -363,6 +363,17 @@ impl RaftRuntime {
     }
 
     pub async fn client_write(&self, command: BrokerCommand) -> Result<BrokerResponse> {
+        if let Some(leader) = self.raft.current_leader().await {
+            if leader != self.node_id {
+                if let Some(node) = self.nodes.get(&leader) {
+                    return NetworkClient {
+                        addr: node.raft_addr.to_string(),
+                    }
+                    .client_write(command)
+                    .await;
+                }
+            }
+        }
         let response = self
             .raft
             .client_write(command)
@@ -837,6 +848,18 @@ impl RaftNetwork<BrokerRaftConfig> for NetworkClient {
 }
 
 impl NetworkClient {
+    async fn client_write(&self, command: BrokerCommand) -> Result<BrokerResponse> {
+        match self
+            .request(RaftRequest::ClientWrite(command))
+            .await
+            .map_err(|err| BrokerError::with_source("forwarding Raft client write", err))?
+        {
+            RaftResponse::ClientWrite(response) => Ok(response),
+            RaftResponse::Error(message) => Err(BrokerError::msg(message)),
+            _ => Err(BrokerError::msg("unexpected client_write response")),
+        }
+    }
+
     async fn request(
         &self,
         request: RaftRequest,
@@ -861,6 +884,7 @@ impl NetworkClient {
 enum RaftRequest {
     AppendEntries(AppendEntriesRequest<BrokerRaftConfig>),
     Vote(VoteRequest<u64>),
+    ClientWrite(BrokerCommand),
     FullSnapshot {
         vote: Vote<u64>,
         meta: SnapshotMeta<u64, BasicNode>,
@@ -872,6 +896,7 @@ enum RaftRequest {
 enum RaftResponse {
     AppendEntries(AppendEntriesResponse<u64>),
     Vote(VoteResponse<u64>),
+    ClientWrite(BrokerResponse),
     FullSnapshot(SnapshotResponse<u64>),
     Error(String),
 }
@@ -900,6 +925,10 @@ async fn handle_raft_stream(raft: BrokerRaft, mut stream: TcpStream) -> Result<(
         },
         RaftRequest::Vote(rpc) => match raft.vote(rpc).await {
             Ok(response) => RaftResponse::Vote(response),
+            Err(err) => RaftResponse::Error(err.to_string()),
+        },
+        RaftRequest::ClientWrite(command) => match raft.client_write(command).await {
+            Ok(response) => RaftResponse::ClientWrite(response.data),
             Err(err) => RaftResponse::Error(err.to_string()),
         },
         RaftRequest::FullSnapshot { vote, meta, data } => {
