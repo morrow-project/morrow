@@ -390,6 +390,14 @@ impl RaftRuntime {
     pub fn tls_enabled(&self) -> bool {
         self.tls_enabled
     }
+
+    pub fn cluster_size(&self) -> usize {
+        self.nodes.len()
+    }
+
+    pub fn node_id(&self) -> u64 {
+        self.node_id
+    }
 }
 
 #[derive(Clone)]

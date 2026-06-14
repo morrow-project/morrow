@@ -424,6 +424,7 @@ impl ClusterHarness {
             let listener = TcpListener::bind(node.client_addr).await.unwrap();
             let config = Config {
                 listen: node.client_addr,
+                http_listen: None,
                 wal_dir: dir.path().join("wal"),
                 fsync_interval_ms: 1,
                 max_payload,
@@ -563,6 +564,7 @@ impl Harness {
         let max_payload = 1024;
         let config = Config {
             listen: addr,
+            http_listen: None,
             wal_dir: wal_dir.path().to_path_buf(),
             fsync_interval_ms: 1,
             max_payload,

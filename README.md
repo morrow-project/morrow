@@ -17,6 +17,7 @@ cp broker.json.example broker.json
 ```json
 {
   "listen": "127.0.0.1:4222",
+  "http_listen": null,
   "wal_dir": "./broker-wal",
   "fsync_interval_ms": 5,
   "max_payload": 1048576,
@@ -33,6 +34,7 @@ cp broker.json.example broker.json
 Fields:
 
 - `listen`: TCP socket address for client connections.
+- `http_listen`: optional HTTP status listener address.
 - `wal_dir`: directory for the broker WAL.
 - `fsync_interval_ms`: maximum batching interval before fsync.
 - `max_payload`: maximum accepted `PUB` payload size in bytes.
@@ -77,6 +79,11 @@ same static membership and set its own `node_id`, `listen`, `wal_dir`,
 Clients can connect to any node. Leaders serve the broker protocol directly;
 followers proxy raw client TCP bytes to the current leader, so TLS clients still
 complete TLS with the leader.
+
+When `http_listen` is set, `GET /status` returns JSON with `cluster_size`,
+`cluster_status`, `node_id`, `role`, and `leader_id`. Cluster status is
+`ready` after a leader is known, `forming` before leader discovery, and
+`standalone` when clustering is disabled.
 
 TLS is disabled when `tls` is `null` or omitted. To enable TLS-first client
 connections:

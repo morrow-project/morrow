@@ -1,0 +1,41 @@
+{
+  "listen": "127.0.0.1:4222",
+  "http_listen": "127.0.0.1:8222",
+  "wal_dir": "./target/manual-cluster/node2/wal",
+  "fsync_interval_ms": 5,
+  "max_payload": 1048576,
+  "verbose": false,
+  "tls": null,
+  "auth": {
+    "enabled": false,
+    "clients": []
+  },
+  "cluster": {
+    "enabled": true,
+    "node_id": 2,
+    "raft_listen": "127.0.0.1:5222",
+    "raft_dir": "./target/manual-cluster/node2/raft",
+    "bootstrap": false,
+    "nodes": [
+      {
+        "node_id": 1,
+        "raft_addr": "127.0.0.1:5221",
+        "client_addr": "127.0.0.1:4221"
+      },
+      {
+        "node_id": 2,
+        "raft_addr": "127.0.0.1:5222",
+        "client_addr": "127.0.0.1:4222"
+      },
+      {
+        "node_id": 3,
+        "raft_addr": "127.0.0.1:5223",
+        "client_addr": "127.0.0.1:4223"
+      }
+    ],
+    "election_timeout_min_ms": 150,
+    "election_timeout_max_ms": 300,
+    "heartbeat_interval_ms": 50,
+    "snapshot_threshold": 100
+  }
+}

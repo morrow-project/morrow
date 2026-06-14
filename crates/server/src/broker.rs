@@ -9,7 +9,7 @@ use std::{
 };
 
 use tokio::{
-    io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream},
     sync::{Mutex, mpsc},
 };
@@ -143,6 +143,22 @@ impl ClusterRuntime {
             Self::Fake(runtime) => runtime.tls_enabled(),
         }
     }
+
+    fn cluster_size(&self) -> usize {
+        match self {
+            Self::Real(runtime) => runtime.cluster_size(),
+            #[cfg(test)]
+            Self::Fake(runtime) => runtime.node_count(),
+        }
+    }
+
+    fn local_node_id(&self) -> u64 {
+        match self {
+            Self::Real(runtime) => runtime.node_id(),
+            #[cfg(test)]
+            Self::Fake(runtime) => runtime.local_node_id(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -254,6 +270,10 @@ impl FakeClusterRuntime {
 
     fn node_count(&self) -> usize {
         self.inner.lock().unwrap().nodes.len()
+    }
+
+    fn local_node_id(&self) -> u64 {
+        self.inner.lock().unwrap().local_node_id
     }
 
     fn queued_write_count(&self) -> usize {
@@ -414,6 +434,15 @@ struct Delivery {
     frame: Vec<u8>,
 }
 
+#[derive(Debug, serde::Serialize)]
+struct StatusResponse {
+    cluster_size: usize,
+    cluster_status: &'static str,
+    node_id: Option<u64>,
+    role: &'static str,
+    leader_id: Option<u64>,
+}
+
 impl Broker {
     pub fn open(config: Config) -> Result<Self> {
         Self::open_with_hooks(config, BrokerHooks::default())
@@ -471,6 +500,7 @@ impl Broker {
 
     async fn serve_inner(self, listener: TcpListener, handle_shutdown: bool) -> Result<()> {
         self.start_cluster().await?;
+        self.spawn_http_status_listener();
         if self.hooks.start_redelivery_loop {
             let redeliver = self.clone();
             tokio::spawn(async move {
@@ -508,6 +538,111 @@ impl Broker {
 
     pub async fn cluster_leader(&self) -> Option<u64> {
         self.cluster_runtime().await?.current_leader().await
+    }
+
+    async fn cluster_status_response(&self) -> StatusResponse {
+        let cluster_config = self.config.cluster.as_ref();
+        let cluster = self.cluster_runtime().await;
+        let cluster_size = cluster
+            .as_ref()
+            .map(ClusterRuntime::cluster_size)
+            .or_else(|| cluster_config.map(|cluster| cluster.nodes.len()))
+            .unwrap_or(1);
+        let node_id = cluster_config
+            .map(|cluster| cluster.node_id)
+            .or_else(|| cluster.as_ref().map(ClusterRuntime::local_node_id));
+        let leader_id = match &cluster {
+            Some(cluster) => cluster.current_leader().await,
+            None => None,
+        };
+        let role = match (node_id, leader_id) {
+            (None, _) => "standalone",
+            (Some(node_id), Some(leader_id)) if node_id == leader_id => "leader",
+            (Some(_), Some(_)) => "follower",
+            (Some(_), None) => "unknown",
+        };
+        let cluster_status = if cluster_config.is_none() && cluster.is_none() {
+            "standalone"
+        } else if leader_id.is_some() {
+            "ready"
+        } else {
+            "forming"
+        };
+        StatusResponse {
+            cluster_size,
+            cluster_status,
+            node_id,
+            role,
+            leader_id,
+        }
+    }
+
+    fn spawn_http_status_listener(&self) {
+        let Some(listen) = self.config.http_listen else {
+            return;
+        };
+        let broker = self.clone();
+        tokio::spawn(async move {
+            if let Err(err) = broker.serve_http_status(listen).await {
+                eprintln!("http status error: {err:#}");
+            }
+        });
+    }
+
+    async fn serve_http_status(&self, listen: SocketAddr) -> Result<()> {
+        let listener = TcpListener::bind(listen)
+            .await
+            .with_context(|| format!("binding HTTP status listener {listen}"))?;
+        loop {
+            let (stream, _) = listener
+                .accept()
+                .await
+                .context("accepting HTTP status connection")?;
+            let broker = self.clone();
+            tokio::spawn(async move {
+                if let Err(err) = broker.handle_http_status(stream).await {
+                    eprintln!("http status connection error: {err:#}");
+                }
+            });
+        }
+    }
+
+    async fn handle_http_status(&self, mut stream: TcpStream) -> Result<()> {
+        let mut request = Vec::new();
+        let mut buf = [0_u8; 1024];
+        loop {
+            let read = stream
+                .read(&mut buf)
+                .await
+                .context("reading HTTP status request")?;
+            if read == 0 {
+                return Ok(());
+            }
+            request.extend_from_slice(&buf[..read]);
+            if request.windows(4).any(|window| window == b"\r\n\r\n") || request.len() >= 8 * 1024 {
+                break;
+            }
+        }
+        let request_line = request
+            .split(|byte| *byte == b'\n')
+            .next()
+            .and_then(|line| std::str::from_utf8(line).ok())
+            .map(str::trim_end)
+            .unwrap_or("");
+        if request_line != "GET /status HTTP/1.1" && request_line != "GET /status HTTP/1.0" {
+            write_http_response(
+                &mut stream,
+                "404 Not Found",
+                "application/json",
+                br#"{"error":"not found"}"#,
+            )
+            .await?;
+            return Ok(());
+        }
+
+        let body = serde_json::to_vec(&self.cluster_status_response().await)
+            .context("serializing HTTP status response")?;
+        write_http_response(&mut stream, "200 OK", "application/json", &body).await
     }
 
     #[cfg(test)]
@@ -1517,6 +1652,24 @@ fn decrement_remaining(remaining: &mut Option<usize>) -> Option<bool> {
     Some(*remaining == 0)
 }
 
+async fn write_http_response<W>(
+    writer: &mut W,
+    status: &str,
+    content_type: &str,
+    body: &[u8],
+) -> Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    let header = format!(
+        "HTTP/1.1 {status}\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+        body.len()
+    );
+    writer.write_all(header.as_bytes()).await?;
+    writer.write_all(body).await?;
+    Ok(())
+}
+
 struct ClusterDeliveryCandidate {
     consumer_id: String,
     seq: u64,
@@ -1903,6 +2056,7 @@ mod tests {
     fn test_config(dir: &Path) -> Config {
         Config {
             listen: "127.0.0.1:0".parse().unwrap(),
+            http_listen: None,
             wal_dir: dir.to_path_buf(),
             fsync_interval_ms: 1,
             max_payload: 1024,
@@ -2364,6 +2518,74 @@ mod tests {
         assert!(consumer.acked.contains(&1));
         assert!(durable.messages.is_empty());
         assert_eq!(scenario.fake_cluster().write_count(), 4);
+    }
+
+    #[tokio::test]
+    async fn status_reports_standalone_node() {
+        let scenario = Scenario::new();
+
+        let status = scenario.broker().cluster_status_response().await;
+
+        assert_eq!(status.cluster_size, 1);
+        assert_eq!(status.cluster_status, "standalone");
+        assert_eq!(status.node_id, None);
+        assert_eq!(status.role, "standalone");
+        assert_eq!(status.leader_id, None);
+    }
+
+    #[tokio::test]
+    async fn http_status_endpoint_returns_status_json() {
+        let scenario = Scenario::new_fake_cluster_local_node(3, 1, Some(1));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let broker = scenario.broker().clone();
+        let server_task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            broker.handle_http_status(stream).await.unwrap();
+        });
+
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client
+            .write_all(b"GET /status HTTP/1.1\r\nhost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).await.unwrap();
+        server_task.await.unwrap();
+        let response = String::from_utf8(response).unwrap();
+
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(response.contains("\"cluster_size\":3"));
+        assert!(response.contains("\"cluster_status\":\"ready\""));
+        assert!(response.contains("\"node_id\":1"));
+        assert!(response.contains("\"role\":\"leader\""));
+        assert!(response.contains("\"leader_id\":1"));
+    }
+
+    #[tokio::test]
+    async fn status_reports_cluster_role_and_leader() {
+        let scenario = Scenario::new_fake_cluster_local_node(3, 2, Some(1));
+
+        let status = scenario.broker().cluster_status_response().await;
+
+        assert_eq!(status.cluster_size, 3);
+        assert_eq!(status.cluster_status, "ready");
+        assert_eq!(status.node_id, Some(2));
+        assert_eq!(status.role, "follower");
+        assert_eq!(status.leader_id, Some(1));
+    }
+
+    #[tokio::test]
+    async fn status_reports_cluster_forming_without_leader() {
+        let scenario = Scenario::new_fake_cluster_local_node(3, 2, None);
+
+        let status = scenario.broker().cluster_status_response().await;
+
+        assert_eq!(status.cluster_size, 3);
+        assert_eq!(status.cluster_status, "forming");
+        assert_eq!(status.node_id, Some(2));
+        assert_eq!(status.role, "unknown");
+        assert_eq!(status.leader_id, None);
     }
 
     #[tokio::test]

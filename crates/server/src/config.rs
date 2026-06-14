@@ -13,6 +13,7 @@ const DEFAULT_CONFIG_PATH: &str = "broker.json";
 #[derive(Debug, Clone)]
 pub struct Config {
     pub listen: SocketAddr,
+    pub http_listen: Option<SocketAddr>,
     pub wal_dir: PathBuf,
     pub fsync_interval_ms: u64,
     pub max_payload: usize,
@@ -87,6 +88,7 @@ impl Config {
             .unwrap_or("127.0.0.1:4222")
             .parse()
             .context("config field listen must be a socket address")?;
+        let http_listen = get_http_listen(value)?;
         let wal_dir = PathBuf::from(get_string(value, "wal_dir")?.unwrap_or("./broker-wal"));
         let fsync_interval_ms = get_u64(value, "fsync_interval_ms")?.unwrap_or(5);
         let max_payload = get_u64(value, "max_payload")?.unwrap_or(1_048_576);
@@ -97,6 +99,7 @@ impl Config {
 
         let config = Self {
             listen,
+            http_listen,
             wal_dir,
             fsync_interval_ms,
             max_payload: max_payload
@@ -311,6 +314,19 @@ fn get_tls_config(value: &serde_json::Value) -> Result<Option<TlsConfig>> {
     }))
 }
 
+fn get_http_listen(value: &serde_json::Value) -> Result<Option<SocketAddr>> {
+    match value.get("http_listen") {
+        Some(serde_json::Value::String(value)) => value
+            .parse()
+            .context("config field http_listen must be a socket address")
+            .map(Some),
+        Some(serde_json::Value::Null) | None => Ok(None),
+        Some(_) => Err(BrokerError::msg(
+            "config field http_listen must be a string or null",
+        )),
+    }
+}
+
 fn get_cluster_config(value: &serde_json::Value) -> Result<Option<ClusterConfig>> {
     let Some(cluster) = value.get("cluster") else {
         return Ok(None);
@@ -408,6 +424,7 @@ mod tests {
     fn parses_json_config() {
         let value = serde_json::json!({
             "listen": "127.0.0.1:4223",
+            "http_listen": "127.0.0.1:8223",
             "wal_dir": "./target/test-wal-config",
             "fsync_interval_ms": 10,
             "max_payload": 2048,
@@ -418,6 +435,7 @@ mod tests {
 
         let config = Config::from_json(&value).unwrap();
         assert_eq!(config.listen, "127.0.0.1:4223".parse().unwrap());
+        assert_eq!(config.http_listen, Some("127.0.0.1:8223".parse().unwrap()));
         assert_eq!(config.wal_dir, PathBuf::from("./target/test-wal-config"));
         assert_eq!(config.fsync_interval_ms, 10);
         assert_eq!(config.max_payload, 2048);
