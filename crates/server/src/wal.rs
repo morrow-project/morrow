@@ -336,6 +336,7 @@ fn replay_path(path: &Path) -> Result<Replay> {
             }
         }
     }
+    cleanup_acked_messages(&mut messages, &consumers);
 
     Ok(Replay {
         messages,
@@ -343,6 +344,34 @@ fn replay_path(path: &Path) -> Result<Replay> {
         next_seq: max_seq + 1,
         next_delivery_id: max_delivery_id + 1,
     })
+}
+
+fn cleanup_acked_messages(
+    messages: &mut HashMap<u64, PublishRecord>,
+    consumers: &HashMap<String, ReplayedConsumer>,
+) {
+    let removable = messages
+        .keys()
+        .copied()
+        .filter(|seq| {
+            let mut interested = false;
+            for consumer in consumers.values() {
+                if consumer.pending.contains(seq)
+                    || consumer.in_flight.contains_key(seq)
+                    || consumer.acked.contains(seq)
+                {
+                    interested = true;
+                    if !consumer.acked.contains(seq) {
+                        return false;
+                    }
+                }
+            }
+            interested
+        })
+        .collect::<Vec<_>>();
+    for seq in removable {
+        messages.remove(&seq);
+    }
 }
 
 fn write_publish_to(file: &mut File, record: &PublishRecord) -> Result<()> {
@@ -635,6 +664,55 @@ mod tests {
         assert!(replayed.acked.contains(&first.seq));
         assert!(replayed.pending.contains(&second.seq));
         assert!(replayed.in_flight.is_empty());
+        assert!(!replay.messages.contains_key(&first.seq));
+        assert!(replay.messages.contains_key(&second.seq));
+    }
+
+    #[test]
+    fn replay_retains_message_until_all_matching_consumers_ack() {
+        let dir = TestDir::new();
+        let (mut wal, _) = Wal::open(dir.path(), Duration::from_millis(1)).unwrap();
+        let first_consumer = ConsumerRecord {
+            consumer_id: "durable-client-1".into(),
+            filter_subject: "orders.*".into(),
+            queue_group: None,
+            ack_timeout_ms: 30_000,
+            max_in_flight: 1024,
+        };
+        let second_consumer = ConsumerRecord {
+            consumer_id: "durable-client-2".into(),
+            filter_subject: "orders.*".into(),
+            queue_group: None,
+            ack_timeout_ms: 30_000,
+            max_in_flight: 1024,
+        };
+        wal.append_consumer_upsert(&first_consumer).unwrap();
+        wal.append_consumer_upsert(&second_consumer).unwrap();
+        let message = wal.append_publish("orders.created", None, b"one").unwrap();
+        let attempt = wal
+            .append_delivery_attempt(message.seq, &first_consumer.consumer_id, 1_000, 1)
+            .unwrap();
+        wal.append_ack(
+            message.seq,
+            &first_consumer.consumer_id,
+            attempt.delivery_id,
+        )
+        .unwrap();
+        wal.flush().unwrap();
+        drop(wal);
+
+        let (_, replay) = Wal::open(dir.path(), Duration::from_millis(1)).unwrap();
+        assert!(replay.messages.contains_key(&message.seq));
+        assert!(
+            replay.consumers[&first_consumer.consumer_id]
+                .acked
+                .contains(&message.seq)
+        );
+        assert!(
+            replay.consumers[&second_consumer.consumer_id]
+                .pending
+                .contains(&message.seq)
+        );
     }
 
     #[test]

@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
+    collections::{BTreeSet, HashMap, HashSet},
     net::SocketAddr,
     sync::{
         Arc,
@@ -11,13 +11,17 @@ use std::{
 use tokio::{
     io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream},
-    sync::{Mutex, mpsc, oneshot},
+    sync::{Mutex, mpsc},
 };
 use tokio_rustls::TlsAcceptor;
 
 #[cfg(test)]
 use openraft::BasicNode;
 use protocol::{AckSubject, Command, ConnectAuth, auth, subject};
+#[cfg(test)]
+use std::collections::{BTreeMap, VecDeque};
+#[cfg(test)]
+use tokio::sync::oneshot;
 
 use crate::{
     config::Config,
@@ -56,6 +60,7 @@ pub(crate) trait Clock: Send + Sync {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DurablePublishFlushMode {
     SleepThenFlush,
+    #[cfg(test)]
     FlushImmediately,
 }
 
@@ -376,12 +381,18 @@ struct Client {
 #[derive(Debug, Clone)]
 struct Consumer {
     record: ConsumerRecord,
-    members: HashMap<u64, String>,
+    members: HashMap<u64, SubscriptionMember>,
     pending: BTreeSet<u64>,
     pending_attempts: HashMap<u64, u32>,
     in_flight: HashMap<u64, InFlight>,
     acked: HashSet<u64>,
     delivered: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SubscriptionMember {
+    sid: String,
+    remaining_deliveries: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -395,6 +406,7 @@ struct InFlight {
 struct TransientSubscription {
     subject: String,
     sid: String,
+    remaining_deliveries: Option<usize>,
 }
 
 struct Delivery {
@@ -773,6 +785,7 @@ impl Broker {
                     TransientSubscription {
                         subject: sub_subject,
                         sid,
+                        remaining_deliveries: None,
                     },
                 );
                 None
@@ -813,7 +826,13 @@ impl Broker {
             }
             let mut inner = self.inner.lock().await;
             let consumer = inner.upsert_consumer(record);
-            consumer.members.insert(connection_id, sid);
+            consumer.members.insert(
+                connection_id,
+                SubscriptionMember {
+                    sid,
+                    remaining_deliveries: None,
+                },
+            );
             drop(inner);
             self.deliver_pending().await?;
         }
@@ -826,27 +845,42 @@ impl Broker {
         sid: &str,
         max_messages: Option<usize>,
     ) -> Result<()> {
+        if let Some(max_messages) = max_messages {
+            crate::broker_ensure!(
+                max_messages > 0,
+                "UNSUB max_messages must be greater than zero"
+            );
+        }
         let mut inner = self.inner.lock().await;
         let mut found = false;
-        found |= inner
+        if let Some(subscription) = inner
             .transient_subscriptions
-            .remove(&(connection_id, sid.to_string()))
-            .is_some();
+            .get_mut(&(connection_id, sid.to_string()))
+        {
+            found = true;
+            if let Some(max_messages) = max_messages {
+                subscription.remaining_deliveries = Some(max_messages);
+            } else {
+                inner
+                    .transient_subscriptions
+                    .remove(&(connection_id, sid.to_string()));
+            }
+        }
         for consumer in inner.consumers.values_mut() {
             if consumer
                 .members
                 .get(&connection_id)
-                .is_some_and(|member_sid| member_sid == sid)
+                .is_some_and(|member| member.sid == sid)
             {
-                consumer.members.remove(&connection_id);
+                if let Some(max_messages) = max_messages {
+                    if let Some(member) = consumer.members.get_mut(&connection_id) {
+                        member.remaining_deliveries = Some(max_messages);
+                    }
+                } else {
+                    consumer.members.remove(&connection_id);
+                }
                 found = true;
             }
-        }
-        if let Some(max_messages) = max_messages {
-            crate::broker_ensure!(
-                max_messages > 0,
-                "durable UNSUB max_messages must be greater than zero"
-            );
         }
         crate::broker_ensure!(found, "unknown sid");
         Ok(())
@@ -879,7 +913,7 @@ impl Broker {
 
         if is_inbox_publish(&subject_name) {
             let (deliveries, verbose) = {
-                let inner = self.inner.lock().await;
+                let mut inner = self.inner.lock().await;
                 let verbose = inner
                     .clients
                     .get(&publisher_id)
@@ -970,6 +1004,7 @@ impl Broker {
                     let mut inner = self.inner.lock().await;
                     inner.wal.flush()?;
                 }
+                #[cfg(test)]
                 DurablePublishFlushMode::FlushImmediately => {
                     let mut inner = self.inner.lock().await;
                     inner.wal.flush()?;
@@ -1196,21 +1231,33 @@ impl Inner {
     }
 
     fn prepare_transient_deliveries(
-        &self,
+        &mut self,
         subject_name: &str,
         reply_to: Option<&str>,
         payload: &[u8],
     ) -> Vec<Delivery> {
-        self.transient_subscriptions
+        let matched = self
+            .transient_subscriptions
             .iter()
             .filter(|(_, subscription)| subject::matches(&subscription.subject, subject_name))
             .filter_map(|((connection_id, _), subscription)| {
                 let client = self.clients.get(connection_id)?;
-                Some(Delivery {
-                    sender: client.sender.clone(),
-                    frame: protocol::msg(subject_name, &subscription.sid, reply_to, payload),
-                })
+                Some((
+                    *connection_id,
+                    subscription.sid.clone(),
+                    Delivery {
+                        sender: client.sender.clone(),
+                        frame: protocol::msg(subject_name, &subscription.sid, reply_to, payload),
+                    },
+                ))
             })
+            .collect::<Vec<_>>();
+        for (connection_id, sid, _) in &matched {
+            self.decrement_transient_subscription(*connection_id, sid);
+        }
+        matched
+            .into_iter()
+            .map(|(_, _, delivery)| delivery)
             .collect()
     }
 
@@ -1267,6 +1314,7 @@ impl Inner {
                         sender: client.sender.clone(),
                         frame,
                     });
+                    self.decrement_durable_member(&consumer_id, connection_id);
                 }
             }
         }
@@ -1285,14 +1333,20 @@ impl Inner {
             return None;
         }
         let seq = *consumer.pending.iter().next()?;
-        let (connection_id, sid) = consumer
+        let (connection_id, member) = consumer
             .members
             .iter()
             .filter(|(connection_id, _)| self.clients.contains_key(connection_id))
             .min_by_key(|(connection_id, _)| **connection_id)?;
         let attempt = consumer.pending_attempts.get(&seq).copied().unwrap_or(1);
         let deadline_ms = now.saturating_add(consumer.record.ack_timeout_ms);
-        Some((seq, *connection_id, sid.clone(), attempt, deadline_ms))
+        Some((
+            seq,
+            *connection_id,
+            member.sid.clone(),
+            attempt,
+            deadline_ms,
+        ))
     }
 
     fn next_cluster_delivery(&self, now: u64) -> Option<ClusterDeliveryCandidate> {
@@ -1311,7 +1365,7 @@ impl Inner {
                     .map(|(seq, _)| *seq)
                     .min()
             })?;
-            let (connection_id, sid) = consumer
+            let (connection_id, member) = consumer
                 .members
                 .iter()
                 .filter(|(connection_id, _)| self.clients.contains_key(connection_id))
@@ -1327,7 +1381,7 @@ impl Inner {
                 consumer_id: consumer_id.clone(),
                 seq,
                 connection_id: *connection_id,
-                sid: sid.clone(),
+                sid: member.sid.clone(),
                 attempt,
                 deadline_ms,
             });
@@ -1358,10 +1412,12 @@ impl Inner {
             ),
             None => protocol::msg(&message.subject, sid, Some(&ack_subject), &message.payload),
         };
-        Some(Delivery {
+        let delivery = Delivery {
             sender: client.sender.clone(),
             frame,
-        })
+        };
+        self.decrement_durable_member(&record.consumer_id, connection_id);
+        Some(delivery)
     }
 
     fn sync_durable_state(&mut self, state: DurableState) {
@@ -1427,6 +1483,38 @@ impl Inner {
             self.messages.remove(&seq);
         }
     }
+
+    fn decrement_transient_subscription(&mut self, connection_id: u64, sid: &str) {
+        let key = (connection_id, sid.to_string());
+        let should_remove = self
+            .transient_subscriptions
+            .get_mut(&key)
+            .and_then(|subscription| decrement_remaining(&mut subscription.remaining_deliveries))
+            .unwrap_or(false);
+        if should_remove {
+            self.transient_subscriptions.remove(&key);
+        }
+    }
+
+    fn decrement_durable_member(&mut self, consumer_id: &str, connection_id: u64) {
+        let should_remove = self
+            .consumers
+            .get_mut(consumer_id)
+            .and_then(|consumer| consumer.members.get_mut(&connection_id))
+            .and_then(|member| decrement_remaining(&mut member.remaining_deliveries))
+            .unwrap_or(false);
+        if should_remove {
+            if let Some(consumer) = self.consumers.get_mut(consumer_id) {
+                consumer.members.remove(&connection_id);
+            }
+        }
+    }
+}
+
+fn decrement_remaining(remaining: &mut Option<usize>) -> Option<bool> {
+    let remaining = remaining.as_mut()?;
+    *remaining = remaining.saturating_sub(1);
+    Some(*remaining == 0)
 }
 
 struct ClusterDeliveryCandidate {
@@ -2066,6 +2154,83 @@ mod tests {
             .unwrap();
         assert_eq!(consumer.delivered, 1);
         assert_eq!(consumer.in_flight.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn unsub_with_max_receives_one_more_durable_delivery_then_detaches() {
+        let scenario = Scenario::new();
+        let mut subscriber = scenario.connect_durable("client1", 25).await;
+        let mut publisher = scenario.connect_durable("publisher1", 25).await;
+
+        subscriber.subscribe("orders.*", "sid1").await;
+        subscriber.ping_roundtrip().await;
+        subscriber.write_line("UNSUB sid1 1").await;
+        publisher.publish("orders.created", b"one").await;
+        let first = subscriber.expect_msg().await;
+        assert!(first.ends_with("3\r\none\r\n"));
+
+        publisher.publish("orders.created", b"two").await;
+        publisher.ping_roundtrip().await;
+        subscriber.expect_no_frame_short().await;
+        let inner = scenario.broker().inner.lock().await;
+        assert!(inner.consumers["durable-client1-sid1"].members.is_empty());
+    }
+
+    #[tokio::test]
+    async fn queue_unsub_with_max_detaches_only_that_member_after_count() {
+        let scenario = Scenario::new();
+        let mut first = scenario.connect_durable("client1", 25).await;
+        let mut second = scenario.connect_durable("client2", 25).await;
+        let mut publisher = scenario.connect_durable("publisher1", 25).await;
+
+        first.subscribe_queue("orders.*", "workers", "a").await;
+        first.ping_roundtrip().await;
+        second.subscribe_queue("orders.*", "workers", "b").await;
+        second.ping_roundtrip().await;
+        first.write_line("UNSUB a 2").await;
+
+        publisher.publish("orders.created", b"one").await;
+        assert!(first.expect_msg().await.ends_with("3\r\none\r\n"));
+        publisher.publish("orders.created", b"two").await;
+        assert!(first.expect_msg().await.ends_with("3\r\ntwo\r\n"));
+        publisher.publish("orders.created", b"three").await;
+        assert!(second.expect_msg().await.ends_with("5\r\nthree\r\n"));
+        first.expect_no_frame_short().await;
+
+        let inner = scenario.broker().inner.lock().await;
+        let consumer = inner
+            .consumers
+            .get("queue-workers-6f72646572732e2a")
+            .unwrap();
+        assert_eq!(consumer.members.len(), 1);
+        assert!(consumer.members.values().any(|member| member.sid == "b"));
+    }
+
+    #[tokio::test]
+    async fn transient_unsub_with_max_receives_one_more_live_message_then_detaches() {
+        let scenario = Scenario::new();
+        let mut subscriber = scenario.connect_durable("client1", 25).await;
+        let mut publisher = scenario.connect_durable("publisher1", 25).await;
+
+        subscriber.subscribe("_INBOX.client1.1", "inbox1").await;
+        subscriber.ping_roundtrip().await;
+        subscriber.write_line("UNSUB inbox1 1").await;
+        publisher.publish("_INBOX.client1.1", b"one").await;
+        let first = subscriber.expect_msg().await;
+        assert_eq!(first, "MSG _INBOX.client1.1 inbox1 3\r\none\r\n");
+
+        publisher.publish("_INBOX.client1.1", b"two").await;
+        publisher.ping_roundtrip().await;
+        subscriber.expect_no_frame_short().await;
+        assert!(
+            scenario
+                .broker()
+                .inner
+                .lock()
+                .await
+                .transient_subscriptions
+                .is_empty()
+        );
     }
 
     #[tokio::test]

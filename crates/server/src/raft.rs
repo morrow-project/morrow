@@ -972,6 +972,10 @@ where
     let file = std::fs::OpenOptions::new().read(true).open(&tmp)?;
     file.sync_data()?;
     std::fs::rename(&tmp, path)?;
+    if let Some(parent) = path.parent() {
+        let dir = std::fs::File::open(parent)?;
+        dir.sync_data()?;
+    }
     Ok(())
 }
 

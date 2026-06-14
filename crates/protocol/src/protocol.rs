@@ -96,23 +96,13 @@ pub async fn read_command<R: AsyncBufRead + Unpin>(
 fn parse_connect(payload: &str) -> Result<Command, ProtocolError> {
     let value: serde_json::Value = serde_json::from_str(payload)
         .map_err(|err| ProtocolError(format!("invalid CONNECT payload: {err}")))?;
-    let verbose = value
-        .get("verbose")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false);
-    let durable_id = value
-        .get("durable_id")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_string);
+    let verbose = get_bool(&value, "verbose")?.unwrap_or(false);
+    let durable_id = get_string(&value, "durable_id")?.map(str::to_string);
     if let Some(durable_id) = &durable_id {
         validate_identifier("durable_id", durable_id)?;
     }
-    let ack_timeout_ms = value
-        .get("ack_timeout_ms")
-        .and_then(serde_json::Value::as_u64);
-    let max_in_flight = value
-        .get("max_in_flight")
-        .and_then(serde_json::Value::as_u64)
+    let ack_timeout_ms = get_u64(&value, "ack_timeout_ms")?;
+    let max_in_flight = get_u64(&value, "max_in_flight")?
         .map(|value| {
             value
                 .try_into()
@@ -130,14 +120,8 @@ fn parse_connect(payload: &str) -> Result<Command, ProtocolError> {
 }
 
 fn parse_connect_auth(value: &serde_json::Value) -> Result<Option<ConnectAuth>, ProtocolError> {
-    let client_id = value
-        .get("client_id")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_string);
-    let signature = value
-        .get("signature")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_string);
+    let client_id = get_string(value, "client_id")?.map(str::to_string);
+    let signature = get_string(value, "signature")?.map(str::to_string);
     if let Some(client_id) = &client_id {
         validate_identifier("client_id", client_id)?;
     }
@@ -150,6 +134,44 @@ fn parse_connect_auth(value: &serde_json::Value) -> Result<Option<ConnectAuth>, 
         _ => Err(ProtocolError(
             "CONNECT client_id and signature must be provided together".into(),
         )),
+    }
+}
+
+fn get_bool(value: &serde_json::Value, key: &str) -> Result<Option<bool>, ProtocolError> {
+    match value.get(key) {
+        Some(serde_json::Value::Bool(value)) => Ok(Some(*value)),
+        Some(_) => Err(ProtocolError(format!(
+            "CONNECT field {key} must be a boolean"
+        ))),
+        None => Ok(None),
+    }
+}
+
+fn get_string<'a>(
+    value: &'a serde_json::Value,
+    key: &str,
+) -> Result<Option<&'a str>, ProtocolError> {
+    match value.get(key) {
+        Some(serde_json::Value::String(value)) => Ok(Some(value)),
+        Some(_) => Err(ProtocolError(format!(
+            "CONNECT field {key} must be a string"
+        ))),
+        None => Ok(None),
+    }
+}
+
+fn get_u64(value: &serde_json::Value, key: &str) -> Result<Option<u64>, ProtocolError> {
+    match value.get(key) {
+        Some(serde_json::Value::Number(value)) => value
+            .as_u64()
+            .ok_or_else(|| {
+                ProtocolError(format!("CONNECT field {key} must be an unsigned integer"))
+            })
+            .map(Some),
+        Some(_) => Err(ProtocolError(format!(
+            "CONNECT field {key} must be an unsigned integer"
+        ))),
+        None => Ok(None),
     }
 }
 
@@ -412,6 +434,26 @@ mod tests {
                 }),
             }
         );
+    }
+
+    #[tokio::test]
+    async fn rejects_malformed_connect_field_types() {
+        for (payload, expected) in [
+            (r#"{"verbose":"true"}"#, "verbose"),
+            (r#"{"durable_id":7}"#, "durable_id"),
+            (r#"{"ack_timeout_ms":"25"}"#, "ack_timeout_ms"),
+            (r#"{"max_in_flight":"7"}"#, "max_in_flight"),
+            (r#"{"client_id":7,"signature":"1234"}"#, "client_id"),
+            (r#"{"client_id":"client1","signature":1234}"#, "signature"),
+        ] {
+            let line = format!("CONNECT {payload}\r\n");
+            let mut reader = BufReader::new(line.as_bytes());
+            let err = read_command(&mut reader, 1024).await.unwrap_err();
+            assert!(
+                err.0.contains(expected),
+                "expected {expected:?} in error {err:?}"
+            );
+        }
     }
 
     #[tokio::test]
