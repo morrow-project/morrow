@@ -1000,7 +1000,10 @@ impl fmt::Display for SimpleError {
 
 impl std::error::Error for SimpleError {}
 
-pub async fn proxy_to_leader(mut inbound: TcpStream, leader: SocketAddr) -> Result<()> {
+pub(crate) async fn proxy_stream_to_leader<S>(mut inbound: S, leader: SocketAddr) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let mut outbound = TcpStream::connect(leader)
         .await
         .with_context(|| format!("connecting to leader {leader}"))?;
@@ -1008,6 +1011,10 @@ pub async fn proxy_to_leader(mut inbound: TcpStream, leader: SocketAddr) -> Resu
         .await
         .context("proxying client connection to leader")?;
     Ok(())
+}
+
+pub async fn proxy_to_leader(inbound: TcpStream, leader: SocketAddr) -> Result<()> {
+    proxy_stream_to_leader(inbound, leader).await
 }
 
 #[cfg(test)]

@@ -343,6 +343,9 @@ async fn clustered_follower_proxies_client_to_leader() {
         .iter()
         .find(|node| node.node_id != leader)
         .expect("three node cluster has a follower");
+    harness
+        .wait_until_follower_knows_leader(follower.node_id, leader)
+        .await;
 
     let mut subscriber = Client::connect(follower.client_addr, harness.max_payload)
         .await
@@ -479,6 +482,27 @@ impl ClusterHarness {
             assert!(
                 tokio::time::Instant::now() < deadline,
                 "cluster did not elect a leader"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    async fn wait_until_follower_knows_leader(&self, follower_id: u64, leader_id: u64) {
+        let Some(follower_index) = self
+            .nodes
+            .iter()
+            .position(|node| node.node_id == follower_id)
+        else {
+            panic!("unknown follower node {follower_id}");
+        };
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if self.brokers[follower_index].cluster_leader().await == Some(leader_id) {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "follower {follower_id} did not learn leader {leader_id}"
             );
             tokio::time::sleep(Duration::from_millis(50)).await;
         }

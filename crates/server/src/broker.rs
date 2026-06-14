@@ -22,7 +22,7 @@ use protocol::{AckSubject, Command, ConnectAuth, auth, subject};
 use crate::{
     config::Config,
     error::{BrokerError, Result, ResultExt},
-    raft::{BrokerCommand, BrokerResponse, DurableState, RaftRuntime, proxy_to_leader},
+    raft::{BrokerCommand, BrokerResponse, DurableState, RaftRuntime, proxy_stream_to_leader},
     wal::{ConsumerRecord, PublishRecord, ReplayedConsumer, Wal},
 };
 
@@ -253,6 +253,12 @@ impl FakeClusterRuntime {
 
     fn queued_write_count(&self) -> usize {
         self.inner.lock().unwrap().queued_writes.len()
+    }
+
+    fn set_client_addr(&self, node_id: u64, addr: SocketAddr) {
+        let mut inner = self.inner.lock().unwrap();
+        assert!(inner.nodes.contains_key(&node_id));
+        inner.nodes.insert(node_id, addr);
     }
 
     fn set_leader(&self, leader: Option<u64>) {
@@ -505,6 +511,17 @@ impl Broker {
         self.handle_client(stream).await
     }
 
+    #[cfg(test)]
+    pub(crate) async fn handle_accepted_for_test<S>(&self, stream: S) -> Result<()>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        let Some(stream) = self.route_cluster_stream(stream).await? else {
+            return Ok(());
+        };
+        self.handle_client(stream).await
+    }
+
     fn spawn_accepted(&self, stream: TcpStream) {
         let broker = self.clone();
         tokio::spawn(async move {
@@ -515,22 +532,9 @@ impl Broker {
     }
 
     async fn handle_accepted(&self, stream: TcpStream) -> Result<()> {
-        if let Some(cluster) = self.cluster_runtime().await {
-            if !cluster.is_leader().await {
-                if let Some(leader) = cluster.leader_client_addr().await {
-                    return proxy_to_leader(stream, leader).await;
-                }
-                if cluster.tls_enabled() {
-                    return Ok(());
-                }
-                let mut stream = stream;
-                stream
-                    .write_all(&protocol::err("no known leader"))
-                    .await
-                    .context("writing no-leader error")?;
-                return Ok(());
-            }
-        }
+        let Some(stream) = self.route_cluster_stream(stream).await? else {
+            return Ok(());
+        };
         if let Some(acceptor) = &self.tls_acceptor {
             let timeout_ms = self
                 .config
@@ -547,6 +551,30 @@ impl Broker {
         } else {
             self.handle_client(stream).await
         }
+    }
+
+    async fn route_cluster_stream<S>(&self, stream: S) -> Result<Option<S>>
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        if let Some(cluster) = self.cluster_runtime().await {
+            if !cluster.is_leader().await {
+                if let Some(leader) = cluster.leader_client_addr().await {
+                    proxy_stream_to_leader(stream, leader).await?;
+                    return Ok(None);
+                }
+                if cluster.tls_enabled() {
+                    return Ok(None);
+                }
+                let mut stream = stream;
+                stream
+                    .write_all(&protocol::err("no known leader"))
+                    .await
+                    .context("writing no-leader error")?;
+                return Ok(None);
+            }
+        }
+        Ok(Some(stream))
     }
 
     async fn handle_client<S>(&self, stream: S) -> Result<()>
@@ -1505,9 +1533,17 @@ mod tests {
         }
 
         fn new_fake_cluster(node_count: u64) -> Self {
+            Self::new_fake_cluster_local_node(node_count, 1, Some(1))
+        }
+
+        fn new_fake_cluster_local_node(
+            node_count: u64,
+            local_node_id: u64,
+            leader: Option<u64>,
+        ) -> Self {
             let dir = TempDir::new().unwrap();
             let clock = Arc::new(ManualClock::new(1_000));
-            let fake_cluster = FakeClusterRuntime::new(node_count, 1, Some(1));
+            let fake_cluster = FakeClusterRuntime::new(node_count, local_node_id, leader);
             let broker = deterministic_broker(
                 dir.path(),
                 clock.clone(),
@@ -1557,8 +1593,16 @@ mod tests {
             self.fake_cluster().queued_write_count()
         }
 
+        fn set_client_addr(&self, node_id: u64, addr: SocketAddr) {
+            self.fake_cluster().set_client_addr(node_id, addr);
+        }
+
         async fn connect(&self) -> TestClient {
             TestClient::connect(&self.broker).await
+        }
+
+        async fn connect_accepted(&self) -> TestClient {
+            TestClient::connect_accepted(&self.broker).await
         }
 
         async fn connect_durable(&self, durable_id: &str, ack_timeout_ms: u64) -> TestClient {
@@ -1598,10 +1642,25 @@ mod tests {
 
     impl TestClient {
         async fn connect(broker: &Broker) -> Self {
+            Self::connect_with(broker, false).await
+        }
+
+        async fn connect_accepted(broker: &Broker) -> Self {
+            Self::connect_with(broker, true).await
+        }
+
+        async fn connect_with(broker: &Broker, accepted_path: bool) -> Self {
             let (client_stream, server_stream) = tokio::io::duplex(4096);
             let server = broker.clone();
             let task = tokio::spawn(async move {
-                server.handle_client_for_test(server_stream).await.unwrap();
+                if accepted_path {
+                    server
+                        .handle_accepted_for_test(server_stream)
+                        .await
+                        .unwrap();
+                } else {
+                    server.handle_client_for_test(server_stream).await.unwrap();
+                }
             });
             let mut client = Self {
                 stream: Some(BufReader::new(client_stream)),
@@ -1614,14 +1673,20 @@ mod tests {
 
         async fn connect_durable(broker: &Broker, durable_id: &str, ack_timeout_ms: u64) -> Self {
             let mut client = Self::connect(broker).await;
+            client
+                .send_durable_connect(durable_id, ack_timeout_ms)
+                .await;
+            client
+        }
+
+        async fn send_durable_connect(&mut self, durable_id: &str, ack_timeout_ms: u64) {
             let payload = serde_json::json!({
                 "durable_id": durable_id,
                 "verbose": false,
                 "ack_timeout_ms": ack_timeout_ms,
                 "max_in_flight": 1024,
             });
-            client.write_line(&format!("CONNECT {payload}")).await;
-            client
+            self.write_line(&format!("CONNECT {payload}")).await;
         }
 
         async fn disconnect(mut self) {
@@ -2134,6 +2199,105 @@ mod tests {
         assert!(consumer.acked.contains(&1));
         assert!(durable.messages.is_empty());
         assert_eq!(scenario.fake_cluster().write_count(), 4);
+    }
+
+    #[tokio::test]
+    async fn fake_cluster_follower_without_known_leader_returns_error() {
+        let scenario = Scenario::new_fake_cluster_local_node(3, 1, None);
+        let (client_stream, server_stream) = tokio::io::duplex(4096);
+        let broker = scenario.broker().clone();
+        let task = tokio::spawn(async move {
+            broker
+                .handle_accepted_for_test(server_stream)
+                .await
+                .unwrap();
+        });
+        let mut client = BufReader::new(client_stream);
+        let mut frame = Vec::new();
+
+        client.read_until(b'\n', &mut frame).await.unwrap();
+
+        let frame = String::from_utf8(frame).unwrap();
+        assert!(frame.starts_with("-ERR "), "expected -ERR, got {frame:?}");
+        assert!(frame.contains("no known leader"));
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn fake_cluster_follower_proxies_raw_bytes_to_known_leader() {
+        let scenario = Scenario::new_fake_cluster_local_node(3, 1, Some(2));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        scenario.set_client_addr(2, listener.local_addr().unwrap());
+        let leader_task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0; 5];
+            stream.read_exact(&mut request).await.unwrap();
+            assert_eq!(&request, b"ping!");
+            stream.write_all(b"pong!").await.unwrap();
+        });
+        let (mut client_stream, server_stream) = tokio::io::duplex(4096);
+        let broker = scenario.broker().clone();
+        let broker_task = tokio::spawn(async move {
+            broker
+                .handle_accepted_for_test(server_stream)
+                .await
+                .unwrap();
+        });
+
+        client_stream.write_all(b"ping!").await.unwrap();
+        let mut response = [0; 5];
+        client_stream.read_exact(&mut response).await.unwrap();
+
+        assert_eq!(&response, b"pong!");
+        drop(client_stream);
+        leader_task.await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), broker_task)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn fake_cluster_leader_change_from_remote_to_local_handles_protocol_locally() {
+        let scenario = Scenario::new_fake_cluster_local_node(3, 1, Some(2));
+        scenario.set_leader(Some(1));
+        let mut subscriber = scenario.connect_accepted().await;
+        subscriber.send_durable_connect("client1", 25).await;
+        let mut publisher = scenario.connect_accepted().await;
+        publisher.send_durable_connect("publisher1", 25).await;
+
+        subscriber.subscribe("orders.*", "sid1").await;
+        subscriber.ping_roundtrip().await;
+        publisher.publish("orders.created", b"hello").await;
+
+        let delivery = subscriber.expect_msg().await;
+        assert!(
+            delivery.starts_with("MSG orders.created sid1 _BROKER.ACK.durable-client1-sid1.1.1")
+        );
+        assert!(delivery.ends_with("5\r\nhello\r\n"));
+    }
+
+    #[tokio::test]
+    async fn fake_cluster_local_leader_accepts_durable_flow_through_accepted_path() {
+        let scenario = Scenario::new_fake_cluster_local_node(5, 1, Some(1));
+        let mut subscriber = scenario.connect_accepted().await;
+        subscriber.send_durable_connect("client1", 25).await;
+        let mut publisher = scenario.connect_accepted().await;
+        publisher.send_durable_connect("publisher1", 25).await;
+
+        subscriber.subscribe("orders.*", "sid1").await;
+        subscriber.ping_roundtrip().await;
+        publisher.publish("orders.created", b"hello").await;
+
+        let delivery = subscriber.expect_msg().await;
+        assert!(delivery.ends_with("5\r\nhello\r\n"));
+        publisher.publish(&ack_subject(&delivery), b"").await;
+        publisher.ping_roundtrip().await;
+
+        let durable = scenario.fake_cluster().durable_state();
+        let consumer = durable.consumers.get("durable-client1-sid1").unwrap();
+        assert!(consumer.in_flight.is_empty());
+        assert!(consumer.acked.contains(&1));
     }
 
     #[tokio::test]
