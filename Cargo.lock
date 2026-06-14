@@ -69,8 +69,11 @@ version = "0.1.0"
 dependencies = [
  "ed25519-dalek",
  "protocol",
+ "rustls",
+ "rustls-pemfile",
  "serde_json",
  "tokio",
+ "tokio-rustls",
 ]
 
 [[package]]

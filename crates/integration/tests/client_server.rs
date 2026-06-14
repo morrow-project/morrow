@@ -5,8 +5,13 @@ use std::{
 };
 
 use client::{Client, ClientAuth, ServerFrame};
-use server::{Broker, Config, config::AuthConfig};
-use tokio::net::TcpListener;
+use server::{
+    Broker, Config,
+    config::{AuthConfig, TlsConfig},
+};
+use tokio::{net::TcpListener, time::Duration};
+
+const TLS_SERVER_NAME: &str = "localhost";
 
 struct TestDir(PathBuf);
 
@@ -157,6 +162,121 @@ async fn auth_nonce_is_fresh_per_connection() {
     harness.shutdown().await;
 }
 
+#[tokio::test]
+async fn tls_client_can_subscribe_publish_receive_and_ack() {
+    let harness = Harness::start_tls().await;
+    let mut subscriber = Client::connect_tls(
+        harness.addr,
+        TLS_SERVER_NAME,
+        tls_ca_cert_file(),
+        harness.max_payload,
+    )
+    .await
+    .unwrap();
+    let info = subscriber.read_info().await.unwrap();
+    assert!(!info.auth_required);
+    subscriber
+        .connect_durable("subscriber1", false, 5_000, 16)
+        .await
+        .unwrap();
+    subscriber.subscribe("orders.*", "sid1").await.unwrap();
+    subscriber.ping_roundtrip().await.unwrap();
+
+    let mut publisher = Client::connect_tls(
+        harness.addr,
+        TLS_SERVER_NAME,
+        tls_ca_cert_file(),
+        harness.max_payload,
+    )
+    .await
+    .unwrap();
+    publisher.read_info().await.unwrap();
+    publisher
+        .connect_durable("publisher1", false, 5_000, 16)
+        .await
+        .unwrap();
+    publisher.publish("orders.created", b"hello").await.unwrap();
+
+    let message = subscriber.next_message().await.unwrap();
+    assert_eq!(message.subject, "orders.created");
+    assert_eq!(message.sid, "sid1");
+    assert_eq!(message.payload, b"hello");
+    let ack_subject = message
+        .reply_to
+        .expect("durable messages carry ack subject");
+    subscriber.ack(&ack_subject).await.unwrap();
+    subscriber.ping_roundtrip().await.unwrap();
+
+    harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn tls_authenticated_client_can_subscribe_publish_receive_and_ack() {
+    let subscriber_auth = ClientAuth::from_seed("subscriber1", [7; 32]);
+    let publisher_auth = ClientAuth::from_seed("publisher1", [8; 32]);
+    let harness = Harness::start_tls_with_auth(&[&subscriber_auth, &publisher_auth]).await;
+
+    let mut subscriber = Client::connect_tls(
+        harness.addr,
+        TLS_SERVER_NAME,
+        tls_ca_cert_file(),
+        harness.max_payload,
+    )
+    .await
+    .unwrap();
+    let info = subscriber.read_info().await.unwrap();
+    assert!(info.auth_required);
+    subscriber
+        .connect_authenticated(&info, &subscriber_auth, false, 5_000, 16)
+        .await
+        .unwrap();
+    subscriber.subscribe("orders.*", "sid1").await.unwrap();
+    subscriber.ping_roundtrip().await.unwrap();
+
+    let mut publisher = Client::connect_tls(
+        harness.addr,
+        TLS_SERVER_NAME,
+        tls_ca_cert_file(),
+        harness.max_payload,
+    )
+    .await
+    .unwrap();
+    let info = publisher.read_info().await.unwrap();
+    publisher
+        .connect_authenticated(&info, &publisher_auth, false, 5_000, 16)
+        .await
+        .unwrap();
+    publisher.publish("orders.created", b"hello").await.unwrap();
+
+    let message = subscriber.next_message().await.unwrap();
+    assert_eq!(message.subject, "orders.created");
+    assert_eq!(message.sid, "sid1");
+    assert_eq!(message.payload, b"hello");
+    let ack_subject = message
+        .reply_to
+        .expect("durable messages carry ack subject");
+    subscriber.ack(&ack_subject).await.unwrap();
+    subscriber.ping_roundtrip().await.unwrap();
+
+    harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn plain_client_does_not_complete_info_against_tls_listener() {
+    let harness = Harness::start_tls().await;
+    let mut client = Client::connect(harness.addr, harness.max_payload)
+        .await
+        .unwrap();
+
+    let read = tokio::time::timeout(Duration::from_secs(1), client.read_info()).await;
+    assert!(
+        read.is_err() || read.unwrap().is_err(),
+        "plain client unexpectedly read INFO from TLS listener"
+    );
+
+    harness.shutdown().await;
+}
+
 struct Harness {
     addr: SocketAddr,
     max_payload: usize,
@@ -167,10 +287,22 @@ struct Harness {
 
 impl Harness {
     async fn start() -> Self {
-        Self::start_with_config(Default::default()).await
+        Self::start_with_config(Default::default(), None).await
     }
 
     async fn start_with_auth(clients: &[&ClientAuth]) -> Self {
+        Self::start_with_auth_and_tls(clients, None).await
+    }
+
+    async fn start_tls() -> Self {
+        Self::start_with_config(Default::default(), Some(tls_config())).await
+    }
+
+    async fn start_tls_with_auth(clients: &[&ClientAuth]) -> Self {
+        Self::start_with_auth_and_tls(clients, Some(tls_config())).await
+    }
+
+    async fn start_with_auth_and_tls(clients: &[&ClientAuth], tls: Option<TlsConfig>) -> Self {
         let auth = AuthConfig {
             enabled: true,
             clients: clients
@@ -183,10 +315,10 @@ impl Harness {
                 })
                 .collect(),
         };
-        Self::start_with_config(auth).await
+        Self::start_with_config(auth, tls).await
     }
 
-    async fn start_with_config(auth: AuthConfig) -> Self {
+    async fn start_with_config(auth: AuthConfig, tls: Option<TlsConfig>) -> Self {
         let wal_dir = TestDir::new();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -197,7 +329,7 @@ impl Harness {
             fsync_interval_ms: 1,
             max_payload,
             verbose: false,
-            tls: None,
+            tls,
             auth,
         };
         let broker = Broker::open(config).unwrap();
@@ -220,4 +352,24 @@ impl Harness {
         self.broker.shutdown().await.unwrap();
         self.server_task.abort();
     }
+}
+
+fn tls_config() -> TlsConfig {
+    TlsConfig {
+        cert_file: tls_cert_file(),
+        key_file: tls_key_file(),
+        handshake_timeout_ms: 100,
+    }
+}
+
+fn tls_cert_file() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/server-cert.pem")
+}
+
+fn tls_key_file() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/server-key.pem")
+}
+
+fn tls_ca_cert_file() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ca-cert.pem")
 }

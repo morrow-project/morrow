@@ -1,19 +1,30 @@
-use std::{error::Error, fmt, net::SocketAddr};
-
-use tokio::{
-    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
-    net::TcpStream,
+use std::{
+    error::Error, fmt, fs::File, io::BufReader as StdBufReader, net::SocketAddr, path::Path,
+    sync::Arc,
 };
 
+use tokio::{
+    io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader},
+    net::TcpStream,
+};
+use tokio_rustls::TlsConnector;
+
 use ed25519_dalek::{Signer, SigningKey};
+use rustls::{
+    ClientConfig, RootCertStore,
+    pki_types::{CertificateDer, ServerName},
+};
 
 pub use protocol;
 
-#[derive(Debug)]
 pub struct Client {
-    stream: BufReader<TcpStream>,
+    stream: BufReader<Box<dyn ClientStream>>,
     max_payload: usize,
 }
+
+trait ClientStream: AsyncRead + AsyncWrite + Unpin + Send {}
+
+impl<T> ClientStream for T where T: AsyncRead + AsyncWrite + Unpin + Send {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Info {
@@ -59,7 +70,29 @@ impl Client {
             .await
             .map_err(|err| ClientError::with_source(format!("connecting to {addr}"), err))?;
         Ok(Self {
-            stream: BufReader::new(stream),
+            stream: BufReader::new(Box::new(stream)),
+            max_payload,
+        })
+    }
+
+    pub async fn connect_tls(
+        addr: SocketAddr,
+        server_name: &str,
+        root_cert_file: impl AsRef<Path>,
+        max_payload: usize,
+    ) -> Result<Self> {
+        let stream = TcpStream::connect(addr)
+            .await
+            .map_err(|err| ClientError::with_source(format!("connecting to {addr}"), err))?;
+        let server_name = ServerName::try_from(server_name.to_string())
+            .map_err(|err| ClientError::with_source("invalid TLS server name", err))?;
+        let connector = TlsConnector::from(Arc::new(tls_config(root_cert_file)?));
+        let stream = connector
+            .connect(server_name, stream)
+            .await
+            .map_err(|err| ClientError::with_source("performing TLS handshake", err))?;
+        Ok(Self {
+            stream: BufReader::new(Box::new(stream)),
             max_payload,
         })
     }
@@ -251,7 +284,7 @@ impl ClientAuth {
 }
 
 async fn parse_frame(
-    stream: &mut BufReader<TcpStream>,
+    stream: &mut BufReader<Box<dyn ClientStream>>,
     line: &str,
     max_payload: usize,
 ) -> Result<Option<ServerFrame>> {
@@ -290,7 +323,7 @@ fn parse_info(line: &str) -> Result<Info> {
 }
 
 async fn parse_msg<'a>(
-    stream: &mut BufReader<TcpStream>,
+    stream: &mut BufReader<Box<dyn ClientStream>>,
     mut parts: impl Iterator<Item = &'a str>,
     max_payload: usize,
 ) -> Result<ServerFrame> {
@@ -348,6 +381,34 @@ fn trim_crlf(line: &mut Vec<u8>) -> Result<()> {
     } else {
         Err(ClientError::msg("server frame missing newline"))
     }
+}
+
+fn tls_config(root_cert_file: impl AsRef<Path>) -> Result<ClientConfig> {
+    let mut roots = RootCertStore::empty();
+    for cert in load_certs(root_cert_file)? {
+        roots
+            .add(cert)
+            .map_err(|err| ClientError::with_source("adding root certificate", err))?;
+    }
+    Ok(ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth())
+}
+
+fn load_certs(path: impl AsRef<Path>) -> Result<Vec<CertificateDer<'static>>> {
+    let path = path.as_ref();
+    let file = File::open(path)
+        .map_err(|err| ClientError::with_source(format!("opening {}", path.display()), err))?;
+    let mut reader = StdBufReader::new(file);
+    let certs: Vec<_> = rustls_pemfile::certs(&mut reader)
+        .collect::<std::result::Result<_, _>>()
+        .map_err(|err| ClientError::with_source("reading root certificate PEM", err))?;
+    if certs.is_empty() {
+        return Err(ClientError::msg(
+            "root certificate file contains no certificates",
+        ));
+    }
+    Ok(certs)
 }
 
 impl ClientError {
