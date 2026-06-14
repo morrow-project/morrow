@@ -14,6 +14,7 @@ use tokio::{
     sync::{Mutex, mpsc},
 };
 use tokio_rustls::TlsAcceptor;
+use tracing::{error, info};
 
 #[cfg(test)]
 use openraft::BasicNode;
@@ -33,6 +34,7 @@ use crate::{
 const DEFAULT_ACK_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_MAX_IN_FLIGHT: usize = 1024;
 const REDELIVERY_SCAN_INTERVAL_MS: u64 = 50;
+const CLUSTER_LOG_SCAN_INTERVAL_MS: u64 = 500;
 
 #[derive(Clone)]
 pub struct Broker {
@@ -292,12 +294,12 @@ impl RouteMesh {
                                 handle_route_stream(mesh, broker, stream, RouteDirection::Inbound)
                                     .await
                             {
-                                eprintln!("route connection error: {err:#}");
+                                error!(error = ?err, "route connection error");
                             }
                         });
                     }
                     Err(err) => {
-                        eprintln!("accepting route connection failed: {err:#}");
+                        error!(error = ?err, "accepting route connection failed");
                     }
                 }
             }
@@ -324,7 +326,7 @@ impl RouteMesh {
                                 )
                                 .await
                                 {
-                                    eprintln!("route connection error: {err:#}");
+                                    error!(error = ?err, "route connection error");
                                 }
                             });
                         }
@@ -408,11 +410,12 @@ impl RouteMesh {
         info: RoutePeerInfo,
         direction: RouteDirection,
         sender: mpsc::Sender<RouteFrame>,
-    ) -> bool {
+    ) -> Option<bool> {
         let mut state = self.inner.lock().await;
         if info.node_id == state.node_id || info.route_addr == state.route_addr {
-            return false;
+            return None;
         }
+        let added = !state.known_peers.contains_key(&info.node_id);
         state.known_peers.insert(info.node_id, info.clone());
         state.peers.insert(
             info.node_id,
@@ -426,7 +429,7 @@ impl RouteMesh {
                 remote_interests: Vec::new(),
             },
         );
-        true
+        Some(added)
     }
 
     async fn remove_peer(&self, node_id: u64) {
@@ -434,15 +437,24 @@ impl RouteMesh {
         state.peers.remove(&node_id);
     }
 
-    async fn merge_peers(&self, peers: Vec<RoutePeerInfo>) {
+    async fn merge_peers(&self, peers: Vec<RoutePeerInfo>) -> Vec<u64> {
         let mut state = self.inner.lock().await;
         let node_id = state.node_id;
         let route_addr = state.route_addr;
+        let mut added = Vec::new();
         for peer in peers {
             if peer.node_id != node_id && peer.route_addr != route_addr {
+                if !state.known_peers.contains_key(&peer.node_id) {
+                    added.push(peer.node_id);
+                }
                 state.known_peers.insert(peer.node_id, peer);
             }
         }
+        added
+    }
+
+    async fn connected_peer_count(&self) -> usize {
+        self.inner.lock().await.peers.len()
     }
 
     async fn set_remote_interests(&self, node_id: u64, subjects: Vec<String>) {
@@ -595,15 +607,20 @@ async fn handle_route_stream(
                     route_addr,
                     client_addr,
                 };
-                if mesh.register_peer(info, direction, sender.clone()).await {
-                    peer_id = Some(node_id);
-                    mesh.broadcast_peer_list().await;
-                } else {
+                let Some(added_peer) = mesh.register_peer(info, direction, sender.clone()).await
+                else {
                     break;
+                };
+                peer_id = Some(node_id);
+                if added_peer {
+                    broker.log_cluster_event("cluster peer added").await;
                 }
+                mesh.broadcast_peer_list().await;
             }
             RouteFrame::PeerList { peers } => {
-                mesh.merge_peers(peers).await;
+                for _ in mesh.merge_peers(peers).await {
+                    broker.log_cluster_event("cluster peer added").await;
+                }
             }
             RouteFrame::Interests { subjects } => {
                 if let Some(node_id) = peer_id {
@@ -1073,6 +1090,8 @@ impl Broker {
     async fn serve_inner(self, listener: TcpListener, handle_shutdown: bool) -> Result<()> {
         self.start_cluster().await?;
         self.start_route_mesh().await?;
+        self.log_cluster_event("server started").await;
+        self.spawn_cluster_log_monitor();
         self.spawn_http_status_listener();
         if self.hooks.start_redelivery_loop {
             let redeliver = self.clone();
@@ -1186,7 +1205,7 @@ impl Broker {
         let broker = self.clone();
         tokio::spawn(async move {
             if let Err(err) = broker.serve_http_status(listen).await {
-                eprintln!("http status error: {err:#}");
+                error!(error = ?err, "http status error");
             }
         });
     }
@@ -1203,7 +1222,7 @@ impl Broker {
             let broker = self.clone();
             tokio::spawn(async move {
                 if let Err(err) = broker.handle_http_status(stream).await {
-                    eprintln!("http status connection error: {err:#}");
+                    error!(error = ?err, "http status connection error");
                 }
             });
         }
@@ -1282,7 +1301,7 @@ impl Broker {
         let broker = self.clone();
         tokio::spawn(async move {
             if let Err(err) = broker.handle_accepted(stream).await {
-                eprintln!("client error: {err:#}");
+                error!(error = ?err, "client error");
             }
         });
     }
@@ -1877,7 +1896,7 @@ impl Broker {
         loop {
             interval.tick().await;
             if let Err(err) = self.expire_and_redeliver().await {
-                eprintln!("redelivery error: {err:#}");
+                error!(error = ?err, "redelivery error");
             }
         }
     }
@@ -1957,6 +1976,65 @@ impl Broker {
         route_mesh.start(self.clone()).await?;
         self.sync_route_interests().await;
         Ok(())
+    }
+
+    fn spawn_cluster_log_monitor(&self) {
+        if self.config.cluster.is_none() {
+            return;
+        }
+        let broker = self.clone();
+        tokio::spawn(async move {
+            broker.cluster_log_monitor().await;
+        });
+    }
+
+    async fn cluster_log_monitor(self) {
+        let mut previous_leader = self.current_leader_for_log().await;
+        let mut full_mesh_formed = false;
+        let mut interval =
+            tokio::time::interval(Duration::from_millis(CLUSTER_LOG_SCAN_INTERVAL_MS));
+        loop {
+            interval.tick().await;
+            let leader = self.current_leader_for_log().await;
+            if leader != previous_leader {
+                self.log_cluster_event("cluster leader changed").await;
+                previous_leader = leader;
+            }
+
+            let Some(route_mesh) = &self.route_mesh else {
+                continue;
+            };
+            let cluster_size = self.cluster_size_for_log().await;
+            let formed = cluster_size > 1
+                && route_mesh.connected_peer_count().await >= cluster_size.saturating_sub(1);
+            if formed && !full_mesh_formed {
+                self.log_cluster_event("full member cluster formed").await;
+            }
+            full_mesh_formed = formed;
+        }
+    }
+
+    async fn log_cluster_event(&self, event: &str) {
+        let cluster_size = self.cluster_size_for_log().await;
+        let leader_id = format_leader_id(self.current_leader_for_log().await);
+        info!(event, cluster_size, leader_id, "cluster lifecycle");
+    }
+
+    async fn cluster_size_for_log(&self) -> usize {
+        self.cluster_runtime()
+            .await
+            .map(|cluster| cluster.cluster_size())
+            .or_else(|| {
+                self.config
+                    .cluster
+                    .as_ref()
+                    .map(|cluster| cluster.nodes.len())
+            })
+            .unwrap_or(1)
+    }
+
+    async fn current_leader_for_log(&self) -> Option<u64> {
+        self.cluster_runtime().await?.current_leader().await
     }
 
     async fn cluster_runtime(&self) -> Option<ClusterRuntime> {
@@ -2530,6 +2608,12 @@ fn now_ms() -> u64 {
         .as_millis()
         .try_into()
         .unwrap_or(u64::MAX)
+}
+
+fn format_leader_id(leader_id: Option<u64>) -> String {
+    leader_id
+        .map(|leader_id| leader_id.to_string())
+        .unwrap_or_else(|| "none".to_string())
 }
 
 #[cfg(test)]

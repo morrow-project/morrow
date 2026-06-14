@@ -1,7 +1,14 @@
 use server::{Broker, Config};
+use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> server::error::Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
+        .init();
+
     let config = Config::load_from_args()?;
     let broker = Broker::open(config)?;
     broker.serve().await

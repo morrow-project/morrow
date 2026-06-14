@@ -25,6 +25,7 @@ use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::{TcpListener, TcpStream},
 };
+use tracing::error;
 
 use crate::{
     config::ClusterConfig,
@@ -356,7 +357,7 @@ impl RaftRuntime {
         let raft = self.raft.clone();
         tokio::spawn(async move {
             if let Err(err) = serve_raft(raft, listen).await {
-                eprintln!("raft transport error: {err:#}");
+                error!(error = ?err, "raft transport error");
             }
         });
     }
@@ -884,7 +885,7 @@ async fn serve_raft(raft: BrokerRaft, listen: SocketAddr) -> Result<()> {
         let raft = raft.clone();
         tokio::spawn(async move {
             if let Err(err) = handle_raft_stream(raft, stream).await {
-                eprintln!("raft RPC error: {err:#}");
+                error!(error = ?err, "raft RPC error");
             }
         });
     }
