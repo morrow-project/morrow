@@ -1,0 +1,17 @@
+[package]
+name = "broker-server"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "broker"
+path = "src/main.rs"
+
+[dependencies]
+broker-protocol.workspace = true
+crc32fast.workspace = true
+rustls.workspace = true
+rustls-pemfile.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-rustls.workspace = true

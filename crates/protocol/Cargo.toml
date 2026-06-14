@@ -1,0 +1,10 @@
+[package]
+name = "broker-protocol"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ed25519-dalek.workspace = true
+getrandom.workspace = true
+serde_json.workspace = true
+tokio.workspace = true

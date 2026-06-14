@@ -14,11 +14,11 @@ use tokio::{
 };
 use tokio_rustls::TlsAcceptor;
 
+use broker_protocol::{self as protocol, AckSubject, Command, ConnectAuth, auth, subject};
+
 use crate::{
     config::Config,
     error::{BrokerError, Result, ResultExt},
-    protocol::{self, AckSubject, Command, ConnectAuth},
-    subject,
     wal::{ConsumerRecord, PublishRecord, ReplayedConsumer, Wal},
 };
 
@@ -253,7 +253,7 @@ impl Broker {
                 verbose: self.config.verbose,
                 durable_id: None,
                 auth_nonce: if self.config.auth.enabled {
-                    Some(crate::auth::nonce()?)
+                    Some(auth::nonce()?)
                 } else {
                     None
                 },
@@ -286,7 +286,13 @@ impl Broker {
             let auth = auth
                 .as_ref()
                 .ok_or_else(|| BrokerError::msg("CONNECT client_id and signature are required"))?;
-            let client_id = crate::auth::verify(auth, nonce, &self.config.auth)?;
+            let public_key = self
+                .config
+                .auth
+                .clients
+                .get(&auth.client_id)
+                .ok_or_else(|| BrokerError::msg("unknown client_id"))?;
+            let client_id = auth::verify(auth, nonce, public_key)?;
             if let Some(durable_id) = durable_id {
                 crate::broker_ensure!(
                     durable_id == client_id,

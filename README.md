@@ -92,18 +92,25 @@ identity for that connection.
 Build and run the broker from the repository root:
 
 ```bash
-cargo run --release -- broker.json
+cargo run --release -p broker-server -- broker.json
 ```
 
 If no config path is provided, the broker reads `broker.json` from the current
 directory:
 
 ```bash
-cargo run --release
+cargo run --release -p broker-server
 ```
 
 The WAL directory is created automatically. Stop the broker with `Ctrl-C`; it
 flushes the WAL before exiting.
+
+## Workspace Layout
+
+- `crates/server`: the broker runtime, WAL, TLS, and JSON configuration.
+- `crates/protocol`: shared wire protocol parsing/encoding, subject matching,
+  and challenge-response helpers.
+- `crates/client`: client crate scaffold for broker client tooling.
 
 ## Minimal Session
 
@@ -272,6 +279,6 @@ identified by `sid`. Durable consumer state remains in the WAL.
 
 ```bash
 cargo fmt --check
-cargo test
-cargo build --release
+cargo test --workspace
+cargo build --release --workspace
 ```

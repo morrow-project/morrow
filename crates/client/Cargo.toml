@@ -1,0 +1,7 @@
+[package]
+name = "broker-client"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+broker-protocol.workspace = true

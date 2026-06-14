@@ -40,12 +40,28 @@ dependencies = [
 ]
 
 [[package]]
-name = "broker"
+name = "broker-client"
 version = "0.1.0"
 dependencies = [
- "crc32fast",
+ "broker-protocol",
+]
+
+[[package]]
+name = "broker-protocol"
+version = "0.1.0"
+dependencies = [
  "ed25519-dalek",
  "getrandom 0.3.4",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "broker-server"
+version = "0.1.0"
+dependencies = [
+ "broker-protocol",
+ "crc32fast",
  "rustls",
  "rustls-pemfile",
  "serde_json",

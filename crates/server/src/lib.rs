@@ -1,9 +1,6 @@
-pub mod auth;
 pub mod broker;
 pub mod config;
 pub mod error;
-pub mod protocol;
-pub mod subject;
 pub mod tls;
 pub mod wal;
 

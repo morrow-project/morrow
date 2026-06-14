@@ -59,8 +59,14 @@ impl From<std::num::TryFromIntError> for BrokerError {
     }
 }
 
-impl From<crate::protocol::ProtocolError> for BrokerError {
-    fn from(source: crate::protocol::ProtocolError) -> Self {
+impl From<broker_protocol::ProtocolError> for BrokerError {
+    fn from(source: broker_protocol::ProtocolError) -> Self {
+        Self::with_source(source.to_string(), source)
+    }
+}
+
+impl From<broker_protocol::auth::AuthError> for BrokerError {
+    fn from(source: broker_protocol::auth::AuthError) -> Self {
         Self::with_source(source.to_string(), source)
     }
 }

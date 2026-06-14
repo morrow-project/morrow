@@ -6,10 +6,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::{
-    error::{Result, ResultExt},
-    subject,
-};
+use broker_protocol::subject;
+
+use crate::error::{Result, ResultExt};
 
 const WAL_FILE: &str = "broker.wal";
 const KIND_PUBLISH: u8 = 1;
