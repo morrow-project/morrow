@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/client",
+    "crates/integration",
     "crates/protocol",
     "crates/server",
 ]
@@ -11,7 +12,9 @@ version = "0.1.0"
 edition = "2024"
 
 [workspace.dependencies]
-broker-protocol = { path = "crates/protocol" }
+client = { path = "crates/client" }
+protocol = { path = "crates/protocol" }
+server = { path = "crates/server" }
 crc32fast = { version = "1.5.0", default-features = false, features = ["std"] }
 ed25519-dalek = { version = "2.2.0", default-features = false, features = ["alloc"] }
 getrandom = { version = "0.3.4", default-features = false, features = ["std"] }

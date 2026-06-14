@@ -1,9 +1,9 @@
 [package]
-name = "client"
+name = "integration"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
-protocol.workspace = true
-serde_json.workspace = true
+client.workspace = true
+server.workspace = true
 tokio.workspace = true

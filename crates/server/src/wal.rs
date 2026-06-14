@@ -6,7 +6,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use broker_protocol::subject;
+use protocol::subject;
 
 use crate::error::{Result, ResultExt};
 

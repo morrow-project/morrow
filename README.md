@@ -92,14 +92,14 @@ identity for that connection.
 Build and run the broker from the repository root:
 
 ```bash
-cargo run --release -p broker-server -- broker.json
+cargo run --release -p server -- broker.json
 ```
 
 If no config path is provided, the broker reads `broker.json` from the current
 directory:
 
 ```bash
-cargo run --release -p broker-server
+cargo run --release -p server
 ```
 
 The WAL directory is created automatically. Stop the broker with `Ctrl-C`; it

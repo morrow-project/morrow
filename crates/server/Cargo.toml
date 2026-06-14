@@ -1,5 +1,5 @@
 [package]
-name = "broker-server"
+name = "server"
 version.workspace = true
 edition.workspace = true
 
@@ -8,8 +8,8 @@ name = "broker"
 path = "src/main.rs"
 
 [dependencies]
-broker-protocol.workspace = true
 crc32fast.workspace = true
+protocol.workspace = true
 rustls.workspace = true
 rustls-pemfile.workspace = true
 serde_json.workspace = true

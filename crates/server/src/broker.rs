@@ -14,7 +14,7 @@ use tokio::{
 };
 use tokio_rustls::TlsAcceptor;
 
-use broker_protocol::{self as protocol, AckSubject, Command, ConnectAuth, auth, subject};
+use protocol::{AckSubject, Command, ConnectAuth, auth, subject};
 
 use crate::{
     config::Config,
@@ -104,27 +104,37 @@ impl Broker {
         let listener = TcpListener::bind(self.config.listen)
             .await
             .with_context(|| format!("binding {}", self.config.listen))?;
+        self.serve_inner(listener, true).await
+    }
+
+    pub async fn serve_listener(self, listener: TcpListener) -> Result<()> {
+        self.serve_inner(listener, false).await
+    }
+
+    async fn serve_inner(self, listener: TcpListener, handle_shutdown: bool) -> Result<()> {
         let redeliver = self.clone();
         tokio::spawn(async move {
             redeliver.redelivery_loop().await;
         });
 
         loop {
-            tokio::select! {
-                accepted = listener.accept() => {
-                    let (stream, _) = accepted.context("accepting client connection")?;
-                    let broker = self.clone();
-                    tokio::spawn(async move {
-                        if let Err(err) = broker.handle_accepted(stream).await {
-                            eprintln!("client error: {err:#}");
-                        }
-                    });
+            if handle_shutdown {
+                tokio::select! {
+                    accepted = listener.accept() => {
+                        self.spawn_accepted(accepted.context("accepting client connection")?.0);
+                    }
+                    signal = tokio::signal::ctrl_c() => {
+                        signal.context("waiting for shutdown signal")?;
+                        self.shutdown().await?;
+                        return Ok(());
+                    }
                 }
-                signal = tokio::signal::ctrl_c() => {
-                    signal.context("waiting for shutdown signal")?;
-                    self.shutdown().await?;
-                    return Ok(());
-                }
+            } else {
+                let (stream, _) = listener
+                    .accept()
+                    .await
+                    .context("accepting client connection")?;
+                self.spawn_accepted(stream);
             }
         }
     }
@@ -133,6 +143,15 @@ impl Broker {
         let mut inner = self.inner.lock().await;
         inner.wal.flush()?;
         Ok(())
+    }
+
+    fn spawn_accepted(&self, stream: TcpStream) {
+        let broker = self.clone();
+        tokio::spawn(async move {
+            if let Err(err) = broker.handle_accepted(stream).await {
+                eprintln!("client error: {err:#}");
+            }
+        });
     }
 
     async fn handle_accepted(&self, stream: TcpStream) -> Result<()> {
