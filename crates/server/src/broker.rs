@@ -1,5 +1,6 @@
 use std::{
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    net::SocketAddr,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -14,12 +15,14 @@ use tokio::{
 };
 use tokio_rustls::TlsAcceptor;
 
+#[cfg(test)]
+use openraft::BasicNode;
 use protocol::{AckSubject, Command, ConnectAuth, auth, subject};
 
 use crate::{
     config::Config,
     error::{BrokerError, Result, ResultExt},
-    raft::{BrokerCommand, DurableState, RaftRuntime, proxy_to_leader},
+    raft::{BrokerCommand, BrokerResponse, DurableState, RaftRuntime, proxy_to_leader},
     wal::{ConsumerRecord, PublishRecord, ReplayedConsumer, Wal},
 };
 
@@ -33,7 +36,7 @@ pub struct Broker {
     next_connection_id: Arc<AtomicU64>,
     config: Config,
     tls_acceptor: Option<TlsAcceptor>,
-    cluster: Arc<Mutex<Option<RaftRuntime>>>,
+    cluster: Arc<Mutex<Option<ClusterRuntime>>>,
     hooks: BrokerHooks,
 }
 
@@ -42,6 +45,8 @@ pub(crate) struct BrokerHooks {
     clock: Arc<dyn Clock>,
     start_redelivery_loop: bool,
     durable_publish_flush_mode: DurablePublishFlushMode,
+    #[cfg(test)]
+    initial_cluster: Option<ClusterRuntime>,
 }
 
 pub(crate) trait Clock: Send + Sync {
@@ -68,7 +73,154 @@ impl Default for BrokerHooks {
             clock: Arc::new(SystemClock),
             start_redelivery_loop: true,
             durable_publish_flush_mode: DurablePublishFlushMode::SleepThenFlush,
+            #[cfg(test)]
+            initial_cluster: None,
         }
+    }
+}
+
+#[derive(Clone)]
+enum ClusterRuntime {
+    Real(RaftRuntime),
+    #[cfg(test)]
+    Fake(FakeClusterRuntime),
+}
+
+impl ClusterRuntime {
+    fn real(runtime: RaftRuntime) -> Self {
+        Self::Real(runtime)
+    }
+
+    async fn client_write(&self, command: BrokerCommand) -> Result<BrokerResponse> {
+        match self {
+            Self::Real(runtime) => runtime.client_write(command).await,
+            #[cfg(test)]
+            Self::Fake(runtime) => runtime.client_write(command).await,
+        }
+    }
+
+    fn durable_state(&self) -> DurableState {
+        match self {
+            Self::Real(runtime) => runtime.durable_state(),
+            #[cfg(test)]
+            Self::Fake(runtime) => runtime.durable_state(),
+        }
+    }
+
+    async fn is_leader(&self) -> bool {
+        match self {
+            Self::Real(runtime) => runtime.is_leader().await,
+            #[cfg(test)]
+            Self::Fake(runtime) => runtime.is_leader().await,
+        }
+    }
+
+    async fn current_leader(&self) -> Option<u64> {
+        match self {
+            Self::Real(runtime) => runtime.current_leader().await,
+            #[cfg(test)]
+            Self::Fake(runtime) => runtime.current_leader().await,
+        }
+    }
+
+    async fn leader_client_addr(&self) -> Option<SocketAddr> {
+        match self {
+            Self::Real(runtime) => runtime.leader_client_addr().await,
+            #[cfg(test)]
+            Self::Fake(runtime) => runtime.leader_client_addr().await,
+        }
+    }
+
+    fn tls_enabled(&self) -> bool {
+        match self {
+            Self::Real(runtime) => runtime.tls_enabled(),
+            #[cfg(test)]
+            Self::Fake(runtime) => runtime.tls_enabled(),
+        }
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+struct FakeClusterRuntime {
+    inner: Arc<std::sync::Mutex<FakeClusterState>>,
+}
+
+#[cfg(test)]
+struct FakeClusterState {
+    local_node_id: u64,
+    leader: Option<u64>,
+    tls_enabled: bool,
+    nodes: HashMap<u64, SocketAddr>,
+    state: DurableState,
+    writes: usize,
+}
+
+#[cfg(test)]
+impl FakeClusterRuntime {
+    fn new(node_count: u64, local_node_id: u64, leader: Option<u64>) -> Self {
+        assert!(node_count > 0);
+        assert!(local_node_id > 0 && local_node_id <= node_count);
+        if let Some(leader) = leader {
+            assert!(leader > 0 && leader <= node_count);
+        }
+        let mut nodes = HashMap::new();
+        let mut raft_nodes = BTreeMap::new();
+        for node_id in 1..=node_count {
+            let addr = SocketAddr::from(([127, 0, 0, 1], 10_000 + node_id as u16));
+            nodes.insert(node_id, addr);
+            raft_nodes.insert(node_id, BasicNode::new(addr));
+        }
+        Self {
+            inner: Arc::new(std::sync::Mutex::new(FakeClusterState {
+                local_node_id,
+                leader,
+                tls_enabled: false,
+                nodes,
+                state: DurableState::new(raft_nodes),
+                writes: 0,
+            })),
+        }
+    }
+
+    async fn client_write(&self, command: BrokerCommand) -> Result<BrokerResponse> {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.leader != Some(inner.local_node_id) {
+            crate::broker_bail!("not leader");
+        }
+        inner.writes += 1;
+        Ok(inner.state.apply_command(command))
+    }
+
+    fn durable_state(&self) -> DurableState {
+        self.inner.lock().unwrap().state.clone()
+    }
+
+    async fn is_leader(&self) -> bool {
+        let inner = self.inner.lock().unwrap();
+        inner.leader == Some(inner.local_node_id)
+    }
+
+    async fn current_leader(&self) -> Option<u64> {
+        self.inner.lock().unwrap().leader
+    }
+
+    async fn leader_client_addr(&self) -> Option<SocketAddr> {
+        let inner = self.inner.lock().unwrap();
+        let leader = inner.leader?;
+        inner.nodes.get(&leader).copied()
+    }
+
+    fn tls_enabled(&self) -> bool {
+        self.inner.lock().unwrap().tls_enabled
+    }
+
+    fn write_count(&self) -> usize {
+        self.inner.lock().unwrap().writes
+    }
+
+    fn node_count(&self) -> usize {
+        self.inner.lock().unwrap().nodes.len()
     }
 }
 
@@ -162,6 +314,16 @@ impl Broker {
             .into_iter()
             .map(|(id, consumer)| (id, Consumer::from_replay(consumer)))
             .collect();
+        let cluster = {
+            #[cfg(test)]
+            {
+                hooks.initial_cluster.clone()
+            }
+            #[cfg(not(test))]
+            {
+                None
+            }
+        };
         Ok(Self {
             inner: Arc::new(Mutex::new(Inner {
                 wal,
@@ -173,7 +335,7 @@ impl Broker {
             next_connection_id: Arc::new(AtomicU64::new(1)),
             config,
             tls_acceptor,
-            cluster: Arc::new(Mutex::new(None)),
+            cluster: Arc::new(Mutex::new(cluster)),
             hooks,
         })
     }
@@ -834,22 +996,23 @@ impl Broker {
         };
         let runtime = RaftRuntime::open(cluster_config, self.tls_acceptor.is_some()).await?;
         runtime.spawn_listener(cluster_config.raft_listen);
+        let runtime = ClusterRuntime::real(runtime);
         self.sync_from_cluster(&runtime).await;
         *self.cluster.lock().await = Some(runtime);
         Ok(())
     }
 
-    async fn cluster_runtime(&self) -> Option<RaftRuntime> {
+    async fn cluster_runtime(&self) -> Option<ClusterRuntime> {
         self.cluster.lock().await.clone()
     }
 
-    async fn sync_from_cluster(&self, cluster: &RaftRuntime) {
+    async fn sync_from_cluster(&self, cluster: &ClusterRuntime) {
         let state = cluster.durable_state();
         let mut inner = self.inner.lock().await;
         inner.sync_durable_state(state);
     }
 
-    async fn deliver_pending_clustered(&self, cluster: RaftRuntime) -> Result<()> {
+    async fn deliver_pending_clustered(&self, cluster: ClusterRuntime) -> Result<()> {
         loop {
             let candidate = {
                 let inner = self.inner.lock().await;
@@ -1221,14 +1384,87 @@ mod tests {
 
     use super::*;
 
+    struct Scenario {
+        _dir: TempDir,
+        clock: Arc<ManualClock>,
+        broker: Broker,
+        fake_cluster: Option<FakeClusterRuntime>,
+    }
+
+    impl Scenario {
+        fn new() -> Self {
+            let dir = TempDir::new().unwrap();
+            let clock = Arc::new(ManualClock::new(1_000));
+            let broker = deterministic_broker(dir.path(), clock.clone(), None);
+            Self {
+                _dir: dir,
+                clock,
+                broker,
+                fake_cluster: None,
+            }
+        }
+
+        fn new_fake_cluster(node_count: u64) -> Self {
+            let dir = TempDir::new().unwrap();
+            let clock = Arc::new(ManualClock::new(1_000));
+            let fake_cluster = FakeClusterRuntime::new(node_count, 1, Some(1));
+            let broker = deterministic_broker(
+                dir.path(),
+                clock.clone(),
+                Some(ClusterRuntime::Fake(fake_cluster.clone())),
+            );
+            Self {
+                _dir: dir,
+                clock,
+                broker,
+                fake_cluster: Some(fake_cluster),
+            }
+        }
+
+        fn broker(&self) -> &Broker {
+            &self.broker
+        }
+
+        fn fake_cluster(&self) -> &FakeClusterRuntime {
+            self.fake_cluster.as_ref().unwrap()
+        }
+
+        async fn connect(&self) -> TestClient {
+            TestClient::connect(&self.broker).await
+        }
+
+        async fn connect_durable(&self, durable_id: &str, ack_timeout_ms: u64) -> TestClient {
+            TestClient::connect_durable(&self.broker, durable_id, ack_timeout_ms).await
+        }
+
+        fn advance_ms(&self, millis: u64) {
+            self.clock.advance_ms(millis);
+        }
+
+        async fn tick_redelivery(&self) {
+            self.broker.tick_redelivery_for_test().await.unwrap();
+        }
+
+        async fn restart_broker(&mut self) {
+            self.broker.shutdown().await.unwrap();
+            self.broker = deterministic_broker(
+                self._dir.path(),
+                self.clock.clone(),
+                self.fake_cluster.clone().map(ClusterRuntime::Fake),
+            );
+        }
+    }
+
     struct TestClient {
-        stream: BufReader<DuplexStream>,
-        task: JoinHandle<()>,
+        stream: Option<BufReader<DuplexStream>>,
+        task: Option<JoinHandle<()>>,
     }
 
     impl Drop for TestClient {
         fn drop(&mut self) {
-            self.task.abort();
+            if let Some(task) = self.task.take() {
+                task.abort();
+            }
         }
     }
 
@@ -1240,8 +1476,8 @@ mod tests {
                 server.handle_client_for_test(server_stream).await.unwrap();
             });
             let mut client = Self {
-                stream: BufReader::new(client_stream),
-                task,
+                stream: Some(BufReader::new(client_stream)),
+                task: Some(task),
             };
             let info = client.read_frame().await;
             assert!(info.starts_with("INFO "));
@@ -1260,17 +1496,30 @@ mod tests {
             client
         }
 
+        async fn disconnect(mut self) {
+            drop(self.stream.take());
+            let Some(task) = self.task.take() else {
+                return;
+            };
+            match tokio::time::timeout(Duration::from_secs(1), task).await {
+                Ok(joined) => joined.unwrap(),
+                Err(_) => panic!("server task did not finish after client disconnect"),
+            }
+        }
+
         async fn write_line(&mut self, line: &str) {
-            self.stream
-                .get_mut()
-                .write_all(line.as_bytes())
-                .await
-                .unwrap();
-            self.stream.get_mut().write_all(b"\r\n").await.unwrap();
+            let stream = self.stream.as_mut().expect("client is disconnected");
+            stream.get_mut().write_all(line.as_bytes()).await.unwrap();
+            stream.get_mut().write_all(b"\r\n").await.unwrap();
         }
 
         async fn subscribe(&mut self, subject: &str, sid: &str) {
             self.write_line(&format!("SUB {subject} {sid}")).await;
+        }
+
+        async fn subscribe_queue(&mut self, subject: &str, queue: &str, sid: &str) {
+            self.write_line(&format!("SUB {subject} {queue} {sid}"))
+                .await;
         }
 
         async fn publish(&mut self, subject: &str, payload: &[u8]) {
@@ -1293,13 +1542,37 @@ mod tests {
                         .await;
                 }
             }
-            self.stream.get_mut().write_all(payload).await.unwrap();
-            self.stream.get_mut().write_all(b"\r\n").await.unwrap();
+            let stream = self.stream.as_mut().expect("client is disconnected");
+            stream.get_mut().write_all(payload).await.unwrap();
+            stream.get_mut().write_all(b"\r\n").await.unwrap();
         }
 
         async fn ping_roundtrip(&mut self) {
             self.write_line("PING").await;
+            self.expect_pong().await;
+        }
+
+        async fn expect_pong(&mut self) {
             assert_eq!(self.read_frame().await, "PONG\r\n");
+        }
+
+        async fn expect_msg(&mut self) -> String {
+            let frame = self.read_frame().await;
+            assert!(frame.starts_with("MSG "), "expected MSG, got {frame:?}");
+            frame
+        }
+
+        async fn expect_hmsg(&mut self) -> String {
+            let frame = self.read_frame().await;
+            assert!(frame.starts_with("HMSG "), "expected HMSG, got {frame:?}");
+            frame
+        }
+
+        async fn expect_no_frame_short(&mut self) {
+            match tokio::time::timeout(Duration::from_millis(25), self.read_frame_inner()).await {
+                Ok(frame) => panic!("expected no frame, got {frame:?}"),
+                Err(_) => {}
+            }
         }
 
         async fn read_frame(&mut self) -> String {
@@ -1309,8 +1582,9 @@ mod tests {
         }
 
         async fn read_frame_inner(&mut self) -> String {
+            let stream = self.stream.as_mut().expect("client is disconnected");
             let mut frame = Vec::new();
-            self.stream.read_until(b'\n', &mut frame).await.unwrap();
+            stream.read_until(b'\n', &mut frame).await.unwrap();
             assert!(!frame.is_empty(), "connection closed before frame");
             let line = std::str::from_utf8(&frame).unwrap().to_string();
             let mut parts = line.split_whitespace();
@@ -1319,14 +1593,14 @@ mod tests {
                     let tokens = line.split_whitespace().collect::<Vec<_>>();
                     let size = tokens.last().unwrap().parse::<usize>().unwrap();
                     let mut body = vec![0; size + 2];
-                    self.stream.read_exact(&mut body).await.unwrap();
+                    stream.read_exact(&mut body).await.unwrap();
                     frame.extend_from_slice(&body);
                 }
                 Some("HMSG") => {
                     let tokens = line.split_whitespace().collect::<Vec<_>>();
                     let total_size = tokens.last().unwrap().parse::<usize>().unwrap();
                     let mut body = vec![0; total_size + 2];
-                    self.stream.read_exact(&mut body).await.unwrap();
+                    stream.read_exact(&mut body).await.unwrap();
                     frame.extend_from_slice(&body);
                 }
                 _ => {}
@@ -1348,13 +1622,18 @@ mod tests {
         }
     }
 
-    fn deterministic_broker(dir: &Path, clock: Arc<ManualClock>) -> Broker {
+    fn deterministic_broker(
+        dir: &Path,
+        clock: Arc<ManualClock>,
+        initial_cluster: Option<ClusterRuntime>,
+    ) -> Broker {
         Broker::open_with_hooks(
             test_config(dir),
             BrokerHooks {
                 clock,
                 start_redelivery_loop: false,
                 durable_publish_flush_mode: DurablePublishFlushMode::FlushImmediately,
+                initial_cluster,
             },
         )
         .unwrap()
@@ -1386,10 +1665,8 @@ mod tests {
 
     #[tokio::test]
     async fn sub_requires_durable_connect() {
-        let dir = TempDir::new().unwrap();
-        let clock = Arc::new(ManualClock::new(1_000));
-        let broker = deterministic_broker(dir.path(), clock);
-        let mut client = TestClient::connect(&broker).await;
+        let scenario = Scenario::new();
+        let mut client = scenario.connect().await;
 
         client.subscribe("orders.*", "sid1").await;
         let error = client.read_frame().await;
@@ -1398,23 +1675,21 @@ mod tests {
 
     #[tokio::test]
     async fn durable_subscribe_publish_delivery_and_ack_are_deterministic() {
-        let dir = TempDir::new().unwrap();
-        let clock = Arc::new(ManualClock::new(1_000));
-        let broker = deterministic_broker(dir.path(), clock);
-        let mut subscriber = TestClient::connect_durable(&broker, "client1", 25).await;
-        let mut publisher = TestClient::connect_durable(&broker, "publisher1", 25).await;
+        let scenario = Scenario::new();
+        let mut subscriber = scenario.connect_durable("client1", 25).await;
+        let mut publisher = scenario.connect_durable("publisher1", 25).await;
 
         subscriber.subscribe("orders.*", "sid1").await;
         subscriber.ping_roundtrip().await;
         publisher.publish("orders.created", b"hello").await;
 
-        let frame = subscriber.read_frame().await;
+        let frame = subscriber.expect_msg().await;
         assert!(frame.starts_with("MSG orders.created sid1 _BROKER.ACK.durable-client1-sid1."));
         assert!(frame.ends_with("5\r\nhello\r\n"));
         publisher.publish(&ack_subject(&frame), b"").await;
         publisher.ping_roundtrip().await;
 
-        let inner = broker.inner.lock().await;
+        let inner = scenario.broker().inner.lock().await;
         let consumer = inner.consumers.get("durable-client1-sid1").unwrap();
         assert!(consumer.pending.is_empty());
         assert!(consumer.in_flight.is_empty());
@@ -1424,52 +1699,50 @@ mod tests {
 
     #[tokio::test]
     async fn redelivery_waits_for_manual_clock_deadline() {
-        let dir = TempDir::new().unwrap();
-        let clock = Arc::new(ManualClock::new(1_000));
-        let broker = deterministic_broker(dir.path(), clock.clone());
-        let mut subscriber = TestClient::connect_durable(&broker, "client1", 25).await;
-        let mut publisher = TestClient::connect_durable(&broker, "publisher1", 25).await;
+        let scenario = Scenario::new();
+        let mut subscriber = scenario.connect_durable("client1", 25).await;
+        let mut publisher = scenario.connect_durable("publisher1", 25).await;
 
         subscriber.subscribe("orders.*", "sid1").await;
         subscriber.ping_roundtrip().await;
         publisher.publish("orders.created", b"hello").await;
-        let first = subscriber.read_frame().await;
+        let first = subscriber.expect_msg().await;
         assert!(first.contains(".1.1 "));
 
-        clock.advance_ms(24);
-        broker.tick_redelivery_for_test().await.unwrap();
+        scenario.advance_ms(24);
+        scenario.tick_redelivery().await;
         {
-            let inner = broker.inner.lock().await;
+            let inner = scenario.broker().inner.lock().await;
             let consumer = inner.consumers.get("durable-client1-sid1").unwrap();
             assert!(consumer.pending.is_empty());
             assert_eq!(consumer.in_flight.get(&1).unwrap().delivery_id, 1);
         }
+        subscriber.expect_no_frame_short().await;
 
-        clock.advance_ms(1);
-        broker.tick_redelivery_for_test().await.unwrap();
-        let second = subscriber.read_frame().await;
+        scenario.advance_ms(1);
+        scenario.tick_redelivery().await;
+        let second = subscriber.expect_msg().await;
         assert!(second.starts_with("MSG orders.created sid1 _BROKER.ACK.durable-client1-sid1.1.2"));
         assert!(second.ends_with("5\r\nhello\r\n"));
     }
 
     #[tokio::test]
     async fn acked_message_does_not_redeliver_after_manual_ticks() {
-        let dir = TempDir::new().unwrap();
-        let clock = Arc::new(ManualClock::new(1_000));
-        let broker = deterministic_broker(dir.path(), clock.clone());
-        let mut subscriber = TestClient::connect_durable(&broker, "client1", 25).await;
-        let mut publisher = TestClient::connect_durable(&broker, "publisher1", 25).await;
+        let scenario = Scenario::new();
+        let mut subscriber = scenario.connect_durable("client1", 25).await;
+        let mut publisher = scenario.connect_durable("publisher1", 25).await;
 
         subscriber.subscribe("orders.*", "sid1").await;
         subscriber.ping_roundtrip().await;
         publisher.publish("orders.created", b"hello").await;
-        let frame = subscriber.read_frame().await;
+        let frame = subscriber.expect_msg().await;
         publisher.publish(&ack_subject(&frame), b"").await;
         publisher.ping_roundtrip().await;
 
-        clock.advance_ms(1_000);
-        broker.tick_redelivery_for_test().await.unwrap();
-        let inner = broker.inner.lock().await;
+        scenario.advance_ms(1_000);
+        scenario.tick_redelivery().await;
+        subscriber.expect_no_frame_short().await;
+        let inner = scenario.broker().inner.lock().await;
         assert!(inner.messages.is_empty());
         let consumer = inner.consumers.get("durable-client1-sid1").unwrap();
         assert!(consumer.pending.is_empty());
@@ -1478,28 +1751,26 @@ mod tests {
 
     #[tokio::test]
     async fn wal_replay_preserves_unacked_delivery_state_and_next_ids() {
-        let dir = TempDir::new().unwrap();
+        let mut scenario = Scenario::new();
         {
-            let clock = Arc::new(ManualClock::new(1_000));
-            let broker = deterministic_broker(dir.path(), clock);
-            let mut subscriber = TestClient::connect_durable(&broker, "client1", 25).await;
-            let mut publisher = TestClient::connect_durable(&broker, "publisher1", 25).await;
+            let mut subscriber = scenario.connect_durable("client1", 25).await;
+            let mut publisher = scenario.connect_durable("publisher1", 25).await;
             subscriber.subscribe("orders.*", "sid1").await;
             subscriber.ping_roundtrip().await;
             publisher.publish("orders.created", b"hello").await;
-            let first = subscriber.read_frame().await;
+            let first = subscriber.expect_msg().await;
             assert!(first.contains(".1.1 "));
-            broker.shutdown().await.unwrap();
+            subscriber.disconnect().await;
+            publisher.disconnect().await;
         }
 
-        let clock = Arc::new(ManualClock::new(2_000));
-        let broker = deterministic_broker(dir.path(), clock.clone());
-        let mut subscriber = TestClient::connect_durable(&broker, "client1", 25).await;
+        scenario.restart_broker().await;
+        scenario.advance_ms(25);
+        let mut subscriber = scenario.connect_durable("client1", 25).await;
         subscriber.subscribe("orders.*", "sid1").await;
-        clock.advance_ms(25);
-        broker.tick_redelivery_for_test().await.unwrap();
+        scenario.tick_redelivery().await;
 
-        let redelivery = subscriber.read_frame().await;
+        let redelivery = subscriber.expect_msg().await;
         assert!(
             redelivery.starts_with("MSG orders.created sid1 _BROKER.ACK.durable-client1-sid1.1.2")
         );
@@ -1507,27 +1778,28 @@ mod tests {
 
     #[tokio::test]
     async fn acked_message_does_not_redeliver_after_restart() {
-        let dir = TempDir::new().unwrap();
+        let mut scenario = Scenario::new();
         {
-            let clock = Arc::new(ManualClock::new(1_000));
-            let broker = deterministic_broker(dir.path(), clock);
-            let mut subscriber = TestClient::connect_durable(&broker, "client1", 25).await;
-            let mut publisher = TestClient::connect_durable(&broker, "publisher1", 25).await;
+            let mut subscriber = scenario.connect_durable("client1", 25).await;
+            let mut publisher = scenario.connect_durable("publisher1", 25).await;
             subscriber.subscribe("orders.*", "sid1").await;
             subscriber.ping_roundtrip().await;
             publisher.publish("orders.created", b"hello").await;
-            let frame = subscriber.read_frame().await;
+            let frame = subscriber.expect_msg().await;
             publisher.publish(&ack_subject(&frame), b"").await;
             publisher.ping_roundtrip().await;
-            broker.shutdown().await.unwrap();
+            subscriber.disconnect().await;
+            publisher.disconnect().await;
         }
 
-        let clock = Arc::new(ManualClock::new(2_000));
-        let broker = deterministic_broker(dir.path(), clock.clone());
-        let _subscriber = TestClient::connect_durable(&broker, "client1", 25).await;
-        clock.advance_ms(1_000);
-        broker.tick_redelivery_for_test().await.unwrap();
-        let inner = broker.inner.lock().await;
+        scenario.restart_broker().await;
+        let mut subscriber = scenario.connect_durable("client1", 25).await;
+        subscriber.subscribe("orders.*", "sid1").await;
+        subscriber.ping_roundtrip().await;
+        scenario.advance_ms(1_000);
+        scenario.tick_redelivery().await;
+        subscriber.expect_no_frame_short().await;
+        let inner = scenario.broker().inner.lock().await;
         assert!(inner.consumers["durable-client1-sid1"].pending.is_empty());
         assert!(inner.consumers["durable-client1-sid1"].in_flight.is_empty());
         assert!(inner.consumers["durable-client1-sid1"].acked.contains(&1));
@@ -1535,11 +1807,9 @@ mod tests {
 
     #[tokio::test]
     async fn request_reply_inbox_delivery_is_transient() {
-        let dir = TempDir::new().unwrap();
-        let clock = Arc::new(ManualClock::new(1_000));
-        let broker = deterministic_broker(dir.path(), clock);
-        let mut responder = TestClient::connect_durable(&broker, "responder1", 25).await;
-        let mut requester = TestClient::connect_durable(&broker, "requester1", 25).await;
+        let scenario = Scenario::new();
+        let mut responder = scenario.connect_durable("responder1", 25).await;
+        let mut requester = scenario.connect_durable("requester1", 25).await;
 
         responder.subscribe("service.echo", "sid1").await;
         responder.ping_roundtrip().await;
@@ -1549,14 +1819,14 @@ mod tests {
             .publish_with_reply("service.echo", Some("_INBOX.requester.1"), b"hello")
             .await;
 
-        let request = responder.read_frame().await;
+        let request = responder.expect_hmsg().await;
         assert!(request.starts_with("HMSG service.echo sid1 _INBOX.requester.1 "));
         assert!(request.contains("\r\nBroker-Ack: _BROKER.ACK.durable-responder1-sid1."));
         responder.publish("_INBOX.requester.1", b"world").await;
 
-        let response = requester.read_frame().await;
+        let response = requester.expect_msg().await;
         assert_eq!(response, "MSG _INBOX.requester.1 inbox1 5\r\nworld\r\n");
-        let inner = broker.inner.lock().await;
+        let inner = scenario.broker().inner.lock().await;
         assert!(inner.messages.contains_key(&1));
         assert_eq!(inner.transient_subscriptions.len(), 1);
         assert_eq!(inner.consumers.len(), 1);
@@ -1564,24 +1834,20 @@ mod tests {
 
     #[tokio::test]
     async fn publish_without_matching_durable_consumer_is_not_retained() {
-        let dir = TempDir::new().unwrap();
-        let clock = Arc::new(ManualClock::new(1_000));
-        let broker = deterministic_broker(dir.path(), clock);
-        let mut publisher = TestClient::connect_durable(&broker, "publisher1", 25).await;
+        let scenario = Scenario::new();
+        let mut publisher = scenario.connect_durable("publisher1", 25).await;
 
         publisher.publish("orders.created", b"hello").await;
         publisher.ping_roundtrip().await;
-        assert!(broker.inner.lock().await.messages.is_empty());
+        assert!(scenario.broker().inner.lock().await.messages.is_empty());
     }
 
     #[tokio::test]
     async fn durable_queue_group_delivers_one_copy() {
-        let dir = TempDir::new().unwrap();
-        let clock = Arc::new(ManualClock::new(1_000));
-        let broker = deterministic_broker(dir.path(), clock);
-        let mut first = TestClient::connect_durable(&broker, "client1", 25).await;
-        let mut second = TestClient::connect_durable(&broker, "client2", 25).await;
-        let mut publisher = TestClient::connect_durable(&broker, "publisher1", 25).await;
+        let scenario = Scenario::new();
+        let mut first = scenario.connect_durable("client1", 25).await;
+        let mut second = scenario.connect_durable("client2", 25).await;
+        let mut publisher = scenario.connect_durable("publisher1", 25).await;
 
         first.subscribe_queue("orders.*", "workers", "a").await;
         first.ping_roundtrip().await;
@@ -1590,7 +1856,7 @@ mod tests {
         publisher.publish("orders.created", b"hello").await;
         publisher.ping_roundtrip().await;
 
-        let inner = broker.inner.lock().await;
+        let inner = scenario.broker().inner.lock().await;
         let consumer = inner
             .consumers
             .get("queue-workers-6f72646572732e2a")
@@ -1599,10 +1865,136 @@ mod tests {
         assert_eq!(consumer.in_flight.len(), 1);
     }
 
-    impl TestClient {
-        async fn subscribe_queue(&mut self, subject: &str, queue: &str, sid: &str) {
-            self.write_line(&format!("SUB {subject} {queue} {sid}"))
-                .await;
+    #[tokio::test]
+    async fn disconnected_in_flight_message_redelivers_after_reconnect() {
+        let scenario = Scenario::new();
+        let mut subscriber = scenario.connect_durable("client1", 25).await;
+        let mut publisher = scenario.connect_durable("publisher1", 25).await;
+
+        subscriber.subscribe("orders.*", "sid1").await;
+        subscriber.ping_roundtrip().await;
+        publisher.publish("orders.created", b"hello").await;
+        let first = subscriber.expect_msg().await;
+        assert!(first.starts_with("MSG orders.created sid1 _BROKER.ACK.durable-client1-sid1.1.1"));
+        subscriber.disconnect().await;
+
+        scenario.advance_ms(25);
+        let mut subscriber = scenario.connect_durable("client1", 25).await;
+        subscriber.subscribe("orders.*", "sid1").await;
+        subscriber.ping_roundtrip().await;
+        scenario.tick_redelivery().await;
+
+        let redelivery = subscriber.expect_msg().await;
+        assert!(
+            redelivery.starts_with("MSG orders.created sid1 _BROKER.ACK.durable-client1-sid1.1.2")
+        );
+        assert!(redelivery.ends_with("5\r\nhello\r\n"));
+    }
+
+    #[tokio::test]
+    async fn disconnected_in_flight_message_does_not_redeliver_before_deadline() {
+        let scenario = Scenario::new();
+        let mut subscriber = scenario.connect_durable("client1", 25).await;
+        let mut publisher = scenario.connect_durable("publisher1", 25).await;
+
+        subscriber.subscribe("orders.*", "sid1").await;
+        subscriber.ping_roundtrip().await;
+        publisher.publish("orders.created", b"hello").await;
+        let first = subscriber.expect_msg().await;
+        assert!(first.starts_with("MSG orders.created sid1 _BROKER.ACK.durable-client1-sid1.1.1"));
+        subscriber.disconnect().await;
+
+        scenario.advance_ms(24);
+        let mut subscriber = scenario.connect_durable("client1", 25).await;
+        subscriber.subscribe("orders.*", "sid1").await;
+        subscriber.ping_roundtrip().await;
+        scenario.tick_redelivery().await;
+        subscriber.expect_no_frame_short().await;
+        {
+            let inner = scenario.broker().inner.lock().await;
+            let consumer = inner.consumers.get("durable-client1-sid1").unwrap();
+            assert!(consumer.pending.is_empty());
+            assert_eq!(consumer.in_flight.get(&1).unwrap().delivery_id, 1);
         }
+
+        scenario.advance_ms(1);
+        scenario.tick_redelivery().await;
+        let redelivery = subscriber.expect_msg().await;
+        assert!(
+            redelivery.starts_with("MSG orders.created sid1 _BROKER.ACK.durable-client1-sid1.1.2")
+        );
+    }
+
+    #[tokio::test]
+    async fn ack_after_reconnect_survives_restart() {
+        let mut scenario = Scenario::new();
+        let mut subscriber = scenario.connect_durable("client1", 25).await;
+        let mut publisher = scenario.connect_durable("publisher1", 25).await;
+
+        subscriber.subscribe("orders.*", "sid1").await;
+        subscriber.ping_roundtrip().await;
+        publisher.publish("orders.created", b"hello").await;
+        let first = subscriber.expect_msg().await;
+        assert!(first.starts_with("MSG orders.created sid1 _BROKER.ACK.durable-client1-sid1.1.1"));
+        subscriber.disconnect().await;
+
+        scenario.advance_ms(25);
+        let mut subscriber = scenario.connect_durable("client1", 25).await;
+        subscriber.subscribe("orders.*", "sid1").await;
+        subscriber.ping_roundtrip().await;
+        scenario.tick_redelivery().await;
+        let redelivery = subscriber.expect_msg().await;
+        assert!(
+            redelivery.starts_with("MSG orders.created sid1 _BROKER.ACK.durable-client1-sid1.1.2")
+        );
+        publisher.publish(&ack_subject(&redelivery), b"").await;
+        publisher.ping_roundtrip().await;
+        subscriber.disconnect().await;
+        publisher.disconnect().await;
+
+        scenario.restart_broker().await;
+        let mut subscriber = scenario.connect_durable("client1", 25).await;
+        subscriber.subscribe("orders.*", "sid1").await;
+        subscriber.ping_roundtrip().await;
+        scenario.advance_ms(1_000);
+        scenario.tick_redelivery().await;
+        subscriber.expect_no_frame_short().await;
+
+        let inner = scenario.broker().inner.lock().await;
+        let consumer = inner.consumers.get("durable-client1-sid1").unwrap();
+        assert!(consumer.pending.is_empty());
+        assert!(consumer.in_flight.is_empty());
+        assert!(consumer.acked.contains(&1));
+    }
+
+    #[tokio::test]
+    async fn fake_cluster_runtime_drives_broker_flow_across_100_nodes() {
+        let scenario = Scenario::new_fake_cluster(100);
+        let mut subscriber = scenario.connect_durable("client1", 25).await;
+        let mut publisher = scenario.connect_durable("publisher1", 25).await;
+
+        assert_eq!(scenario.fake_cluster().node_count(), 100);
+        assert_eq!(scenario.broker().cluster_leader().await, Some(1));
+
+        subscriber.subscribe("orders.*", "sid1").await;
+        subscriber.ping_roundtrip().await;
+        publisher.publish("orders.created", b"hello").await;
+
+        let delivery = subscriber.expect_msg().await;
+        assert!(
+            delivery.starts_with("MSG orders.created sid1 _BROKER.ACK.durable-client1-sid1.1.1")
+        );
+        assert!(delivery.ends_with("5\r\nhello\r\n"));
+
+        publisher.publish(&ack_subject(&delivery), b"").await;
+        publisher.ping_roundtrip().await;
+
+        let durable = scenario.fake_cluster().durable_state();
+        let consumer = durable.consumers.get("durable-client1-sid1").unwrap();
+        assert!(consumer.pending.is_empty());
+        assert!(consumer.in_flight.is_empty());
+        assert!(consumer.acked.contains(&1));
+        assert!(durable.messages.is_empty());
+        assert_eq!(scenario.fake_cluster().write_count(), 4);
     }
 }
