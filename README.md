@@ -20,7 +20,11 @@ cp broker.json.example broker.json
   "fsync_interval_ms": 5,
   "max_payload": 1048576,
   "verbose": false,
-  "tls": null
+  "tls": null,
+  "auth": {
+    "enabled": false,
+    "clients": []
+  }
 }
 ```
 
@@ -33,6 +37,7 @@ Fields:
 - `verbose`: enables `+OK` responses for connections unless overridden by
   `CONNECT`.
 - `tls`: optional TLS-first listener config.
+- `auth`: optional Ed25519 challenge-response authentication config.
 
 If a field is omitted, the value shown above is used.
 
@@ -58,6 +63,30 @@ Plain `telnet` will not work against a TLS listener. For manual testing, use:
 openssl s_client -connect 127.0.0.1:4222
 ```
 
+Authentication is disabled when `auth.enabled` is `false`. To enable
+challenge-response authentication, configure a list of allowed client IDs and
+Ed25519 public keys:
+
+```json
+{
+  "auth": {
+    "enabled": true,
+    "clients": [
+      {
+        "client_id": "client1",
+        "public_key": "64-hex-character-ed25519-public-key"
+      }
+    ]
+  }
+}
+```
+
+When authentication is enabled, every new incoming connection receives a freshly
+generated server nonce in the `INFO` frame. The client signs that nonce and sends
+the configured client ID plus hex-encoded signature in `CONNECT`. After
+successful verification, the authenticated client ID becomes the durable
+identity for that connection.
+
 ## Run
 
 Build and run the broker from the repository root:
@@ -79,10 +108,18 @@ flushes the WAL before exiting.
 ## Minimal Session
 
 Open a TCP connection to the broker. The server immediately sends an `INFO`
-line. Then connect with a durable identity:
+line. With authentication disabled, connect with a durable identity:
 
 ```text
 CONNECT {"durable_id":"client1","verbose":true,"ack_timeout_ms":30000,"max_in_flight":1024}
+SUB orders.* sid1
+```
+
+With authentication enabled, sign the `INFO` nonce with the configured private
+key and connect with the client ID plus signature:
+
+```text
+CONNECT {"client_id":"client1","signature":"128-hex-character-ed25519-signature","verbose":true}
 SUB orders.* sid1
 ```
 
@@ -112,7 +149,10 @@ message to an active member of the same durable consumer.
 
 ## Durable Consumers
 
-- `CONNECT` must include `durable_id` before `SUB`.
+- `CONNECT` must establish a durable identity before `SUB`.
+- With authentication disabled, provide `durable_id`.
+- With authentication enabled, provide `client_id` and `signature`. If
+  `durable_id` is also provided, it must match the authenticated `client_id`.
 - Non-queue subscriptions create consumers keyed by durable id and sid.
 - Queue subscriptions create a shared durable queue consumer keyed by queue
   group and subject.
@@ -154,13 +194,15 @@ Supported JSON fields:
 {
   "verbose": true,
   "durable_id": "client1",
+  "client_id": "client1",
+  "signature": "128-hex-character-ed25519-signature",
   "ack_timeout_ms": 30000,
   "max_in_flight": 1024
 }
 ```
 
-`durable_id`, subscription sids, and queue names must be non-empty and must not
-contain `.`, whitespace, or start with `_`.
+`durable_id`, `client_id`, subscription sids, and queue names must be non-empty
+and must not contain `.`, whitespace, or start with `_`.
 
 #### PING
 

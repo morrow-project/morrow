@@ -9,6 +9,7 @@ pub enum Command {
         durable_id: Option<String>,
         ack_timeout_ms: Option<u64>,
         max_in_flight: Option<usize>,
+        auth: Option<ConnectAuth>,
     },
     Ping,
     Pong,
@@ -26,6 +27,12 @@ pub enum Command {
         sid: String,
         max_messages: Option<usize>,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectAuth {
+    pub client_id: String,
+    pub signature: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -112,12 +119,38 @@ fn parse_connect(payload: &str) -> Result<Command, ProtocolError> {
                 .map_err(|_| ProtocolError("max_in_flight is too large".into()))
         })
         .transpose()?;
+    let auth = parse_connect_auth(&value)?;
     Ok(Command::Connect {
         verbose,
         durable_id,
         ack_timeout_ms,
         max_in_flight,
+        auth,
     })
+}
+
+fn parse_connect_auth(value: &serde_json::Value) -> Result<Option<ConnectAuth>, ProtocolError> {
+    let client_id = value
+        .get("client_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    let signature = value
+        .get("signature")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    if let Some(client_id) = &client_id {
+        validate_identifier("client_id", client_id)?;
+    }
+    match (client_id, signature) {
+        (Some(client_id), Some(signature)) => Ok(Some(ConnectAuth {
+            client_id,
+            signature,
+        })),
+        (None, None) => Ok(None),
+        _ => Err(ProtocolError(
+            "CONNECT client_id and signature must be provided together".into(),
+        )),
+    }
 }
 
 pub fn validate_identifier(name: &str, value: &str) -> Result<(), ProtocolError> {
@@ -236,10 +269,13 @@ fn trim_crlf(line: &mut Vec<u8>) -> Result<(), ProtocolError> {
     }
 }
 
-pub fn info_line(max_payload: usize) -> Vec<u8> {
+pub fn info_line(max_payload: usize, nonce: Option<&str>) -> Vec<u8> {
+    let nonce = nonce
+        .map(|nonce| format!(",\"nonce\":\"{nonce}\",\"auth_required\":true"))
+        .unwrap_or_else(|| ",\"auth_required\":false".to_string());
     format!(
-        "INFO {{\"server_id\":\"broker\",\"server_name\":\"broker\",\"version\":\"{}\",\"proto\":1,\"max_payload\":{max_payload},\"auth_required\":false,\"tls_required\":false}}\r\n",
-        env!("CARGO_PKG_VERSION")
+        "INFO {{\"server_id\":\"broker\",\"server_name\":\"broker\",\"version\":\"{}\",\"proto\":1,\"max_payload\":{max_payload}{nonce},\"tls_required\":false}}\r\n",
+        env!("CARGO_PKG_VERSION"),
     )
     .into_bytes()
 }
@@ -323,6 +359,27 @@ mod tests {
                 durable_id: Some("client1".into()),
                 ack_timeout_ms: Some(25),
                 max_in_flight: Some(7),
+                auth: None,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn parses_connect_client_auth() {
+        let mut reader =
+            BufReader::new(&b"CONNECT {\"client_id\":\"client1\",\"signature\":\"1234\"}\r\n"[..]);
+        let command = read_command(&mut reader, 1024).await.unwrap().unwrap();
+        assert_eq!(
+            command,
+            Command::Connect {
+                verbose: false,
+                durable_id: None,
+                ack_timeout_ms: None,
+                max_in_flight: None,
+                auth: Some(ConnectAuth {
+                    client_id: "client1".into(),
+                    signature: "1234".into(),
+                }),
             }
         );
     }

@@ -4,5 +4,9 @@
   "fsync_interval_ms": 5,
   "max_payload": 1048576,
   "verbose": false,
-  "tls": null
+  "tls": null,
+  "auth": {
+    "enabled": false,
+    "clients": []
+  }
 }

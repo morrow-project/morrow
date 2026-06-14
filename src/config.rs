@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     ffi::OsString,
     net::SocketAddr,
     path::{Path, PathBuf},
@@ -17,6 +18,7 @@ pub struct Config {
     pub max_payload: usize,
     pub verbose: bool,
     pub tls: Option<TlsConfig>,
+    pub auth: AuthConfig,
 }
 
 #[derive(Debug, Clone)]
@@ -24,6 +26,12 @@ pub struct TlsConfig {
     pub cert_file: PathBuf,
     pub key_file: PathBuf,
     pub handshake_timeout_ms: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AuthConfig {
+    pub enabled: bool,
+    pub clients: HashMap<String, String>,
 }
 
 impl Config {
@@ -62,6 +70,7 @@ impl Config {
         let max_payload = get_u64(value, "max_payload")?.unwrap_or(1_048_576);
         let verbose = get_bool(value, "verbose")?.unwrap_or(false);
         let tls = get_tls_config(value)?;
+        let auth = get_auth_config(value)?;
 
         let config = Self {
             listen,
@@ -72,6 +81,7 @@ impl Config {
                 .context("config field max_payload is too large")?,
             verbose,
             tls,
+            auth,
         };
         config.validate()?;
         Ok(config)
@@ -97,6 +107,52 @@ impl Config {
             .with_context(|| format!("creating WAL directory {}", self.wal_dir.display()))?;
         Ok(())
     }
+}
+
+fn get_auth_config(value: &serde_json::Value) -> Result<AuthConfig> {
+    let Some(auth) = value.get("auth") else {
+        return Ok(AuthConfig::default());
+    };
+    if auth.is_null() {
+        return Ok(AuthConfig::default());
+    }
+    let serde_json::Value::Object(_) = auth else {
+        return Err(BrokerError::msg("config field auth must be an object"));
+    };
+    let enabled = get_bool(auth, "enabled")?.unwrap_or(false);
+    let mut clients = HashMap::new();
+    match auth.get("clients") {
+        Some(serde_json::Value::Array(values)) => {
+            for value in values {
+                let serde_json::Value::Object(_) = value else {
+                    return Err(BrokerError::msg(
+                        "config field auth.clients must contain only objects",
+                    ));
+                };
+                let client_id = get_string(value, "client_id")?.ok_or_else(|| {
+                    BrokerError::msg("config field auth.clients[].client_id is required")
+                })?;
+                crate::broker_ensure!(
+                    !client_id.is_empty()
+                        && !client_id.contains('.')
+                        && !client_id.chars().any(char::is_whitespace)
+                        && !client_id.starts_with('_'),
+                    "config field auth.clients[].client_id is invalid"
+                );
+                let public_key = get_string(value, "public_key")?.ok_or_else(|| {
+                    BrokerError::msg("config field auth.clients[].public_key is required")
+                })?;
+                clients.insert(client_id.to_string(), public_key.to_ascii_lowercase());
+            }
+        }
+        Some(_) => {
+            return Err(BrokerError::msg(
+                "config field auth.clients must be an array",
+            ));
+        }
+        None => {}
+    }
+    Ok(AuthConfig { enabled, clients })
 }
 
 impl TlsConfig {
@@ -190,7 +246,8 @@ mod tests {
             "fsync_interval_ms": 10,
             "max_payload": 2048,
             "verbose": true,
-            "tls": null
+            "tls": null,
+            "auth": null
         });
 
         let config = Config::from_json(&value).unwrap();
@@ -200,6 +257,7 @@ mod tests {
         assert_eq!(config.max_payload, 2048);
         assert!(config.verbose);
         assert!(config.tls.is_none());
+        assert!(!config.auth.enabled);
     }
 
     #[test]
@@ -226,5 +284,21 @@ mod tests {
         assert_eq!(tls.cert_file, PathBuf::from("./server-cert.pem"));
         assert_eq!(tls.key_file, PathBuf::from("./server-key.pem"));
         assert_eq!(tls.handshake_timeout_ms, 5000);
+    }
+
+    #[test]
+    fn parses_auth_config() {
+        let value = serde_json::json!({
+            "auth": {
+                "enabled": true,
+                "clients": [
+                    {"client_id": "client1", "public_key": "ABCD"}
+                ]
+            }
+        });
+
+        let auth = get_auth_config(&value).unwrap();
+        assert!(auth.enabled);
+        assert_eq!(auth.clients["client1"], "abcd");
     }
 }

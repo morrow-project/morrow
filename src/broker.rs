@@ -17,7 +17,7 @@ use tokio_rustls::TlsAcceptor;
 use crate::{
     config::Config,
     error::{BrokerError, Result, ResultExt},
-    protocol::{self, AckSubject, Command},
+    protocol::{self, AckSubject, Command, ConnectAuth},
     subject,
     wal::{ConsumerRecord, PublishRecord, ReplayedConsumer, Wal},
 };
@@ -45,6 +45,7 @@ struct Client {
     sender: mpsc::Sender<Vec<u8>>,
     verbose: bool,
     durable_id: Option<String>,
+    auth_nonce: Option<String>,
     ack_timeout_ms: u64,
     max_in_flight: usize,
 }
@@ -160,10 +161,20 @@ impl Broker {
         let id = self.next_connection_id.fetch_add(1, Ordering::Relaxed);
         let (reader, mut writer) = tokio::io::split(stream);
         let (sender, mut receiver) = mpsc::channel::<Vec<u8>>(256);
-        self.add_client(id, sender).await;
+        self.add_client(id, sender).await?;
+        let nonce = {
+            let inner = self.inner.lock().await;
+            inner
+                .clients
+                .get(&id)
+                .and_then(|client| client.auth_nonce.clone())
+        };
 
         writer
-            .write_all(&protocol::info_line(self.config.max_payload))
+            .write_all(&protocol::info_line(
+                self.config.max_payload,
+                nonce.as_deref(),
+            ))
             .await?;
         let writer_task = tokio::spawn(async move {
             while let Some(frame) = receiver.recv().await {
@@ -200,6 +211,7 @@ impl Broker {
                 durable_id,
                 ack_timeout_ms,
                 max_in_flight,
+                auth,
             } => {
                 self.configure_client(
                     connection_id,
@@ -207,6 +219,7 @@ impl Broker {
                     durable_id,
                     ack_timeout_ms,
                     max_in_flight,
+                    auth,
                 )
                 .await
             }
@@ -231,7 +244,7 @@ impl Broker {
         }
     }
 
-    async fn add_client(&self, id: u64, sender: mpsc::Sender<Vec<u8>>) {
+    async fn add_client(&self, id: u64, sender: mpsc::Sender<Vec<u8>>) -> Result<()> {
         let mut inner = self.inner.lock().await;
         inner.clients.insert(
             id,
@@ -239,10 +252,16 @@ impl Broker {
                 sender,
                 verbose: self.config.verbose,
                 durable_id: None,
+                auth_nonce: if self.config.auth.enabled {
+                    Some(crate::auth::nonce()?)
+                } else {
+                    None
+                },
                 ack_timeout_ms: DEFAULT_ACK_TIMEOUT_MS,
                 max_in_flight: DEFAULT_MAX_IN_FLIGHT,
             },
         );
+        Ok(())
     }
 
     async fn configure_client(
@@ -252,12 +271,32 @@ impl Broker {
         durable_id: Option<String>,
         ack_timeout_ms: Option<u64>,
         max_in_flight: Option<usize>,
+        auth: Option<ConnectAuth>,
     ) -> Result<()> {
         let mut inner = self.inner.lock().await;
         let client = inner
             .clients
             .get_mut(&id)
             .ok_or_else(|| BrokerError::msg("unknown connection"))?;
+        let durable_id = if self.config.auth.enabled {
+            let nonce = client
+                .auth_nonce
+                .as_deref()
+                .ok_or_else(|| BrokerError::msg("missing auth nonce"))?;
+            let auth = auth
+                .as_ref()
+                .ok_or_else(|| BrokerError::msg("CONNECT client_id and signature are required"))?;
+            let client_id = crate::auth::verify(auth, nonce, &self.config.auth)?;
+            if let Some(durable_id) = durable_id {
+                crate::broker_ensure!(
+                    durable_id == client_id,
+                    "CONNECT durable_id must match authenticated client_id"
+                );
+            }
+            Some(client_id)
+        } else {
+            durable_id
+        };
         client.verbose = verbose || self.config.verbose;
         client.durable_id = durable_id;
         client.ack_timeout_ms = ack_timeout_ms.unwrap_or(DEFAULT_ACK_TIMEOUT_MS);
@@ -752,6 +791,7 @@ mod tests {
             max_payload: 1024,
             verbose: false,
             tls: None,
+            auth: Default::default(),
         }
     }
 
@@ -761,7 +801,7 @@ mod tests {
         durable_id: &str,
     ) -> mpsc::Receiver<Vec<u8>> {
         let (tx, rx) = mpsc::channel(8);
-        broker.add_client(connection_id, tx).await;
+        broker.add_client(connection_id, tx).await.unwrap();
         broker
             .configure_client(
                 connection_id,
@@ -769,6 +809,7 @@ mod tests {
                 Some(durable_id.into()),
                 Some(25),
                 Some(1024),
+                None,
             )
             .await
             .unwrap();
@@ -776,11 +817,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn auth_enabled_generates_fresh_nonce_per_connection() {
+        let dir = TestDir::new();
+        let mut config = test_config(dir.path());
+        config.auth.enabled = true;
+        let broker = Broker::open(config).unwrap();
+        let (tx1, _rx1) = mpsc::channel(8);
+        let (tx2, _rx2) = mpsc::channel(8);
+
+        broker.add_client(1, tx1).await.unwrap();
+        broker.add_client(2, tx2).await.unwrap();
+
+        let inner = broker.inner.lock().await;
+        let first = inner.clients.get(&1).unwrap().auth_nonce.as_ref().unwrap();
+        let second = inner.clients.get(&2).unwrap().auth_nonce.as_ref().unwrap();
+        assert_ne!(first, second);
+        assert_eq!(first.len(), 64);
+        assert_eq!(second.len(), 64);
+    }
+
+    #[tokio::test]
     async fn sub_requires_durable_connect() {
         let dir = TestDir::new();
         let broker = Broker::open(test_config(dir.path())).unwrap();
         let (tx, _rx) = mpsc::channel(8);
-        broker.add_client(1, tx).await;
+        broker.add_client(1, tx).await.unwrap();
         let err = broker
             .subscribe(1, "orders.*".into(), None, "sid1".into())
             .await

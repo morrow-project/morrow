@@ -5,6 +5,8 @@ edition = "2024"
 
 [dependencies]
 crc32fast = { version = "1.5.0", default-features = false, features = ["std"] }
+ed25519-dalek = { version = "2.2.0", default-features = false, features = ["alloc"] }
+getrandom = { version = "0.3.4", default-features = false, features = ["std"] }
 rustls = { version = "0.23.40", default-features = false, features = ["aws_lc_rs", "std"] }
 rustls-pemfile = { version = "2.2.0", default-features = false, features = ["std"] }
 serde_json = { version = "1.0.150", default-features = false, features = ["std"] }
