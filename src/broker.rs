@@ -8,10 +8,11 @@ use std::{
 };
 
 use tokio::{
-    io::{AsyncWriteExt, BufReader},
+    io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream},
     sync::{Mutex, mpsc},
 };
+use tokio_rustls::TlsAcceptor;
 
 use crate::{
     config::Config,
@@ -30,6 +31,7 @@ pub struct Broker {
     inner: Arc<Mutex<Inner>>,
     next_connection_id: Arc<AtomicU64>,
     config: Config,
+    tls_acceptor: Option<TlsAcceptor>,
 }
 
 struct Inner {
@@ -74,6 +76,11 @@ impl Broker {
     pub fn open(config: Config) -> Result<Self> {
         config.validate()?;
         let (wal, replay) = Wal::open(&config.wal_dir, config.fsync_interval())?;
+        let tls_acceptor = config
+            .tls
+            .as_ref()
+            .map(crate::tls::load_acceptor)
+            .transpose()?;
         let consumers = replay
             .consumers
             .into_iter()
@@ -88,6 +95,7 @@ impl Broker {
             })),
             next_connection_id: Arc::new(AtomicU64::new(1)),
             config,
+            tls_acceptor,
         })
     }
 
@@ -106,7 +114,7 @@ impl Broker {
                     let (stream, _) = accepted.context("accepting client connection")?;
                     let broker = self.clone();
                     tokio::spawn(async move {
-                        if let Err(err) = broker.handle_client(stream).await {
+                        if let Err(err) = broker.handle_accepted(stream).await {
                             eprintln!("client error: {err:#}");
                         }
                     });
@@ -126,9 +134,31 @@ impl Broker {
         Ok(())
     }
 
-    async fn handle_client(&self, stream: TcpStream) -> Result<()> {
+    async fn handle_accepted(&self, stream: TcpStream) -> Result<()> {
+        if let Some(acceptor) = &self.tls_acceptor {
+            let timeout_ms = self
+                .config
+                .tls
+                .as_ref()
+                .map(|tls| tls.handshake_timeout_ms)
+                .unwrap_or(2_000);
+            let stream =
+                tokio::time::timeout(Duration::from_millis(timeout_ms), acceptor.accept(stream))
+                    .await
+                    .map_err(|_| BrokerError::msg("TLS handshake timed out"))?
+                    .context("accepting TLS client connection")?;
+            self.handle_client(stream).await
+        } else {
+            self.handle_client(stream).await
+        }
+    }
+
+    async fn handle_client<S>(&self, stream: S) -> Result<()>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
         let id = self.next_connection_id.fetch_add(1, Ordering::Relaxed);
-        let (reader, mut writer) = stream.into_split();
+        let (reader, mut writer) = tokio::io::split(stream);
         let (sender, mut receiver) = mpsc::channel::<Vec<u8>>(256);
         self.add_client(id, sender).await;
 
@@ -721,6 +751,7 @@ mod tests {
             fsync_interval_ms: 1,
             max_payload: 1024,
             verbose: false,
+            tls: None,
         }
     }
 
