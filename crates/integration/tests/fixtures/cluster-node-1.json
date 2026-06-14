@@ -14,6 +14,9 @@
     "enabled": true,
     "node_id": 1,
     "raft_listen": "127.0.0.1:5221",
+    "route_listen": "127.0.0.1:6221",
+    "routes": [],
+    "route_reconnect_ms": 500,
     "raft_dir": "./target/manual-cluster/node1/raft",
     "bootstrap": true,
     "nodes": [

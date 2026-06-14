@@ -41,6 +41,9 @@ pub struct ClusterConfig {
     pub enabled: bool,
     pub node_id: u64,
     pub raft_listen: SocketAddr,
+    pub route_listen: Option<SocketAddr>,
+    pub routes: Vec<SocketAddr>,
+    pub route_reconnect_ms: u64,
     pub raft_dir: PathBuf,
     pub bootstrap: bool,
     pub nodes: Vec<ClusterNodeConfig>,
@@ -155,6 +158,10 @@ impl ClusterConfig {
         crate::broker_ensure!(
             self.heartbeat_interval_ms > 0,
             "cluster.heartbeat_interval_ms must be greater than zero"
+        );
+        crate::broker_ensure!(
+            self.route_reconnect_ms > 0,
+            "cluster.route_reconnect_ms must be greater than zero"
         );
         crate::broker_ensure!(
             self.election_timeout_min_ms > self.heartbeat_interval_ms,
@@ -347,6 +354,9 @@ fn get_cluster_config(value: &serde_json::Value) -> Result<Option<ClusterConfig>
         .ok_or_else(|| BrokerError::msg("config field cluster.raft_listen is required"))?
         .parse()
         .context("config field cluster.raft_listen must be a socket address")?;
+    let route_listen = get_optional_socket_addr(cluster, "route_listen")?;
+    let routes = get_socket_addr_array(cluster, "routes")?;
+    let route_reconnect_ms = get_u64(cluster, "route_reconnect_ms")?.unwrap_or(500);
     let raft_dir = PathBuf::from(
         get_string(cluster, "raft_dir")?
             .ok_or_else(|| BrokerError::msg("config field cluster.raft_dir is required"))?,
@@ -361,6 +371,9 @@ fn get_cluster_config(value: &serde_json::Value) -> Result<Option<ClusterConfig>
         enabled,
         node_id,
         raft_listen,
+        route_listen,
+        routes,
+        route_reconnect_ms,
         raft_dir,
         bootstrap,
         nodes,
@@ -410,6 +423,41 @@ fn get_cluster_nodes(value: &serde_json::Value) -> Result<Vec<ClusterNodeConfig>
     Ok(out)
 }
 
+fn get_optional_socket_addr(value: &serde_json::Value, key: &str) -> Result<Option<SocketAddr>> {
+    match value.get(key) {
+        Some(serde_json::Value::String(value)) => value
+            .parse()
+            .with_context(|| format!("config field cluster.{key} must be a socket address"))
+            .map(Some),
+        Some(serde_json::Value::Null) | None => Ok(None),
+        Some(_) => Err(BrokerError::msg(format!(
+            "config field cluster.{key} must be a string or null"
+        ))),
+    }
+}
+
+fn get_socket_addr_array(value: &serde_json::Value, key: &str) -> Result<Vec<SocketAddr>> {
+    match value.get(key) {
+        Some(serde_json::Value::Array(values)) => values
+            .iter()
+            .map(|value| {
+                let serde_json::Value::String(value) = value else {
+                    return Err(BrokerError::msg(format!(
+                        "config field cluster.{key} must contain only strings"
+                    )));
+                };
+                value.parse().with_context(|| {
+                    format!("config field cluster.{key} must contain socket addresses")
+                })
+            })
+            .collect(),
+        Some(serde_json::Value::Null) | None => Ok(Vec::new()),
+        Some(_) => Err(BrokerError::msg(format!(
+            "config field cluster.{key} must be an array"
+        ))),
+    }
+}
+
 impl From<OsString> for BrokerError {
     fn from(value: OsString) -> Self {
         BrokerError::msg(format!("invalid argument {:?}", value))
@@ -443,6 +491,45 @@ mod tests {
         assert!(config.tls.is_none());
         assert!(!config.auth.enabled);
         assert!(config.cluster.is_none());
+    }
+
+    #[test]
+    fn parses_cluster_route_mesh_config() {
+        let value = serde_json::json!({
+            "listen": "127.0.0.1:4221",
+            "wal_dir": "./target/test-wal-config-routes/wal",
+            "cluster": {
+                "enabled": true,
+                "node_id": 1,
+                "raft_listen": "127.0.0.1:5221",
+                "route_listen": "127.0.0.1:6221",
+                "routes": ["127.0.0.1:6222", "127.0.0.1:6223"],
+                "raft_dir": "./target/test-wal-config-routes/raft",
+                "bootstrap": true,
+                "nodes": [
+                    {
+                        "node_id": 1,
+                        "raft_addr": "127.0.0.1:5221",
+                        "client_addr": "127.0.0.1:4221"
+                    }
+                ]
+            }
+        });
+
+        let config = Config::from_json(&value).unwrap();
+        let cluster = config.cluster.unwrap();
+        assert_eq!(
+            cluster.route_listen,
+            Some("127.0.0.1:6221".parse().unwrap())
+        );
+        assert_eq!(
+            cluster.routes,
+            vec![
+                "127.0.0.1:6222".parse().unwrap(),
+                "127.0.0.1:6223".parse().unwrap()
+            ]
+        );
+        assert_eq!(cluster.route_reconnect_ms, 500);
     }
 
     #[test]

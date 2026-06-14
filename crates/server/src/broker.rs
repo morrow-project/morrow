@@ -41,6 +41,7 @@ pub struct Broker {
     config: Config,
     tls_acceptor: Option<TlsAcceptor>,
     cluster: Arc<Mutex<Option<ClusterRuntime>>>,
+    route_mesh: Option<RouteMesh>,
     hooks: BrokerHooks,
 }
 
@@ -159,6 +160,506 @@ impl ClusterRuntime {
             Self::Fake(runtime) => runtime.local_node_id(),
         }
     }
+}
+
+#[derive(Clone)]
+struct RouteMesh {
+    inner: Arc<Mutex<RouteMeshState>>,
+}
+
+struct RouteMeshState {
+    node_id: u64,
+    route_addr: SocketAddr,
+    client_addr: SocketAddr,
+    seeds: Vec<SocketAddr>,
+    reconnect_ms: u64,
+    peers: HashMap<u64, RoutePeer>,
+    known_peers: HashMap<u64, RoutePeerInfo>,
+    local_interests: Vec<String>,
+}
+
+struct RoutePeer {
+    info: RoutePeerInfo,
+    sender: mpsc::Sender<RouteFrame>,
+    direction: RouteDirection,
+    state: &'static str,
+    reconnect_attempts: u64,
+    last_error: Option<String>,
+    remote_interests: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct RoutePeerInfo {
+    node_id: u64,
+    route_addr: SocketAddr,
+    client_addr: SocketAddr,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum RouteDirection {
+    Inbound,
+    Outbound,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum RouteFrame {
+    Hello {
+        node_id: u64,
+        route_addr: SocketAddr,
+        client_addr: SocketAddr,
+    },
+    PeerList {
+        peers: Vec<RoutePeerInfo>,
+    },
+    Interests {
+        subjects: Vec<String>,
+    },
+    Publish {
+        subject: String,
+        reply_to: Option<String>,
+        payload: Vec<u8>,
+    },
+    Ping,
+    Pong,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct RouteTopologyResponse {
+    listen: String,
+    seeds: Vec<String>,
+    discovered: Vec<RouteDiscoveredPeerResponse>,
+    connected: Vec<RoutePeerResponse>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct RouteDiscoveredPeerResponse {
+    node_id: u64,
+    route_addr: String,
+    client_addr: String,
+    connected: bool,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct RoutePeerResponse {
+    node_id: u64,
+    route_addr: String,
+    client_addr: String,
+    direction: &'static str,
+    state: &'static str,
+    reconnect_attempts: u64,
+    last_error: Option<String>,
+    subscriptions: usize,
+    subjects: Vec<String>,
+}
+
+impl RouteMesh {
+    fn from_config(config: &Config) -> Option<Self> {
+        let cluster = config.cluster.as_ref()?;
+        let route_addr = cluster.route_listen?;
+        Some(Self {
+            inner: Arc::new(Mutex::new(RouteMeshState {
+                node_id: cluster.node_id,
+                route_addr,
+                client_addr: config.listen,
+                seeds: cluster.routes.clone(),
+                reconnect_ms: cluster.route_reconnect_ms,
+                peers: HashMap::new(),
+                known_peers: HashMap::new(),
+                local_interests: Vec::new(),
+            })),
+        })
+    }
+
+    async fn start(&self, broker: Broker) -> Result<()> {
+        let (listen, reconnect_ms) = {
+            let state = self.inner.lock().await;
+            (state.route_addr, state.reconnect_ms)
+        };
+        let listener = TcpListener::bind(listen)
+            .await
+            .with_context(|| format!("binding route listener {listen}"))?;
+        let accept_mesh = self.clone();
+        let accept_broker = broker.clone();
+        tokio::spawn(async move {
+            loop {
+                match listener.accept().await {
+                    Ok((stream, _)) => {
+                        let mesh = accept_mesh.clone();
+                        let broker = accept_broker.clone();
+                        tokio::spawn(async move {
+                            if let Err(err) =
+                                handle_route_stream(mesh, broker, stream, RouteDirection::Inbound)
+                                    .await
+                            {
+                                eprintln!("route connection error: {err:#}");
+                            }
+                        });
+                    }
+                    Err(err) => {
+                        eprintln!("accepting route connection failed: {err:#}");
+                    }
+                }
+            }
+        });
+
+        let dial_mesh = self.clone();
+        let dial_broker = broker;
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_millis(reconnect_ms));
+            loop {
+                interval.tick().await;
+                let addrs = dial_mesh.dial_candidates().await;
+                for addr in addrs {
+                    match TcpStream::connect(addr).await {
+                        Ok(stream) => {
+                            let mesh = dial_mesh.clone();
+                            let broker = dial_broker.clone();
+                            tokio::spawn(async move {
+                                if let Err(err) = handle_route_stream(
+                                    mesh,
+                                    broker,
+                                    stream,
+                                    RouteDirection::Outbound,
+                                )
+                                .await
+                                {
+                                    eprintln!("route connection error: {err:#}");
+                                }
+                            });
+                        }
+                        Err(err) => {
+                            dial_mesh.note_dial_error(addr, err.to_string()).await;
+                        }
+                    }
+                }
+            }
+        });
+        Ok(())
+    }
+
+    async fn dial_candidates(&self) -> Vec<SocketAddr> {
+        let state = self.inner.lock().await;
+        let mut addrs = state.seeds.clone();
+        addrs.extend(state.known_peers.values().map(|peer| peer.route_addr));
+        addrs.sort();
+        addrs.dedup();
+        addrs
+            .into_iter()
+            .filter(|addr| *addr != state.route_addr)
+            .filter(|addr| {
+                !state
+                    .peers
+                    .values()
+                    .any(|peer| peer.info.route_addr == *addr)
+            })
+            .collect()
+    }
+
+    async fn note_dial_error(&self, addr: SocketAddr, error: String) {
+        let mut state = self.inner.lock().await;
+        for peer in state.known_peers.values_mut() {
+            if peer.route_addr == addr {
+                continue;
+            }
+        }
+        for peer in state.peers.values_mut() {
+            if peer.info.route_addr == addr {
+                peer.last_error = Some(error.clone());
+                peer.reconnect_attempts = peer.reconnect_attempts.saturating_add(1);
+            }
+        }
+    }
+
+    async fn hello(&self) -> RouteFrame {
+        let state = self.inner.lock().await;
+        RouteFrame::Hello {
+            node_id: state.node_id,
+            route_addr: state.route_addr,
+            client_addr: state.client_addr,
+        }
+    }
+
+    async fn peer_list(&self) -> RouteFrame {
+        let state = self.inner.lock().await;
+        RouteFrame::PeerList {
+            peers: state
+                .known_peers
+                .values()
+                .cloned()
+                .chain(std::iter::once(RoutePeerInfo {
+                    node_id: state.node_id,
+                    route_addr: state.route_addr,
+                    client_addr: state.client_addr,
+                }))
+                .collect(),
+        }
+    }
+
+    async fn interests(&self) -> RouteFrame {
+        let state = self.inner.lock().await;
+        RouteFrame::Interests {
+            subjects: state.local_interests.clone(),
+        }
+    }
+
+    async fn register_peer(
+        &self,
+        info: RoutePeerInfo,
+        direction: RouteDirection,
+        sender: mpsc::Sender<RouteFrame>,
+    ) -> bool {
+        let mut state = self.inner.lock().await;
+        if info.node_id == state.node_id || info.route_addr == state.route_addr {
+            return false;
+        }
+        state.known_peers.insert(info.node_id, info.clone());
+        state.peers.insert(
+            info.node_id,
+            RoutePeer {
+                info,
+                sender,
+                direction,
+                state: "connected",
+                reconnect_attempts: 0,
+                last_error: None,
+                remote_interests: Vec::new(),
+            },
+        );
+        true
+    }
+
+    async fn remove_peer(&self, node_id: u64) {
+        let mut state = self.inner.lock().await;
+        state.peers.remove(&node_id);
+    }
+
+    async fn merge_peers(&self, peers: Vec<RoutePeerInfo>) {
+        let mut state = self.inner.lock().await;
+        let node_id = state.node_id;
+        let route_addr = state.route_addr;
+        for peer in peers {
+            if peer.node_id != node_id && peer.route_addr != route_addr {
+                state.known_peers.insert(peer.node_id, peer);
+            }
+        }
+    }
+
+    async fn set_remote_interests(&self, node_id: u64, subjects: Vec<String>) {
+        let mut state = self.inner.lock().await;
+        if let Some(peer) = state.peers.get_mut(&node_id) {
+            peer.remote_interests = subjects;
+        }
+    }
+
+    async fn set_local_interests(&self, subjects: Vec<String>) {
+        let senders = {
+            let mut state = self.inner.lock().await;
+            state.local_interests = subjects.clone();
+            state
+                .peers
+                .values()
+                .map(|peer| peer.sender.clone())
+                .collect::<Vec<_>>()
+        };
+        for sender in senders {
+            let _ = sender
+                .send(RouteFrame::Interests {
+                    subjects: subjects.clone(),
+                })
+                .await;
+        }
+    }
+
+    async fn broadcast_peer_list(&self) {
+        let frame = self.peer_list().await;
+        let senders = {
+            let state = self.inner.lock().await;
+            state
+                .peers
+                .values()
+                .map(|peer| peer.sender.clone())
+                .collect::<Vec<_>>()
+        };
+        for sender in senders {
+            let _ = sender.send(frame.clone()).await;
+        }
+    }
+
+    async fn forward_publish(&self, subject: &str, reply_to: Option<&str>, payload: &[u8]) {
+        let targets = {
+            let state = self.inner.lock().await;
+            state
+                .peers
+                .values()
+                .filter(|peer| {
+                    peer.remote_interests
+                        .iter()
+                        .any(|interest| subject::matches(interest, subject))
+                })
+                .map(|peer| peer.sender.clone())
+                .collect::<Vec<_>>()
+        };
+        for sender in targets {
+            let _ = sender
+                .send(RouteFrame::Publish {
+                    subject: subject.to_string(),
+                    reply_to: reply_to.map(str::to_string),
+                    payload: payload.to_vec(),
+                })
+                .await;
+        }
+    }
+
+    async fn topology_response(&self) -> RouteTopologyResponse {
+        let state = self.inner.lock().await;
+        let mut discovered = state
+            .known_peers
+            .values()
+            .map(|peer| RouteDiscoveredPeerResponse {
+                node_id: peer.node_id,
+                route_addr: peer.route_addr.to_string(),
+                client_addr: peer.client_addr.to_string(),
+                connected: state.peers.contains_key(&peer.node_id),
+            })
+            .collect::<Vec<_>>();
+        discovered.sort_by_key(|peer| peer.node_id);
+        let mut connected = state
+            .peers
+            .iter()
+            .map(|(node_id, peer)| RoutePeerResponse {
+                node_id: *node_id,
+                route_addr: peer.info.route_addr.to_string(),
+                client_addr: peer.info.client_addr.to_string(),
+                direction: match peer.direction {
+                    RouteDirection::Inbound => "inbound",
+                    RouteDirection::Outbound => "outbound",
+                },
+                state: peer.state,
+                reconnect_attempts: peer.reconnect_attempts,
+                last_error: peer.last_error.clone(),
+                subscriptions: peer.remote_interests.len(),
+                subjects: peer.remote_interests.clone(),
+            })
+            .collect::<Vec<_>>();
+        connected.sort_by_key(|peer| peer.node_id);
+        RouteTopologyResponse {
+            listen: state.route_addr.to_string(),
+            seeds: state.seeds.iter().map(ToString::to_string).collect(),
+            discovered,
+            connected,
+        }
+    }
+}
+
+async fn handle_route_stream(
+    mesh: RouteMesh,
+    broker: Broker,
+    stream: TcpStream,
+    direction: RouteDirection,
+) -> Result<()> {
+    let (mut reader, mut writer) = stream.into_split();
+    let (sender, mut receiver) = mpsc::channel::<RouteFrame>(256);
+    sender
+        .send(mesh.hello().await)
+        .await
+        .map_err(|_| BrokerError::msg("route writer closed"))?;
+    sender
+        .send(mesh.peer_list().await)
+        .await
+        .map_err(|_| BrokerError::msg("route writer closed"))?;
+    sender
+        .send(mesh.interests().await)
+        .await
+        .map_err(|_| BrokerError::msg("route writer closed"))?;
+    let writer_task = tokio::spawn(async move {
+        while let Some(frame) = receiver.recv().await {
+            write_route_frame(&mut writer, &frame).await?;
+        }
+        Ok::<(), BrokerError>(())
+    });
+
+    let mut peer_id = None;
+    loop {
+        let Some(frame) = read_route_frame(&mut reader).await? else {
+            break;
+        };
+        match frame {
+            RouteFrame::Hello {
+                node_id,
+                route_addr,
+                client_addr,
+            } => {
+                let info = RoutePeerInfo {
+                    node_id,
+                    route_addr,
+                    client_addr,
+                };
+                if mesh.register_peer(info, direction, sender.clone()).await {
+                    peer_id = Some(node_id);
+                    mesh.broadcast_peer_list().await;
+                } else {
+                    break;
+                }
+            }
+            RouteFrame::PeerList { peers } => {
+                mesh.merge_peers(peers).await;
+            }
+            RouteFrame::Interests { subjects } => {
+                if let Some(node_id) = peer_id {
+                    mesh.set_remote_interests(node_id, subjects).await;
+                }
+            }
+            RouteFrame::Publish {
+                subject,
+                reply_to,
+                payload,
+            } => {
+                broker
+                    .deliver_route_publish(&subject, reply_to.as_deref(), &payload)
+                    .await?;
+            }
+            RouteFrame::Ping => {
+                let _ = sender.send(RouteFrame::Pong).await;
+            }
+            RouteFrame::Pong => {}
+        }
+    }
+    if let Some(node_id) = peer_id {
+        mesh.remove_peer(node_id).await;
+    }
+    writer_task.abort();
+    Ok(())
+}
+
+async fn read_route_frame<R>(reader: &mut R) -> Result<Option<RouteFrame>>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut len = [0_u8; 4];
+    match reader.read_exact(&mut len).await {
+        Ok(_) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(err) => return Err(err.into()),
+    }
+    let len = u32::from_be_bytes(len) as usize;
+    crate::broker_ensure!(len <= 16 * 1024 * 1024, "route frame too large");
+    let mut payload = vec![0; len];
+    reader.read_exact(&mut payload).await?;
+    serde_json::from_slice(&payload).context("decoding route frame")
+}
+
+async fn write_route_frame<W>(writer: &mut W, frame: &RouteFrame) -> Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    let payload = serde_json::to_vec(frame).context("encoding route frame")?;
+    crate::broker_ensure!(payload.len() <= u32::MAX as usize, "route frame too large");
+    writer
+        .write_all(&(payload.len() as u32).to_be_bytes())
+        .await?;
+    writer.write_all(&payload).await?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -445,6 +946,7 @@ struct ClusterResponse {
     role: &'static str,
     leader_id: Option<u64>,
     peers: Vec<ClusterPeerResponse>,
+    routes: Option<RouteTopologyResponse>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -539,6 +1041,7 @@ impl Broker {
                 None
             }
         };
+        let route_mesh = RouteMesh::from_config(&config);
         Ok(Self {
             inner: Arc::new(Mutex::new(Inner {
                 wal,
@@ -551,6 +1054,7 @@ impl Broker {
             config,
             tls_acceptor,
             cluster: Arc::new(Mutex::new(cluster)),
+            route_mesh,
             hooks,
         })
     }
@@ -568,6 +1072,7 @@ impl Broker {
 
     async fn serve_inner(self, listener: TcpListener, handle_shutdown: bool) -> Result<()> {
         self.start_cluster().await?;
+        self.start_route_mesh().await?;
         self.spawn_http_status_listener();
         if self.hooks.start_redelivery_loop {
             let redeliver = self.clone();
@@ -651,6 +1156,10 @@ impl Broker {
                     .collect()
             })
             .unwrap_or_default();
+        let routes = match &self.route_mesh {
+            Some(route_mesh) => Some(route_mesh.topology_response().await),
+            None => None,
+        };
         ClusterResponse {
             cluster_size,
             cluster_status,
@@ -658,6 +1167,7 @@ impl Broker {
             role,
             leader_id,
             peers,
+            routes,
         }
     }
 
@@ -806,6 +1316,9 @@ impl Broker {
     where
         S: AsyncRead + AsyncWrite + Unpin,
     {
+        if self.route_mesh.is_some() {
+            return Ok(Some(stream));
+        }
         if let Some(cluster) = self.cluster_runtime().await {
             if !cluster.is_leader().await {
                 if let Some(leader) = cluster.leader_client_addr().await {
@@ -1029,15 +1542,15 @@ impl Broker {
 
         let durable_record = {
             let mut inner = self.inner.lock().await;
-            if is_inbox_subscription(&sub_subject) {
+            let client = inner
+                .clients
+                .get(&connection_id)
+                .ok_or_else(|| BrokerError::msg("unknown connection"))?;
+            if is_inbox_subscription(&sub_subject) || client.durable_id.is_none() {
                 crate::broker_ensure!(
                     queue.is_none(),
-                    "_INBOX subscriptions do not support queue groups"
+                    "transient subscriptions do not support queue groups"
                 );
-                inner
-                    .clients
-                    .get(&connection_id)
-                    .ok_or_else(|| BrokerError::msg("unknown connection"))?;
                 inner.transient_subscriptions.insert(
                     (connection_id, sid.clone()),
                     TransientSubscription {
@@ -1048,10 +1561,6 @@ impl Broker {
                 );
                 None
             } else {
-                let client = inner
-                    .clients
-                    .get(&connection_id)
-                    .ok_or_else(|| BrokerError::msg("unknown connection"))?;
                 if let Some(durable_id) = &client.durable_id {
                     let consumer_id = consumer_id(durable_id, queue.as_deref(), &sub_subject, &sid);
                     let record = ConsumerRecord {
@@ -1094,6 +1603,7 @@ impl Broker {
             drop(inner);
             self.deliver_pending().await?;
         }
+        self.sync_route_interests().await;
         Ok(())
     }
 
@@ -1141,6 +1651,8 @@ impl Broker {
             }
         }
         crate::broker_ensure!(found, "unknown sid");
+        drop(inner);
+        self.sync_route_interests().await;
         Ok(())
     }
 
@@ -1169,26 +1681,29 @@ impl Broker {
             "payload exceeds max payload"
         );
 
+        let (transient_deliveries, verbose) = {
+            let mut inner = self.inner.lock().await;
+            let verbose = inner
+                .clients
+                .get(&publisher_id)
+                .map(|client| client.verbose)
+                .unwrap_or(self.config.verbose);
+            (
+                inner.prepare_transient_deliveries(&subject_name, reply_to.as_deref(), &payload),
+                verbose,
+            )
+        };
+        for delivery in transient_deliveries {
+            let _ = delivery.sender.send(delivery.frame).await;
+        }
+        self.sync_route_interests().await;
+        if let Some(route_mesh) = &self.route_mesh {
+            route_mesh
+                .forward_publish(&subject_name, reply_to.as_deref(), &payload)
+                .await;
+        }
+
         if is_inbox_publish(&subject_name) {
-            let (deliveries, verbose) = {
-                let mut inner = self.inner.lock().await;
-                let verbose = inner
-                    .clients
-                    .get(&publisher_id)
-                    .map(|client| client.verbose)
-                    .unwrap_or(self.config.verbose);
-                (
-                    inner.prepare_transient_deliveries(
-                        &subject_name,
-                        reply_to.as_deref(),
-                        &payload,
-                    ),
-                    verbose,
-                )
-            };
-            for delivery in deliveries {
-                let _ = delivery.sender.send(delivery.frame).await;
-            }
             if verbose {
                 self.send_to(publisher_id, protocol::ok().to_vec()).await?;
             }
@@ -1196,14 +1711,6 @@ impl Broker {
         }
 
         if let Some(cluster) = self.cluster_runtime().await {
-            let verbose = {
-                let inner = self.inner.lock().await;
-                inner
-                    .clients
-                    .get(&publisher_id)
-                    .map(|client| client.verbose)
-                    .unwrap_or(self.config.verbose)
-            };
             cluster
                 .client_write(BrokerCommand::Publish {
                     subject: subject_name,
@@ -1219,13 +1726,8 @@ impl Broker {
             return Ok(());
         }
 
-        let (has_durable, verbose) = {
+        let has_durable = {
             let mut inner = self.inner.lock().await;
-            let verbose = inner
-                .clients
-                .get(&publisher_id)
-                .map(|client| client.verbose)
-                .unwrap_or(self.config.verbose);
             let matching_consumers: Vec<String> = inner
                 .consumers
                 .iter()
@@ -1235,7 +1737,7 @@ impl Broker {
                 .map(|(consumer_id, _)| consumer_id.clone())
                 .collect();
             let has_durable = !matching_consumers.is_empty();
-            let record = if has_durable {
+            if has_durable {
                 let record =
                     inner
                         .wal
@@ -1246,13 +1748,11 @@ impl Broker {
                     }
                 }
                 inner.messages.insert(record.seq, record);
-                true
             } else {
                 inner.wal.flush_due()?;
-                false
-            };
+            }
 
-            (record, verbose)
+            has_durable
         };
 
         if has_durable {
@@ -1276,6 +1776,31 @@ impl Broker {
             self.send_to(publisher_id, protocol::ok().to_vec()).await?;
         }
 
+        Ok(())
+    }
+
+    async fn deliver_route_publish(
+        &self,
+        subject_name: &str,
+        reply_to: Option<&str>,
+        payload: &[u8],
+    ) -> Result<()> {
+        crate::broker_ensure!(
+            subject::validate_subject(subject_name),
+            "invalid route publish subject"
+        );
+        crate::broker_ensure!(
+            payload.len() <= self.config.max_payload,
+            "route payload exceeds max payload"
+        );
+        let deliveries = {
+            let mut inner = self.inner.lock().await;
+            inner.prepare_transient_deliveries(subject_name, reply_to, payload)
+        };
+        for delivery in deliveries {
+            let _ = delivery.sender.send(delivery.frame).await;
+        }
+        self.sync_route_interests().await;
         Ok(())
     }
 
@@ -1408,6 +1933,8 @@ impl Broker {
         for consumer in inner.consumers.values_mut() {
             consumer.members.remove(&connection_id);
         }
+        drop(inner);
+        self.sync_route_interests().await;
         Ok(())
     }
 
@@ -1423,6 +1950,15 @@ impl Broker {
         Ok(())
     }
 
+    async fn start_route_mesh(&self) -> Result<()> {
+        let Some(route_mesh) = &self.route_mesh else {
+            return Ok(());
+        };
+        route_mesh.start(self.clone()).await?;
+        self.sync_route_interests().await;
+        Ok(())
+    }
+
     async fn cluster_runtime(&self) -> Option<ClusterRuntime> {
         self.cluster.lock().await.clone()
     }
@@ -1431,6 +1967,17 @@ impl Broker {
         let state = cluster.durable_state();
         let mut inner = self.inner.lock().await;
         inner.sync_durable_state(state);
+    }
+
+    async fn sync_route_interests(&self) {
+        let Some(route_mesh) = &self.route_mesh else {
+            return;
+        };
+        let interests = {
+            let inner = self.inner.lock().await;
+            inner.route_interests()
+        };
+        route_mesh.set_local_interests(interests).await;
     }
 
     async fn deliver_pending_clustered(&self, cluster: ClusterRuntime) -> Result<()> {
@@ -1554,6 +2101,17 @@ impl Inner {
             durable_consumers,
             transient_subscriptions,
         }
+    }
+
+    fn route_interests(&self) -> Vec<String> {
+        let mut interests = self
+            .transient_subscriptions
+            .values()
+            .map(|subscription| subscription.subject.clone())
+            .collect::<Vec<_>>();
+        interests.sort();
+        interests.dedup();
+        interests
     }
 
     fn upsert_consumer(&mut self, record: ConsumerRecord) -> &mut Consumer {
@@ -2362,13 +2920,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sub_requires_durable_connect() {
+    async fn non_durable_connect_subscribes_as_transient_core() {
         let scenario = Scenario::new();
-        let mut client = scenario.connect().await;
+        let mut subscriber = scenario.connect().await;
+        let mut publisher = scenario.connect_durable("publisher1", 25).await;
 
-        client.subscribe("orders.*", "sid1").await;
-        let error = client.read_frame().await;
-        assert!(error.contains("durable_id is required"));
+        subscriber.write_line("CONNECT {}").await;
+        subscriber.subscribe("orders.*", "sid1").await;
+        subscriber.ping_roundtrip().await;
+        publisher.publish("orders.created", b"hello").await;
+
+        let frame = subscriber.expect_msg().await;
+        assert_eq!(frame, "MSG orders.created sid1 5\r\nhello\r\n");
+        let inner = scenario.broker().inner.lock().await;
+        assert!(inner.consumers.is_empty());
+        assert_eq!(inner.transient_subscriptions.len(), 1);
     }
 
     #[tokio::test]
@@ -2636,6 +3202,36 @@ mod tests {
                 .lock()
                 .await
                 .transient_subscriptions
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn route_origin_publish_delivers_only_to_transient_subscribers() {
+        let scenario = Scenario::new();
+        let mut transient = scenario.connect().await;
+        let mut durable = scenario.connect_durable("client1", 25).await;
+
+        transient.write_line("CONNECT {}").await;
+        transient.subscribe("orders.*", "sid1").await;
+        durable.subscribe("orders.*", "durable1").await;
+        transient.ping_roundtrip().await;
+        durable.ping_roundtrip().await;
+
+        scenario
+            .broker()
+            .deliver_route_publish("orders.created", None, b"hello")
+            .await
+            .unwrap();
+
+        let frame = transient.expect_msg().await;
+        assert_eq!(frame, "MSG orders.created sid1 5\r\nhello\r\n");
+        durable.expect_no_frame_short().await;
+        let inner = scenario.broker().inner.lock().await;
+        assert!(inner.messages.is_empty());
+        assert!(
+            inner.consumers["durable-client1-durable1"]
+                .pending
                 .is_empty()
         );
     }

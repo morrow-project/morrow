@@ -1,10 +1,12 @@
 # Broker
 
 A WAL-backed broker with a NATS-style text protocol. Durable consumers are the
-core primitive: clients must declare a durable identity before subscribing,
-delivered messages require explicit acks, and unacked messages are redelivered
-after their ack timeout. By default the broker runs as a single node; clustered
-mode uses OpenRaft for replicated durability and leader election.
+core replicated primitive: durable clients declare an identity before
+subscribing, delivered durable messages require explicit acks, and unacked
+messages are redelivered after their ack timeout. Non-durable clients can also
+create live transient subscriptions. By default the broker runs as a single
+node; clustered mode uses OpenRaft for replicated durability and leader
+election.
 
 ## Configuration
 
@@ -58,6 +60,9 @@ boundary for durable consumers, publishes, delivery attempts, and ACKs:
     "enabled": true,
     "node_id": 1,
     "raft_listen": "127.0.0.1:5221",
+    "route_listen": "127.0.0.1:6221",
+    "routes": [],
+    "route_reconnect_ms": 500,
     "raft_dir": "./broker-wal/node1/raft",
     "bootstrap": true,
     "nodes": [
@@ -76,15 +81,20 @@ boundary for durable consumers, publishes, delivery attempts, and ACKs:
 Exactly one fresh node should use `"bootstrap": true`; every node must list the
 same static membership and set its own `node_id`, `listen`, `wal_dir`,
 `raft_listen`, and `raft_dir`. Dynamic membership is not implemented yet.
-Clients can connect to any node. Leaders serve the broker protocol directly;
-followers proxy raw client TCP bytes to the current leader, so TLS clients still
-complete TLS with the leader.
+If `route_listen` is set, the node also starts an internal route listener.
+`routes` are seed route addresses; nodes gossip discovered peers over route
+connections and dial until they form a full mesh. Route traffic is live-only:
+transient subscriptions and `_INBOX.*` request/reply traffic can cross nodes,
+while durable storage and ACK/redelivery state stay Raft-owned. Without
+`route_listen`, clients can still connect to any Raft node through the legacy
+follower proxy path.
 
 When `http_listen` is set, the broker exposes unauthenticated JSON admin
 endpoints. Bind this listener to loopback or a trusted private interface.
-`GET /cluster` reports cluster size, status, this node's role, and leader ID.
-`GET /connections` reports live client connections. `GET /subscriptions`
-reports durable consumers and transient inbox subscriptions.
+`GET /cluster` reports cluster size, status, this node's role, leader ID, static
+Raft peers, and route topology. `GET /connections` reports live client
+connections. `GET /subscriptions` reports durable consumers and transient
+subscriptions.
 
 TLS is disabled when `tls` is `null` or omitted. To enable TLS-first client
 connections:
@@ -403,8 +413,9 @@ Subjects support NATS-style subscription wildcards:
 - `*` matches one token.
 - `>` matches the remaining tail.
 
-`SUB` requires a prior `CONNECT` with `durable_id`, except for transient
-`_INBOX.*` subscriptions used for request/reply.
+After `CONNECT {}`, `SUB` creates a live transient subscription. After
+`CONNECT` with `durable_id`, non-inbox `SUB` creates a durable consumer and
+`_INBOX.*` remains transient for request/reply.
 
 #### UNSUB
 

@@ -190,6 +190,13 @@ impl Client {
         Ok(())
     }
 
+    pub async fn connect_transient(&mut self, verbose: bool) -> Result<()> {
+        let payload = serde_json::json!({
+            "verbose": verbose,
+        });
+        self.write_line(&format!("CONNECT {payload}")).await
+    }
+
     pub async fn connect_authenticated(
         &mut self,
         info: &Info,

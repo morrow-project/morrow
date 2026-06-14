@@ -9,7 +9,11 @@ use server::{
     Broker, Config,
     config::{AuthConfig, ClusterConfig, ClusterNodeConfig, TlsConfig},
 };
-use tokio::{net::TcpListener, time::Duration};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
+    time::Duration,
+};
 
 const TLS_SERVER_NAME: &str = "localhost";
 
@@ -382,6 +386,93 @@ async fn clustered_follower_proxies_client_to_leader() {
     harness.shutdown().await;
 }
 
+#[tokio::test]
+async fn routed_cluster_forms_full_mesh_and_forwards_transient_publish() {
+    let harness = ClusterHarness::start_three_routed().await;
+    harness.wait_for_full_route_mesh().await;
+
+    let mut subscriber = Client::connect(harness.nodes[1].client_addr, harness.max_payload)
+        .await
+        .unwrap();
+    subscriber.read_info().await.unwrap();
+    subscriber.connect_transient(false).await.unwrap();
+    subscriber.subscribe("orders.*", "sid1").await.unwrap();
+    subscriber.ping_roundtrip().await.unwrap();
+
+    harness.wait_for_route_interest(0, "orders.*").await;
+
+    let mut publisher = Client::connect(harness.nodes[2].client_addr, harness.max_payload)
+        .await
+        .unwrap();
+    publisher.read_info().await.unwrap();
+    publisher.connect_transient(false).await.unwrap();
+    publisher.publish("orders.created", b"hello").await.unwrap();
+
+    let message = tokio::time::timeout(Duration::from_secs(5), subscriber.next_message())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(message.subject, "orders.created");
+    assert_eq!(message.sid, "sid1");
+    assert_eq!(message.payload, b"hello");
+    assert!(message.ack_subject.is_none());
+
+    harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn routed_cluster_forwards_inbox_request_reply() {
+    let harness = ClusterHarness::start_three_routed().await;
+    harness.wait_for_full_route_mesh().await;
+
+    let inbox = "_INBOX.requester.1";
+    let mut requester = Client::connect(harness.nodes[0].client_addr, harness.max_payload)
+        .await
+        .unwrap();
+    requester.read_info().await.unwrap();
+    requester.connect_transient(false).await.unwrap();
+    requester.subscribe(inbox, "reply").await.unwrap();
+    requester.ping_roundtrip().await.unwrap();
+
+    let mut responder = Client::connect(harness.nodes[1].client_addr, harness.max_payload)
+        .await
+        .unwrap();
+    responder.read_info().await.unwrap();
+    responder.connect_transient(false).await.unwrap();
+    responder.subscribe("service.echo", "svc").await.unwrap();
+    responder.ping_roundtrip().await.unwrap();
+
+    harness.wait_for_route_interest(2, "service.echo").await;
+    harness.wait_for_route_interest(2, inbox).await;
+
+    let mut publisher = Client::connect(harness.nodes[2].client_addr, harness.max_payload)
+        .await
+        .unwrap();
+    publisher.read_info().await.unwrap();
+    publisher.connect_transient(false).await.unwrap();
+    publisher
+        .publish_with_reply("service.echo", Some(inbox), b"hello")
+        .await
+        .unwrap();
+
+    let request = tokio::time::timeout(Duration::from_secs(5), responder.next_message())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(request.subject, "service.echo");
+    assert_eq!(request.reply_to.as_deref(), Some(inbox));
+    responder.respond(&request, b"world").await.unwrap();
+
+    let response = tokio::time::timeout(Duration::from_secs(5), requester.next_message())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(response.subject, inbox);
+    assert_eq!(response.payload, b"world");
+
+    harness.shutdown().await;
+}
+
 struct Harness {
     addr: SocketAddr,
     max_payload: usize,
@@ -402,10 +493,20 @@ struct ClusterHarnessNode {
     node_id: u64,
     client_addr: SocketAddr,
     raft_addr: SocketAddr,
+    route_addr: SocketAddr,
+    http_addr: SocketAddr,
 }
 
 impl ClusterHarness {
     async fn start_three() -> Self {
+        Self::start_three_with_routes(false).await
+    }
+
+    async fn start_three_routed() -> Self {
+        Self::start_three_with_routes(true).await
+    }
+
+    async fn start_three_with_routes(enable_routes: bool) -> Self {
         let max_payload = 1024;
         let mut nodes = Vec::new();
         for node_id in 1..=3 {
@@ -413,6 +514,8 @@ impl ClusterHarness {
                 node_id,
                 client_addr: free_addr().await,
                 raft_addr: free_addr().await,
+                route_addr: free_addr().await,
+                http_addr: free_addr().await,
             });
         }
 
@@ -424,7 +527,7 @@ impl ClusterHarness {
             let listener = TcpListener::bind(node.client_addr).await.unwrap();
             let config = Config {
                 listen: node.client_addr,
-                http_listen: None,
+                http_listen: enable_routes.then_some(node.http_addr),
                 wal_dir: dir.path().join("wal"),
                 fsync_interval_ms: 1,
                 max_payload,
@@ -435,6 +538,13 @@ impl ClusterHarness {
                     enabled: true,
                     node_id: node.node_id,
                     raft_listen: node.raft_addr,
+                    route_listen: enable_routes.then_some(node.route_addr),
+                    routes: if !enable_routes || node.node_id == 1 {
+                        Vec::new()
+                    } else {
+                        vec![nodes[0].route_addr]
+                    },
+                    route_reconnect_ms: 50,
                     raft_dir: dir.path().join("raft"),
                     bootstrap: node.node_id == 1,
                     nodes: nodes
@@ -509,6 +619,54 @@ impl ClusterHarness {
         }
     }
 
+    async fn wait_for_full_route_mesh(&self) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let mut ready = true;
+            for node in &self.nodes {
+                let Some(value) = cluster_json(node.http_addr).await else {
+                    ready = false;
+                    continue;
+                };
+                let Some(connected) = value["routes"]["connected"].as_array() else {
+                    ready = false;
+                    continue;
+                };
+                ready &= connected.len() == self.nodes.len() - 1;
+            }
+            if ready {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "route mesh did not become full"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    async fn wait_for_route_interest(&self, observer_index: usize, subject: &str) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(value) = cluster_json(self.nodes[observer_index].http_addr).await {
+                if value["routes"]["connected"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .flat_map(|peer| peer["subjects"].as_array().into_iter().flatten())
+                    .any(|value| value.as_str() == Some(subject))
+                {
+                    return;
+                }
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "route interest {subject} did not propagate"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
     async fn shutdown(self) {
         for broker in &self.brokers {
             broker.shutdown().await.unwrap();
@@ -522,6 +680,19 @@ impl ClusterHarness {
 async fn free_addr() -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     listener.local_addr().unwrap()
+}
+
+async fn cluster_json(addr: SocketAddr) -> Option<serde_json::Value> {
+    let mut stream = TcpStream::connect(addr).await.ok()?;
+    stream
+        .write_all(b"GET /cluster HTTP/1.1\r\nhost: localhost\r\n\r\n")
+        .await
+        .ok()?;
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).await.ok()?;
+    let response = String::from_utf8(response).ok()?;
+    let (_, body) = response.split_once("\r\n\r\n")?;
+    serde_json::from_str(body).ok()
 }
 
 impl Harness {

@@ -704,6 +704,7 @@ name = "integration"
 version = "0.1.0"
 dependencies = [
  "client",
+ "serde_json",
  "server",
  "tokio",
 ]
