@@ -88,18 +88,6 @@ impl RaftNetwork<BrokerRaftConfig> for NetworkClient {
 }
 
 impl NetworkClient {
-    pub(super) async fn client_write(&self, command: BrokerCommand) -> Result<BrokerResponse> {
-        match self
-            .request(RaftRequest::ClientWrite(command))
-            .await
-            .map_err(|err| BrokerError::with_source("forwarding Raft client write", err))?
-        {
-            RaftResponse::ClientWrite(response) => Ok(response),
-            RaftResponse::Error(message) => Err(BrokerError::msg(message)),
-            _ => Err(BrokerError::msg("unexpected client_write response")),
-        }
-    }
-
     async fn request(
         &self,
         request: RaftRequest,

@@ -184,20 +184,24 @@ async fn fake_cluster_not_leader_rejects_publish() {
     assert_eq!(scenario.fake_cluster().write_count(), 1);
 }
 #[tokio::test]
-async fn route_enabled_follower_forwards_durable_writes_to_leader() {
+async fn route_enabled_follower_rejects_durable_writes() {
     let scenario = Scenario::new_fake_route_cluster_local_node(3, 2, Some(1));
-    let mut subscriber = scenario.connect_durable("client1", 25).await;
-    let mut publisher = scenario.connect_durable("publisher1", 25).await;
+    let cluster = scenario.broker().cluster_runtime().await.unwrap();
+    let err = scenario
+        .broker()
+        .cluster_write(
+            &cluster,
+            BrokerCommand::Publish {
+                subject: "orders.created".into(),
+                reply_to: None,
+                payload: b"hello".to_vec(),
+            },
+        )
+        .await
+        .unwrap_err();
 
-    subscriber.subscribe("orders.*", "sid1").await;
-    subscriber.ping_roundtrip().await;
-    publisher.publish("orders.created", b"hello").await;
-    publisher.ping_roundtrip().await;
-
-    let delivery = subscriber.expect_msg().await;
-    assert!(delivery.starts_with("MSG orders.created sid1 _BROKER.ACK.durable-client1-sid1."));
-    assert!(delivery.ends_with("5\r\nhello\r\n"));
-    assert_eq!(scenario.fake_cluster().write_count(), 3);
+    assert!(err.to_string().contains("not leader"));
+    assert_eq!(scenario.fake_cluster().write_count(), 0);
 }
 #[tokio::test]
 async fn clustered_transient_publish_without_durable_match_does_not_propose_raft() {

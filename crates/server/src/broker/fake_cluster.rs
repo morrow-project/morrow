@@ -58,25 +58,7 @@ impl FakeClusterRuntime {
         &self,
         command: BrokerCommand,
     ) -> Result<BrokerResponse> {
-        let pending = {
-            let mut inner = self.inner.lock().unwrap();
-            inner.ensure_forwardable()?;
-            if !inner.delay_writes {
-                return Ok(inner.apply_command(command));
-            }
-            let (tx, rx) = oneshot::channel();
-            let id = inner.next_write_id;
-            inner.next_write_id += 1;
-            inner.queued_writes.push_back(QueuedWrite {
-                id,
-                command,
-                response: tx,
-            });
-            rx
-        };
-        pending
-            .await
-            .map_err(|_| BrokerError::msg("queued write canceled"))
+        self.client_write(command).await
     }
 
     pub(super) fn durable_state(&self) -> DurableState {
@@ -180,11 +162,6 @@ impl FakeClusterState {
         if self.leader != Some(self.local_node_id) {
             crate::broker_bail!("not leader");
         }
-        self.ensure_quorum()
-    }
-
-    pub(super) fn ensure_forwardable(&self) -> Result<()> {
-        crate::broker_ensure!(self.leader.is_some(), "not leader");
         self.ensure_quorum()
     }
 

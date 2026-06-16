@@ -99,17 +99,6 @@ impl RaftRuntime {
     }
 
     pub async fn client_write(&self, command: BrokerCommand) -> Result<BrokerResponse> {
-        if let Some(leader) = self.raft.current_leader().await {
-            if leader != self.node_id {
-                if let Some(node) = self.nodes.get(&leader) {
-                    return NetworkClient {
-                        addr: node.raft_addr.to_string(),
-                    }
-                    .client_write(command)
-                    .await;
-                }
-            }
-        }
         let response = self
             .raft
             .client_write(command)

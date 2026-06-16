@@ -4,7 +4,6 @@ use super::*;
 pub(super) enum RaftRequest {
     AppendEntries(AppendEntriesRequest<BrokerRaftConfig>),
     Vote(VoteRequest<u64>),
-    ClientWrite(BrokerCommand),
     FullSnapshot {
         vote: Vote<u64>,
         meta: SnapshotMeta<u64, BasicNode>,
@@ -16,7 +15,6 @@ pub(super) enum RaftRequest {
 pub(super) enum RaftResponse {
     AppendEntries(AppendEntriesResponse<u64>),
     Vote(VoteResponse<u64>),
-    ClientWrite(BrokerResponse),
     FullSnapshot(SnapshotResponse<u64>),
     Error(String),
 }
@@ -45,10 +43,6 @@ pub(super) async fn handle_raft_stream(raft: BrokerRaft, mut stream: TcpStream) 
         },
         RaftRequest::Vote(rpc) => match raft.vote(rpc).await {
             Ok(response) => RaftResponse::Vote(response),
-            Err(err) => RaftResponse::Error(err.to_string()),
-        },
-        RaftRequest::ClientWrite(command) => match raft.client_write(command).await {
-            Ok(response) => RaftResponse::ClientWrite(response.data),
             Err(err) => RaftResponse::Error(err.to_string()),
         },
         RaftRequest::FullSnapshot { vote, meta, data } => {
