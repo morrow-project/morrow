@@ -3,6 +3,7 @@ use super::*;
 #[derive(Clone)]
 pub(super) struct RouteMesh {
     pub(super) inner: Arc<Mutex<RouteMeshState>>,
+    pub(super) auth_token: String,
 }
 
 pub(super) struct RouteMeshState {
@@ -14,6 +15,12 @@ pub(super) struct RouteMeshState {
     pub(super) peers: HashMap<u64, RoutePeer>,
     pub(super) known_peers: HashMap<u64, RoutePeerInfo>,
     pub(super) local_interests: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(super) struct AuthenticatedRouteFrame {
+    pub(super) auth_token: String,
+    pub(super) frame: RouteFrame,
 }
 
 pub(super) struct RoutePeer {

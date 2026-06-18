@@ -286,9 +286,11 @@ impl Harness {
         let config = Config {
             listen: addr,
             http_listen: None,
+            admin_token: None,
             wal_dir: wal_dir.path().to_path_buf(),
             fsync_interval_ms: 1,
             max_payload,
+            max_control_line: 8192,
             verbose: false,
             tls,
             auth,

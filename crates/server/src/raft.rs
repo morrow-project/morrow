@@ -24,6 +24,7 @@ use std::{
     ops::RangeBounds,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
+    time::Duration,
 };
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
@@ -33,7 +34,8 @@ use tracing::error;
 const LOG_FILE: &str = "raft-log.json";
 const STATE_FILE: &str = "raft-state.json";
 const SNAPSHOT_FILE: &str = "raft-snapshot.json";
-const MAX_RAFT_FRAME: usize = 64 * 1024 * 1024;
+const MAX_RAFT_FRAME: usize = 16 * 1024 * 1024;
+const RAFT_FRAME_READ_TIMEOUT_MS: u64 = 5_000;
 openraft::declare_raft_types!(
     pub BrokerRaftConfig:
         D = BrokerCommand,

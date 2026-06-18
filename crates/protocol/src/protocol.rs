@@ -83,15 +83,11 @@ impl std::error::Error for ProtocolError {}
 pub async fn read_command<R: AsyncBufRead + Unpin>(
     reader: &mut R,
     max_payload: usize,
+    max_control_line: usize,
 ) -> Result<Option<Command>, ProtocolError> {
-    let mut line = Vec::new();
-    let read = reader
-        .read_until(b'\n', &mut line)
-        .await
-        .map_err(|err| ProtocolError(format!("read failed: {err}")))?;
-    if read == 0 {
+    let Some(mut line) = read_control_line(reader, max_control_line).await? else {
         return Ok(None);
-    }
+    };
 
     trim_crlf(&mut line)?;
     let line =
@@ -118,6 +114,41 @@ pub async fn read_command<R: AsyncBufRead + Unpin>(
         "PUB" => read_pub(reader, parts, max_payload).await.map(Some),
         "HPUB" => read_hpub(reader, parts, max_payload).await.map(Some),
         _ => Err(ProtocolError(format!("unsupported command {op}"))),
+    }
+}
+
+async fn read_control_line<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+    max_control_line: usize,
+) -> Result<Option<Vec<u8>>, ProtocolError> {
+    let mut line = Vec::new();
+    loop {
+        let available = reader
+            .fill_buf()
+            .await
+            .map_err(|err| ProtocolError(format!("read failed: {err}")))?;
+        if available.is_empty() {
+            return if line.is_empty() {
+                Ok(None)
+            } else {
+                Err(ProtocolError("protocol line missing newline".into()))
+            };
+        }
+        let take = available
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map(|idx| idx + 1)
+            .unwrap_or(available.len());
+        if line.len() + take > max_control_line {
+            return Err(ProtocolError(format!(
+                "protocol line exceeds max_control_line {max_control_line}"
+            )));
+        }
+        line.extend_from_slice(&available[..take]);
+        reader.consume(take);
+        if line.ends_with(b"\n") {
+            return Ok(Some(line));
+        }
     }
 }
 

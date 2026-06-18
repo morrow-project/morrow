@@ -9,6 +9,8 @@ UTF-8 text lines terminated by `\r\n`. For compatibility, received command
 lines ending in `\n` are also accepted. Frames that carry a payload include a
 decimal byte length in the protocol line, followed by exactly that many payload
 bytes and a trailing `\r\n`.
+The server enforces a configurable maximum control-line length before reading
+payload bodies.
 
 ## Connection Lifecycle
 
@@ -54,6 +56,8 @@ an empty token, contains whitespace, or contains `*` or `>`.
 
 Subjects under `_BROKER.` are reserved. Publishing to `_BROKER.ACK...` is the
 ACK mechanism. Publishing to any other `_BROKER.*` subject is rejected.
+When authentication is enabled, an ACK publish is accepted only from an active
+member of the durable consumer named in that ACK subject.
 
 ### Subscription Subjects
 
@@ -70,6 +74,9 @@ orders.>
 >
 _INBOX.client1.>
 ```
+
+When authentication is enabled, `_INBOX.*` publish and subscribe subjects are
+scoped to the authenticated client prefix: `_INBOX.<client_id>...`.
 
 Invalid examples:
 

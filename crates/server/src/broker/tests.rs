@@ -367,9 +367,11 @@ fn test_config(dir: &Path) -> Config {
     Config {
         listen: "127.0.0.1:0".parse().unwrap(),
         http_listen: None,
+        admin_token: Some("test-admin-token".to_string()),
         wal_dir: dir.to_path_buf(),
         fsync_interval_ms: 1,
         max_payload: 1024,
+        max_control_line: 8192,
         verbose: false,
         tls: None,
         auth: Default::default(),
@@ -396,6 +398,7 @@ fn fake_cluster_config(dir: &Path, node_count: u64, local_node_id: u64) -> Clust
     ClusterConfig {
         enabled: true,
         node_id: local_node_id,
+        auth_token: "test-cluster-token".to_string(),
         raft_listen: SocketAddr::from(([127, 0, 0, 1], 20_000 + local_node_id as u16)),
         route_listen: Some(SocketAddr::from((
             [127, 0, 0, 1],
@@ -422,6 +425,9 @@ fn ack_subject(frame: &str) -> String {
     frame.split_whitespace().nth(3).unwrap().to_string()
 }
 async fn http_request(broker: &Broker, path: &str) -> String {
+    http_request_with_auth(broker, path, Some("test-admin-token")).await
+}
+async fn http_request_with_auth(broker: &Broker, path: &str, token: Option<&str>) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let broker = broker.clone();
@@ -430,8 +436,11 @@ async fn http_request(broker: &Broker, path: &str) -> String {
         broker.handle_http_status(stream).await.unwrap();
     });
     let mut client = TcpStream::connect(addr).await.unwrap();
+    let auth = token
+        .map(|token| format!("authorization: Bearer {token}\r\n"))
+        .unwrap_or_default();
     client
-        .write_all(format!("GET {path} HTTP/1.1\r\nhost: localhost\r\n\r\n").as_bytes())
+        .write_all(format!("GET {path} HTTP/1.1\r\nhost: localhost\r\n{auth}\r\n").as_bytes())
         .await
         .unwrap();
     let mut response = Vec::new();

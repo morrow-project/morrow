@@ -113,7 +113,7 @@ async fn publish_and_subscribe_patterns_authorize_matching_subjects() {
 }
 
 #[tokio::test]
-async fn ack_and_inbox_subjects_remain_allowed_under_restrictive_permissions() {
+async fn ack_and_owned_inbox_subjects_remain_allowed_under_restrictive_permissions() {
     let scenario = auth_scenario(vec![
         auth_client(
             "subscriber1",
@@ -157,8 +157,54 @@ async fn ack_and_inbox_subjects_remain_allowed_under_restrictive_permissions() {
     let request = responder.expect_hmsg().await;
     assert!(request.starts_with("HMSG service.echo svc _INBOX.requester1.1 "));
     responder.publish("_INBOX.requester1.1", b"world").await;
-    let response = requester.expect_msg().await;
-    assert_eq!(response, "MSG _INBOX.requester1.1 reply 5\r\nworld\r\n");
+    responder
+        .expect_err_contains("inbox publish not authorized")
+        .await;
+}
+
+#[tokio::test]
+async fn authenticated_clients_cannot_ack_other_consumers_delivery() {
+    let scenario = auth_scenario(vec![
+        auth_client("subscriber1", [7; 32], None, Some(vec!["orders.*"])),
+        auth_client("publisher1", [8; 32], Some(vec!["orders.*"]), None),
+    ]);
+    let mut subscriber = connect_authenticated(&scenario, "subscriber1", [7; 32]).await;
+    let mut publisher = connect_authenticated(&scenario, "publisher1", [8; 32]).await;
+
+    subscriber.subscribe("orders.*", "sid1").await;
+    subscriber.ping_roundtrip().await;
+    publisher.publish("orders.created", b"hello").await;
+    let delivery = subscriber.expect_msg().await;
+    publisher.publish(&ack_subject(&delivery), b"").await;
+    publisher.expect_err_contains("ack not authorized").await;
+
+    let inner = scenario.broker().inner.lock().await;
+    let consumer = inner.consumers.get("durable-subscriber1-sid1").unwrap();
+    assert!(consumer.in_flight.contains_key(&1));
+}
+
+#[tokio::test]
+async fn authenticated_clients_cannot_use_other_clients_inbox_prefix() {
+    let scenario = auth_scenario(vec![
+        auth_client("requester1", [9; 32], Some(vec!["service.*"]), None),
+        auth_client(
+            "responder1",
+            [10; 32],
+            Some(vec!["none.*"]),
+            Some(vec!["service.*"]),
+        ),
+    ]);
+    let mut requester = connect_authenticated(&scenario, "requester1", [9; 32]).await;
+    let mut responder = connect_authenticated(&scenario, "responder1", [10; 32]).await;
+
+    requester.subscribe("_INBOX.responder1.1", "bad").await;
+    requester
+        .expect_err_contains("inbox subscribe not authorized")
+        .await;
+    responder.publish("_INBOX.requester1.1", b"world").await;
+    responder
+        .expect_err_contains("inbox publish not authorized")
+        .await;
 }
 
 #[tokio::test]

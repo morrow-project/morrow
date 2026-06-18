@@ -10,7 +10,7 @@ impl Broker {
         producer_ack: Option<protocol::ProducerAckRequest>,
     ) -> Result<()> {
         if let Some(consumer_ack) = protocol::parse_ack_subject(&subject_name) {
-            self.authorize_publish(publisher_id, &subject_name, true)
+            self.authorize_ack_publish(publisher_id, &consumer_ack)
                 .await?;
             self.ack(consumer_ack).await?;
             if let Some(producer_ack) = &producer_ack {
@@ -33,8 +33,7 @@ impl Broker {
             payload.len() <= self.config.max_payload,
             "payload exceeds max payload"
         );
-        self.authorize_publish(publisher_id, &subject_name, false)
-            .await?;
+        self.authorize_publish(publisher_id, &subject_name).await?;
         let ack = producer_ack.as_ref();
         if ack.is_some_and(|ack| ack.level == protocol::AckLevel::ClusterDurable)
             && self.cluster_runtime().await.is_none()
@@ -179,7 +178,6 @@ impl Broker {
         &self,
         connection_id: u64,
         subject_name: &str,
-        is_ack: bool,
     ) -> Result<()> {
         if !self.config.auth.enabled {
             return Ok(());
@@ -190,13 +188,17 @@ impl Broker {
             .get(&connection_id)
             .ok_or_else(|| BrokerError::msg("unknown connection"))?;
         crate::broker_ensure!(client.authenticated, "authentication required");
-        if is_ack || is_inbox_publish(subject_name) {
-            return Ok(());
-        }
         let client_id = client
             .durable_id
             .as_deref()
             .ok_or_else(|| BrokerError::msg("authenticated client is missing durable identity"))?;
+        if is_inbox_publish(subject_name) {
+            crate::broker_ensure!(
+                inbox_belongs_to(subject_name, client_id),
+                "inbox publish not authorized"
+            );
+            return Ok(());
+        }
         let auth_client = self
             .config
             .auth
@@ -214,6 +216,31 @@ impl Broker {
                 .iter()
                 .any(|pattern| subject::matches(pattern, subject_name)),
             "publish not authorized"
+        );
+        Ok(())
+    }
+
+    pub(super) async fn authorize_ack_publish(
+        &self,
+        connection_id: u64,
+        ack: &AckSubject,
+    ) -> Result<()> {
+        if !self.config.auth.enabled {
+            return Ok(());
+        }
+        let inner = self.inner.lock().await;
+        let client = inner
+            .clients
+            .get(&connection_id)
+            .ok_or_else(|| BrokerError::msg("unknown connection"))?;
+        crate::broker_ensure!(client.authenticated, "authentication required");
+        let consumer = inner
+            .consumers
+            .get(&ack.consumer_id)
+            .ok_or_else(|| BrokerError::msg("ack consumer not found"))?;
+        crate::broker_ensure!(
+            consumer.members.contains_key(&connection_id),
+            "ack not authorized"
         );
         Ok(())
     }

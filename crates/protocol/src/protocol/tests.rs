@@ -5,7 +5,10 @@ use super::*;
 #[tokio::test]
 async fn parses_pub_with_payload() {
     let mut reader = BufReader::new(&b"PUB orders.created 5\r\nhello\r\n"[..]);
-    let command = read_command(&mut reader, 1024).await.unwrap().unwrap();
+    let command = read_command(&mut reader, 1024, 8192)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(
         command,
         Command::Pub {
@@ -21,7 +24,10 @@ async fn parses_pub_with_payload() {
 async fn parses_hpub_with_qos_headers() {
     let line = hpub("orders.created", None, "1", Some("msg-1"), b"hello");
     let mut reader = BufReader::new(line.as_bytes());
-    let command = read_command(&mut reader, 1024).await.unwrap().unwrap();
+    let command = read_command(&mut reader, 1024, 8192)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(
         command,
         Command::Pub {
@@ -46,7 +52,10 @@ async fn parses_hpub_with_reply_to_and_qos_headers() {
         b"hello",
     );
     let mut reader = BufReader::new(line.as_bytes());
-    let command = read_command(&mut reader, 1024).await.unwrap().unwrap();
+    let command = read_command(&mut reader, 1024, 8192)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(
         command,
         Command::Pub {
@@ -71,7 +80,10 @@ async fn parses_all_qos_levels() {
     ] {
         let line = hpub("orders.created", None, raw, Some("msg"), b"hello");
         let mut reader = BufReader::new(line.as_bytes());
-        let command = read_command(&mut reader, 1024).await.unwrap().unwrap();
+        let command = read_command(&mut reader, 1024, 8192)
+            .await
+            .unwrap()
+            .unwrap();
         let Command::Pub { ack: Some(ack), .. } = command else {
             panic!("expected QoS ack request");
         };
@@ -83,7 +95,7 @@ async fn parses_all_qos_levels() {
 async fn rejects_hpub_qos_without_msg_id() {
     let line = hpub("orders.created", None, "1", None, b"hello");
     let mut reader = BufReader::new(line.as_bytes());
-    let err = read_command(&mut reader, 1024).await.unwrap_err();
+    let err = read_command(&mut reader, 1024, 8192).await.unwrap_err();
     assert!(err.0.contains("Broker-Msg-Id"));
 }
 
@@ -91,11 +103,11 @@ async fn rejects_hpub_qos_without_msg_id() {
 async fn rejects_invalid_hpub_qos_and_lengths() {
     let line = hpub("orders.created", None, "4", Some("msg-1"), b"hello");
     let mut bad_qos = BufReader::new(line.as_bytes());
-    let err = read_command(&mut bad_qos, 1024).await.unwrap_err();
+    let err = read_command(&mut bad_qos, 1024, 8192).await.unwrap_err();
     assert!(err.0.contains("Broker-QoS"));
 
     let mut bad_len = BufReader::new(&b"HPUB orders.created 6 5\r\nNATS/1.0\r\n\r\n"[..]);
-    let err = read_command(&mut bad_len, 1024).await.unwrap_err();
+    let err = read_command(&mut bad_len, 1024, 8192).await.unwrap_err();
     assert!(err.0.contains("headers length exceeds"));
 }
 
@@ -132,7 +144,10 @@ async fn parses_connect_durable_metadata() {
     let mut reader = BufReader::new(
         &b"CONNECT {\"verbose\":true,\"durable_id\":\"client1\",\"ack_timeout_ms\":25,\"max_in_flight\":7}\r\n"[..],
     );
-    let command = read_command(&mut reader, 1024).await.unwrap().unwrap();
+    let command = read_command(&mut reader, 1024, 8192)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(
         command,
         Command::Connect {
@@ -149,7 +164,10 @@ async fn parses_connect_durable_metadata() {
 async fn parses_connect_client_auth() {
     let mut reader =
         BufReader::new(&b"CONNECT {\"client_id\":\"client1\",\"signature\":\"1234\"}\r\n"[..]);
-    let command = read_command(&mut reader, 1024).await.unwrap().unwrap();
+    let command = read_command(&mut reader, 1024, 8192)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(
         command,
         Command::Connect {
@@ -177,7 +195,7 @@ async fn rejects_malformed_connect_field_types() {
     ] {
         let line = format!("CONNECT {payload}\r\n");
         let mut reader = BufReader::new(line.as_bytes());
-        let err = read_command(&mut reader, 1024).await.unwrap_err();
+        let err = read_command(&mut reader, 1024, 8192).await.unwrap_err();
         assert!(
             err.0.contains(expected),
             "expected {expected:?} in error {err:?}"
@@ -188,7 +206,10 @@ async fn rejects_malformed_connect_field_types() {
 #[tokio::test]
 async fn parses_sub_variants() {
     let mut reader = BufReader::new(&b"SUB orders.* workers 7\r\n"[..]);
-    let command = read_command(&mut reader, 1024).await.unwrap().unwrap();
+    let command = read_command(&mut reader, 1024, 8192)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(
         command,
         Command::Sub {
@@ -202,8 +223,15 @@ async fn parses_sub_variants() {
 #[tokio::test]
 async fn rejects_oversized_payload() {
     let mut reader = BufReader::new(&b"PUB orders.created 5\r\nhello\r\n"[..]);
-    let err = read_command(&mut reader, 4).await.unwrap_err();
+    let err = read_command(&mut reader, 4, 8192).await.unwrap_err();
     assert!(err.0.contains("exceeds max payload"));
+}
+
+#[tokio::test]
+async fn rejects_oversized_control_line_before_payload_read() {
+    let mut reader = BufReader::new(&b"CONNECT {\"durable_id\":\"client1\"}\r\n"[..]);
+    let err = read_command(&mut reader, 1024, 16).await.unwrap_err();
+    assert!(err.0.contains("max_control_line"));
 }
 
 #[test]

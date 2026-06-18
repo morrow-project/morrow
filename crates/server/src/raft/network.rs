@@ -3,6 +3,7 @@ use super::*;
 #[derive(Clone)]
 pub(super) struct NetworkFactory {
     pub(super) nodes: HashMap<u64, ClusterNode>,
+    pub(super) auth_token: String,
 }
 impl RaftNetworkFactory<BrokerRaftConfig> for NetworkFactory {
     type Network = NetworkClient;
@@ -14,12 +15,16 @@ impl RaftNetworkFactory<BrokerRaftConfig> for NetworkFactory {
             .map(|node| node.raft_addr.to_string())
             .unwrap_or_else(|| node.addr.clone());
         let _ = target;
-        NetworkClient { addr }
+        NetworkClient {
+            addr,
+            auth_token: self.auth_token.clone(),
+        }
     }
 }
 #[derive(Clone)]
 pub(super) struct NetworkClient {
     pub(super) addr: String,
+    pub(super) auth_token: String,
 }
 impl RaftNetwork<BrokerRaftConfig> for NetworkClient {
     async fn append_entries(
@@ -99,9 +104,15 @@ impl NetworkClient {
                 err.to_string(),
             )))
         })?;
-        write_frame(&mut stream, &request)
-            .await
-            .map_err(|err| RPCError::Network(NetworkError::new(&err)))?;
+        write_frame(
+            &mut stream,
+            &AuthenticatedRaftRequest {
+                auth_token: self.auth_token.clone(),
+                request,
+            },
+        )
+        .await
+        .map_err(|err| RPCError::Network(NetworkError::new(&err)))?;
         read_frame(&mut stream)
             .await
             .map_err(|err| RPCError::Network(NetworkError::new(&err)))

@@ -15,6 +15,7 @@ impl RouteMesh {
                 known_peers: HashMap::new(),
                 local_interests: Vec::new(),
             })),
+            auth_token: cluster.auth_token.clone(),
         })
     }
 
@@ -28,16 +29,23 @@ impl RouteMesh {
             .with_context(|| format!("binding route listener {listen}"))?;
         let accept_mesh = self.clone();
         let accept_broker = broker.clone();
+        let accept_auth_token = self.auth_token.clone();
         tokio::spawn(async move {
             loop {
                 match listener.accept().await {
                     Ok((stream, _)) => {
                         let mesh = accept_mesh.clone();
                         let broker = accept_broker.clone();
+                        let auth_token = accept_auth_token.clone();
                         tokio::spawn(async move {
-                            if let Err(err) =
-                                handle_route_stream(mesh, broker, stream, RouteDirection::Inbound)
-                                    .await
+                            if let Err(err) = handle_route_stream(
+                                mesh,
+                                broker,
+                                stream,
+                                RouteDirection::Inbound,
+                                auth_token,
+                            )
+                            .await
                             {
                                 error!(error = ?err, "route connection error");
                             }
@@ -52,6 +60,7 @@ impl RouteMesh {
 
         let dial_mesh = self.clone();
         let dial_broker = broker;
+        let dial_auth_token = self.auth_token.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_millis(reconnect_ms));
             loop {
@@ -62,12 +71,14 @@ impl RouteMesh {
                         Ok(stream) => {
                             let mesh = dial_mesh.clone();
                             let broker = dial_broker.clone();
+                            let auth_token = dial_auth_token.clone();
                             tokio::spawn(async move {
                                 if let Err(err) = handle_route_stream(
                                     mesh,
                                     broker,
                                     stream,
                                     RouteDirection::Outbound,
+                                    auth_token,
                                 )
                                 .await
                                 {
@@ -319,9 +330,11 @@ pub(super) async fn handle_route_stream(
     broker: Broker,
     stream: TcpStream,
     direction: RouteDirection,
+    auth_token: String,
 ) -> Result<()> {
     let (mut reader, mut writer) = stream.into_split();
     let (sender, mut receiver) = mpsc::channel::<RouteFrame>(256);
+    let writer_auth_token = auth_token.clone();
     sender
         .send(mesh.hello().await)
         .await
@@ -336,14 +349,14 @@ pub(super) async fn handle_route_stream(
         .map_err(|_| BrokerError::msg("route writer closed"))?;
     let writer_task = tokio::spawn(async move {
         while let Some(frame) = receiver.recv().await {
-            write_route_frame(&mut writer, &frame).await?;
+            write_route_frame(&mut writer, &writer_auth_token, &frame).await?;
         }
         Ok::<(), BrokerError>(())
     });
 
     let mut peer_id = None;
     loop {
-        let Some(frame) = read_route_frame(&mut reader).await? else {
+        let Some(frame) = read_route_frame(&mut reader, &auth_token).await? else {
             break;
         };
         match frame {
@@ -399,28 +412,56 @@ pub(super) async fn handle_route_stream(
     Ok(())
 }
 
-pub(super) async fn read_route_frame<R>(reader: &mut R) -> Result<Option<RouteFrame>>
+pub(super) async fn read_route_frame<R>(
+    reader: &mut R,
+    auth_token: &str,
+) -> Result<Option<RouteFrame>>
 where
     R: AsyncRead + Unpin,
 {
     let mut len = [0_u8; 4];
-    match reader.read_exact(&mut len).await {
+    match tokio::time::timeout(
+        Duration::from_millis(ROUTE_FRAME_READ_TIMEOUT_MS),
+        reader.read_exact(&mut len),
+    )
+    .await
+    .map_err(|_| BrokerError::msg("route frame read timed out"))?
+    {
         Ok(_) => {}
         Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
         Err(err) => return Err(err.into()),
     }
     let len = u32::from_be_bytes(len) as usize;
-    crate::broker_ensure!(len <= 16 * 1024 * 1024, "route frame too large");
+    crate::broker_ensure!(len <= MAX_ROUTE_FRAME, "route frame too large");
     let mut payload = vec![0; len];
-    reader.read_exact(&mut payload).await?;
-    serde_json::from_slice(&payload).context("decoding route frame")
+    tokio::time::timeout(
+        Duration::from_millis(ROUTE_FRAME_READ_TIMEOUT_MS),
+        reader.read_exact(&mut payload),
+    )
+    .await
+    .map_err(|_| BrokerError::msg("route frame read timed out"))??;
+    let envelope: AuthenticatedRouteFrame =
+        serde_json::from_slice(&payload).context("decoding route frame")?;
+    crate::broker_ensure!(
+        crate::security::constant_time_eq(&envelope.auth_token, auth_token),
+        "invalid route auth token"
+    );
+    Ok(Some(envelope.frame))
 }
 
-pub(super) async fn write_route_frame<W>(writer: &mut W, frame: &RouteFrame) -> Result<()>
+pub(super) async fn write_route_frame<W>(
+    writer: &mut W,
+    auth_token: &str,
+    frame: &RouteFrame,
+) -> Result<()>
 where
     W: AsyncWrite + Unpin,
 {
-    let payload = serde_json::to_vec(frame).context("encoding route frame")?;
+    let payload = serde_json::to_vec(&AuthenticatedRouteFrame {
+        auth_token: auth_token.to_string(),
+        frame: frame.clone(),
+    })
+    .context("encoding route frame")?;
     crate::broker_ensure!(payload.len() <= u32::MAX as usize, "route frame too large");
     writer
         .write_all(&(payload.len() as u32).to_be_bytes())

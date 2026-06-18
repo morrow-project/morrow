@@ -11,9 +11,11 @@ const DEFAULT_CONFIG_PATH: &str = "broker.json";
 pub struct Config {
     pub listen: SocketAddr,
     pub http_listen: Option<SocketAddr>,
+    pub admin_token: Option<String>,
     pub wal_dir: PathBuf,
     pub fsync_interval_ms: u64,
     pub max_payload: usize,
+    pub max_control_line: usize,
     pub verbose: bool,
     pub tls: Option<TlsConfig>,
     pub auth: AuthConfig,
@@ -44,6 +46,7 @@ pub struct AuthPermissions {
 pub struct ClusterConfig {
     pub enabled: bool,
     pub node_id: u64,
+    pub auth_token: String,
     pub raft_listen: SocketAddr,
     pub route_listen: Option<SocketAddr>,
     pub routes: Vec<SocketAddr>,
@@ -94,9 +97,11 @@ impl Config {
             .parse()
             .context("config field listen must be a socket address")?;
         let http_listen = get_http_listen(value)?;
+        let admin_token = get_string(value, "admin_token")?.map(str::to_string);
         let wal_dir = PathBuf::from(get_string(value, "wal_dir")?.unwrap_or("./broker-wal"));
         let fsync_interval_ms = get_u64(value, "fsync_interval_ms")?.unwrap_or(5);
         let max_payload = get_u64(value, "max_payload")?.unwrap_or(1_048_576);
+        let max_control_line = get_u64(value, "max_control_line")?.unwrap_or(8192);
         let verbose = get_bool(value, "verbose")?.unwrap_or(false);
         let tls = get_tls_config(value)?;
         let auth = get_auth_config(value)?;
@@ -105,11 +110,15 @@ impl Config {
         let config = Self {
             listen,
             http_listen,
+            admin_token,
             wal_dir,
             fsync_interval_ms,
             max_payload: max_payload
                 .try_into()
                 .context("config field max_payload is too large")?,
+            max_control_line: max_control_line
+                .try_into()
+                .context("config field max_control_line is too large")?,
             verbose,
             tls,
             auth,
@@ -129,9 +138,21 @@ impl Config {
             "config field max_payload must be greater than zero"
         );
         crate::broker_ensure!(
+            self.max_control_line > 0,
+            "config field max_control_line must be greater than zero"
+        );
+        crate::broker_ensure!(
             self.fsync_interval_ms > 0,
             "config field fsync_interval_ms must be greater than zero"
         );
+        if self.http_listen.is_some() {
+            crate::broker_ensure!(
+                self.admin_token
+                    .as_deref()
+                    .is_some_and(|token| !token.is_empty()),
+                "config field admin_token is required when http_listen is set"
+            );
+        }
         if let Some(tls) = &self.tls {
             tls.validate()?;
         }
@@ -161,6 +182,10 @@ impl ClusterConfig {
         crate::broker_ensure!(
             self.node_id > 0,
             "cluster.node_id must be greater than zero"
+        );
+        crate::broker_ensure!(
+            !self.auth_token.is_empty(),
+            "cluster.auth_token must not be empty"
         );
         crate::broker_ensure!(
             self.heartbeat_interval_ms > 0,
@@ -404,6 +429,9 @@ fn get_cluster_config(value: &serde_json::Value) -> Result<Option<ClusterConfig>
     }
     let node_id = get_u64(cluster, "node_id")?
         .ok_or_else(|| BrokerError::msg("config field cluster.node_id is required"))?;
+    let auth_token = get_string(cluster, "auth_token")?
+        .ok_or_else(|| BrokerError::msg("config field cluster.auth_token is required"))?
+        .to_string();
     let raft_listen = get_string(cluster, "raft_listen")?
         .ok_or_else(|| BrokerError::msg("config field cluster.raft_listen is required"))?
         .parse()
@@ -424,6 +452,7 @@ fn get_cluster_config(value: &serde_json::Value) -> Result<Option<ClusterConfig>
     let config = ClusterConfig {
         enabled,
         node_id,
+        auth_token,
         raft_listen,
         route_listen,
         routes,

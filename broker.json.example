@@ -1,9 +1,11 @@
 {
   "listen": "127.0.0.1:4222",
   "http_listen": null,
+  "admin_token": null,
   "wal_dir": "./broker-wal",
   "fsync_interval_ms": 5,
   "max_payload": 1048576,
+  "max_control_line": 8192,
   "verbose": false,
   "tls": null,
   "auth": {

@@ -20,9 +20,11 @@ cp broker.json.example broker.json
 {
   "listen": "127.0.0.1:4222",
   "http_listen": null,
+  "admin_token": null,
   "wal_dir": "./broker-wal",
   "fsync_interval_ms": 5,
   "max_payload": 1048576,
+  "max_control_line": 8192,
   "verbose": false,
   "tls": null,
   "auth": {
@@ -37,9 +39,11 @@ Fields:
 
 - `listen`: TCP socket address for client connections.
 - `http_listen`: optional HTTP status listener address.
+- `admin_token`: bearer token required when `http_listen` is set.
 - `wal_dir`: directory for the broker WAL.
 - `fsync_interval_ms`: maximum batching interval before fsync.
 - `max_payload`: maximum accepted `PUB` payload size in bytes.
+- `max_control_line`: maximum accepted protocol control line length in bytes.
 - `verbose`: enables `+OK` responses for connections unless overridden by
   `CONNECT`.
 - `tls`: optional TLS-first listener config.
@@ -55,10 +59,13 @@ boundary for durable consumers, publishes, delivery attempts, and ACKs:
 ```json
 {
   "listen": "127.0.0.1:4221",
+  "http_listen": "127.0.0.1:8221",
+  "admin_token": "change-me-admin-token",
   "wal_dir": "./broker-wal/node1",
   "cluster": {
     "enabled": true,
     "node_id": 1,
+    "auth_token": "change-me-cluster-token",
     "raft_listen": "127.0.0.1:5221",
     "route_listen": "127.0.0.1:6221",
     "routes": [],
@@ -79,18 +86,20 @@ boundary for durable consumers, publishes, delivery attempts, and ACKs:
 ```
 
 Exactly one fresh node should use `"bootstrap": true`; every node must list the
-same static membership and set its own `node_id`, `listen`, `wal_dir`,
-`raft_listen`, and `raft_dir`. Dynamic membership is not implemented yet.
+same static membership and `auth_token`, and set its own `node_id`, `listen`,
+`wal_dir`, `raft_listen`, and `raft_dir`. Dynamic membership is not implemented yet.
 If `route_listen` is set, the node also starts an internal route listener.
 `routes` are seed route addresses; nodes gossip discovered peers over route
-connections and dial until they form a full mesh. Route traffic is live-only:
+connections after authenticating with `cluster.auth_token`, and dial until they
+form a full mesh. Route traffic is live-only:
 transient subscriptions and `_INBOX.*` request/reply traffic can cross nodes,
 while durable storage and ACK/redelivery state stay Raft-owned. Without
 `route_listen`, clients can still connect to any Raft node through the legacy
 follower proxy path.
 
-When `http_listen` is set, the broker exposes unauthenticated JSON admin
-endpoints. Bind this listener to loopback or a trusted private interface.
+When `http_listen` is set, `admin_token` is required and the broker exposes JSON
+admin endpoints protected by `Authorization: Bearer <admin_token>`. Bind this
+listener to loopback or a trusted private interface.
 `GET /cluster` reports cluster size, status, this node's role, leader ID, static
 Raft peers, and route topology. `GET /connections` reports live client
 connections. `GET /subscriptions` reports durable consumers and transient
@@ -149,8 +158,9 @@ identity for that connection.
 The `permissions` block is optional. When omitted, an authenticated client may
 publish and subscribe to all normal subjects. When present, `publish` and
 `subscribe` are subject-pattern allowlists using the same `*` and `>` wildcard
-rules as subscriptions. Broker ack subjects and `_INBOX.*` request/reply
-subjects remain available for their protocol roles.
+rules as subscriptions. Broker ack subjects remain available only to the active
+consumer member that received the delivery, and `_INBOX.*` request/reply
+subjects are scoped to the authenticated client's `_INBOX.<client_id>.` prefix.
 
 ## Run
 

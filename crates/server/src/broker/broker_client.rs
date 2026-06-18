@@ -229,13 +229,17 @@ impl Broker {
             .get(&connection_id)
             .ok_or_else(|| BrokerError::msg("unknown connection"))?;
         crate::broker_ensure!(client.authenticated, "authentication required");
-        if is_inbox_subscription(subject_name) {
-            return Ok(());
-        }
         let client_id = client
             .durable_id
             .as_deref()
             .ok_or_else(|| BrokerError::msg("authenticated client is missing durable identity"))?;
+        if is_inbox_subscription(subject_name) {
+            crate::broker_ensure!(
+                inbox_belongs_to(subject_name, client_id),
+                "inbox subscribe not authorized"
+            );
+            return Ok(());
+        }
         let auth_client = self
             .config
             .auth

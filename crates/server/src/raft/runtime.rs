@@ -5,6 +5,7 @@ pub struct RaftRuntime {
     pub raft: BrokerRaft,
     pub state_machine: StateMachineStore,
     pub nodes: HashMap<u64, ClusterNode>,
+    auth_token: String,
     node_id: u64,
     tls_enabled: bool,
 }
@@ -45,6 +46,7 @@ impl RaftRuntime {
         )?;
         let network = NetworkFactory {
             nodes: nodes.clone(),
+            auth_token: config.auth_token.clone(),
         };
         let raft_config = Arc::new(
             openraft::Config {
@@ -84,6 +86,7 @@ impl RaftRuntime {
             raft,
             state_machine,
             nodes,
+            auth_token: config.auth_token.clone(),
             node_id: config.node_id,
             tls_enabled,
         })
@@ -91,8 +94,9 @@ impl RaftRuntime {
 
     pub fn spawn_listener(&self, listen: SocketAddr) {
         let raft = self.raft.clone();
+        let auth_token = self.auth_token.clone();
         tokio::spawn(async move {
-            if let Err(err) = serve_raft(raft, listen).await {
+            if let Err(err) = serve_raft(raft, listen, auth_token).await {
                 error!(error = ?err, "raft transport error");
             }
         });

@@ -227,6 +227,12 @@ impl Broker {
         let Some(path) = http_request_path(request_line) else {
             return write_http_not_found(&mut stream).await;
         };
+        let Some(admin_token) = self.config.admin_token.as_deref() else {
+            return write_http_unauthorized(&mut stream).await;
+        };
+        if !http_authorized(&request, admin_token) {
+            return write_http_unauthorized(&mut stream).await;
+        }
         match path {
             "/cluster" => {
                 let body = serde_json::to_vec(&self.cluster_response().await)
@@ -375,7 +381,23 @@ impl Broker {
 
         let mut reader = BufReader::new(reader);
         loop {
-            match protocol::read_command(&mut reader, self.config.max_payload).await {
+            let read = async {
+                protocol::read_command(
+                    &mut reader,
+                    self.config.max_payload,
+                    self.config.max_control_line,
+                )
+                .await
+            };
+            let configured = self.client_is_configured(id).await;
+            let command = if configured {
+                read.await
+            } else {
+                tokio::time::timeout(Duration::from_millis(UNAUTHENTICATED_READ_TIMEOUT_MS), read)
+                    .await
+                    .map_err(|_| BrokerError::msg("unauthenticated read timed out"))?
+            };
+            match command {
                 Ok(Some(command)) => {
                     if let Err(err) = self.handle_command(id, command).await {
                         let _ = self.send_to(id, protocol::err(&err.to_string())).await;
@@ -392,5 +414,14 @@ impl Broker {
         self.remove_client(id).await?;
         writer_task.abort();
         Ok(())
+    }
+
+    pub(super) async fn client_is_configured(&self, id: u64) -> bool {
+        self.inner
+            .lock()
+            .await
+            .clients
+            .get(&id)
+            .is_some_and(|client| client.configured)
     }
 }

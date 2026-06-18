@@ -6,6 +6,30 @@ fn nodes() -> BTreeMap<u64, BasicNode> {
         .collect()
 }
 
+#[tokio::test]
+async fn raft_request_rejects_invalid_auth_token() {
+    let request = AuthenticatedRaftRequest {
+        auth_token: "wrong-token".into(),
+        request: RaftRequest::FullSnapshot {
+            vote: Vote::new_committed(1, 1),
+            meta: SnapshotMeta {
+                last_log_id: None,
+                last_membership: StoredMembership::new(None, Membership::new(vec![], nodes())),
+                snapshot_id: "test".into(),
+            },
+            data: Vec::new(),
+        },
+    };
+    let mut frame = Vec::new();
+    write_frame(&mut frame, &request).await.unwrap();
+    let mut reader = &frame[..];
+
+    let err = read_authenticated_request(&mut reader, "right-token")
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("invalid Raft auth token"));
+}
+
 #[test]
 fn applies_publish_attempt_and_ack() {
     let mut state = DurableState::new(nodes());

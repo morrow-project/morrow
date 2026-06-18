@@ -20,6 +20,12 @@ pub(super) fn is_inbox_publish(subject: &str) -> bool {
     subject.starts_with("_INBOX.")
 }
 
+pub(super) fn inbox_belongs_to(subject: &str, client_id: &str) -> bool {
+    subject
+        .strip_prefix("_INBOX.")
+        .is_some_and(|tail| tail == client_id || tail.starts_with(&format!("{client_id}.")))
+}
+
 pub(super) fn hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);

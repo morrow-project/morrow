@@ -2,6 +2,7 @@ pub mod broker;
 pub mod config;
 pub mod error;
 pub mod raft;
+pub(crate) mod security;
 pub mod tls;
 pub mod wal;
 

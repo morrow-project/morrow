@@ -63,6 +63,38 @@ async fn http_status_and_unknown_paths_return_not_found() {
     assert!(unknown.starts_with("HTTP/1.1 404 Not Found\r\n"));
     assert!(unknown.ends_with("{\"error\":\"not found\"}"));
 }
+
+#[tokio::test]
+async fn http_status_requires_valid_bearer_token() {
+    let scenario = Scenario::new();
+
+    let missing = http_request_with_auth(scenario.broker(), "/cluster", None).await;
+    let wrong = http_request_with_auth(scenario.broker(), "/cluster", Some("wrong")).await;
+    let ok = http_request(scenario.broker(), "/cluster").await;
+
+    assert!(missing.starts_with("HTTP/1.1 401 Unauthorized\r\n"));
+    assert!(missing.contains("www-authenticate: Bearer"));
+    assert!(wrong.starts_with("HTTP/1.1 401 Unauthorized\r\n"));
+    assert!(ok.starts_with("HTTP/1.1 200 OK\r\n"));
+}
+
+#[tokio::test]
+async fn route_frame_rejects_invalid_auth_token() {
+    let frame = AuthenticatedRouteFrame {
+        auth_token: "wrong-token".into(),
+        frame: RouteFrame::Ping,
+    };
+    let payload = serde_json::to_vec(&frame).unwrap();
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    bytes.extend_from_slice(&payload);
+    let mut reader = &bytes[..];
+
+    let err = read_route_frame(&mut reader, "right-token")
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("invalid route auth token"));
+}
 #[tokio::test]
 async fn fake_cluster_follower_without_known_leader_returns_error() {
     let scenario = Scenario::new_fake_cluster_local_node(3, 1, None);

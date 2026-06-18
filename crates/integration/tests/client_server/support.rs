@@ -110,15 +110,18 @@ impl ClusterHarness {
             let config = Config {
                 listen: node.client_addr,
                 http_listen: enable_routes.then_some(node.http_addr),
+                admin_token: enable_routes.then_some("test-admin-token".to_string()),
                 wal_dir: dir.path().join("wal"),
                 fsync_interval_ms: 1,
                 max_payload,
+                max_control_line: 8192,
                 verbose: false,
                 tls: None,
                 auth: Default::default(),
                 cluster: Some(ClusterConfig {
                     enabled: true,
                     node_id: node.node_id,
+                    auth_token: "test-cluster-token".to_string(),
                     raft_listen: node.raft_addr,
                     route_listen: enable_routes.then_some(node.route_addr),
                     routes: if !enable_routes || node.node_id == 1 {
@@ -265,7 +268,9 @@ pub(super) async fn free_addr() -> SocketAddr {
 pub(super) async fn cluster_json(addr: SocketAddr) -> Option<serde_json::Value> {
     let mut stream = TcpStream::connect(addr).await.ok()?;
     stream
-        .write_all(b"GET /cluster HTTP/1.1\r\nhost: localhost\r\n\r\n")
+        .write_all(
+            b"GET /cluster HTTP/1.1\r\nhost: localhost\r\nauthorization: Bearer test-admin-token\r\n\r\n",
+        )
         .await
         .ok()?;
     let mut response = Vec::new();
@@ -321,9 +326,11 @@ impl Harness {
         let config = Config {
             listen: addr,
             http_listen: None,
+            admin_token: None,
             wal_dir: wal_dir.path().to_path_buf(),
             fsync_interval_ms: 1,
             max_payload,
+            max_control_line: 8192,
             verbose: false,
             tls,
             auth,

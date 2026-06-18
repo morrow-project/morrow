@@ -1,9 +1,11 @@
 {
   "listen": "127.0.0.1:4222",
   "http_listen": "127.0.0.1:8222",
+  "admin_token": "test-admin-token",
   "wal_dir": "./target/manual-cluster/node2/wal",
   "fsync_interval_ms": 5,
   "max_payload": 1048576,
+  "max_control_line": 8192,
   "verbose": false,
   "tls": null,
   "auth": {
@@ -13,6 +15,7 @@
   "cluster": {
     "enabled": true,
     "node_id": 2,
+    "auth_token": "test-cluster-token",
     "raft_listen": "127.0.0.1:5222",
     "route_listen": "127.0.0.1:6222",
     "routes": ["127.0.0.1:6221"],

@@ -5,9 +5,11 @@ fn parses_json_config() {
     let value = serde_json::json!({
         "listen": "127.0.0.1:4223",
         "http_listen": "127.0.0.1:8223",
+        "admin_token": "admin-secret",
         "wal_dir": "./target/test-wal-config",
         "fsync_interval_ms": 10,
         "max_payload": 2048,
+        "max_control_line": 4096,
         "verbose": true,
         "tls": null,
         "auth": null
@@ -16,9 +18,11 @@ fn parses_json_config() {
     let config = Config::from_json(&value).unwrap();
     assert_eq!(config.listen, "127.0.0.1:4223".parse().unwrap());
     assert_eq!(config.http_listen, Some("127.0.0.1:8223".parse().unwrap()));
+    assert_eq!(config.admin_token.as_deref(), Some("admin-secret"));
     assert_eq!(config.wal_dir, PathBuf::from("./target/test-wal-config"));
     assert_eq!(config.fsync_interval_ms, 10);
     assert_eq!(config.max_payload, 2048);
+    assert_eq!(config.max_control_line, 4096);
     assert!(config.verbose);
     assert!(config.tls.is_none());
     assert!(!config.auth.enabled);
@@ -33,6 +37,7 @@ fn parses_cluster_route_mesh_config() {
         "cluster": {
             "enabled": true,
             "node_id": 1,
+            "auth_token": "cluster-secret",
             "raft_listen": "127.0.0.1:5221",
             "route_listen": "127.0.0.1:6221",
             "routes": ["127.0.0.1:6222", "127.0.0.1:6223"],
@@ -97,6 +102,7 @@ fn parses_cluster_config() {
         "cluster": {
             "enabled": true,
             "node_id": 1,
+            "auth_token": "cluster-secret",
             "raft_listen": "127.0.0.1:5221",
             "raft_dir": "./target/test-wal-cluster-config/raft",
             "bootstrap": true,
@@ -114,6 +120,7 @@ fn parses_cluster_config() {
     let config = Config::from_json(&value).unwrap();
     let cluster = config.cluster.unwrap();
     assert_eq!(cluster.node_id, 1);
+    assert_eq!(cluster.auth_token, "cluster-secret");
     assert_eq!(cluster.nodes.len(), 2);
     assert!(cluster.bootstrap);
 }
@@ -125,6 +132,7 @@ fn rejects_cluster_missing_self_node() {
         "cluster": {
             "enabled": true,
             "node_id": 3,
+            "auth_token": "cluster-secret",
             "raft_listen": "127.0.0.1:5221",
             "raft_dir": "./target/test-wal-cluster-missing-self/raft",
             "nodes": [
@@ -134,6 +142,44 @@ fn rejects_cluster_missing_self_node() {
     }))
     .unwrap_err();
     assert!(err.to_string().contains("cluster.node_id"));
+}
+
+#[test]
+fn rejects_http_listener_without_admin_token() {
+    let err = Config::from_json(&serde_json::json!({
+        "http_listen": "127.0.0.1:8222",
+        "wal_dir": "./target/test-wal-http-without-token"
+    }))
+    .unwrap_err();
+    assert!(err.to_string().contains("admin_token"));
+}
+
+#[test]
+fn rejects_cluster_without_auth_token() {
+    let err = Config::from_json(&serde_json::json!({
+        "wal_dir": "./target/test-wal-cluster-without-token",
+        "cluster": {
+            "enabled": true,
+            "node_id": 1,
+            "raft_listen": "127.0.0.1:5221",
+            "raft_dir": "./target/test-wal-cluster-without-token/raft",
+            "nodes": [
+                {"node_id": 1, "raft_addr": "127.0.0.1:5221", "client_addr": "127.0.0.1:4221"}
+            ]
+        }
+    }))
+    .unwrap_err();
+    assert!(err.to_string().contains("cluster.auth_token"));
+}
+
+#[test]
+fn rejects_zero_max_control_line() {
+    let err = Config::from_json(&serde_json::json!({
+        "wal_dir": "./target/test-wal-zero-control-line",
+        "max_control_line": 0
+    }))
+    .unwrap_err();
+    assert!(err.to_string().contains("max_control_line"));
 }
 
 #[test]
