@@ -7,7 +7,11 @@ impl Broker {
 
     pub(crate) fn open_with_hooks(config: Config, hooks: BrokerHooks) -> Result<Self> {
         config.validate()?;
-        let (wal, replay) = Wal::open(&config.wal_dir, config.fsync_interval())?;
+        let (wal, replay) = Wal::open(
+            &config.wal_dir,
+            config.fsync_interval(),
+            config.wal_segment_bytes,
+        )?;
         let tls_acceptor = config
             .tls
             .as_ref()
@@ -98,6 +102,9 @@ impl Broker {
 
     pub async fn shutdown(&self) -> Result<()> {
         let mut inner = self.inner.lock().await;
+        let messages = inner.messages.values().cloned().collect::<Vec<_>>();
+        let consumers = inner.replayed_consumers();
+        inner.wal.checkpoint(messages, consumers)?;
         inner.wal.flush()?;
         Ok(())
     }
@@ -170,6 +177,13 @@ impl Broker {
 
     pub(super) async fn subscriptions_response(&self) -> SubscriptionsResponse {
         self.inner.lock().await.subscriptions_response()
+    }
+
+    pub(super) async fn wal_status_response(&self) -> WalStatus {
+        let inner = self.inner.lock().await;
+        inner
+            .wal
+            .status(inner.messages.len(), inner.consumers.len())
     }
 
     pub(super) fn spawn_http_status_listener(&self) {
@@ -247,6 +261,11 @@ impl Broker {
             "/subscriptions" => {
                 let body = serde_json::to_vec(&self.subscriptions_response().await)
                     .context("serializing HTTP subscriptions response")?;
+                write_http_response(&mut stream, "200 OK", "application/json", &body).await
+            }
+            "/wal" => {
+                let body = serde_json::to_vec(&self.wal_status_response().await)
+                    .context("serializing HTTP WAL response")?;
                 write_http_response(&mut stream, "200 OK", "application/json", &body).await
             }
             _ => write_http_not_found(&mut stream).await,

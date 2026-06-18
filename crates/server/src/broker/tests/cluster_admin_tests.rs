@@ -79,6 +79,41 @@ async fn http_status_requires_valid_bearer_token() {
 }
 
 #[tokio::test]
+async fn http_wal_endpoint_requires_auth_and_reports_metrics() {
+    let scenario = Scenario::new_with_wal_segment_bytes(128);
+    let mut subscriber = scenario.connect_durable("client1", 25).await;
+    let mut publisher = scenario.connect_durable("publisher1", 25).await;
+    subscriber.subscribe("orders.*", "sid1").await;
+    subscriber.ping_roundtrip().await;
+    publisher.publish("orders.created", b"hello").await;
+    let frame = subscriber.expect_msg().await;
+    publisher.publish(&ack_subject(&frame), b"").await;
+    publisher.ping_roundtrip().await;
+
+    let missing = http_request_with_auth(scenario.broker(), "/wal", None).await;
+    let ok = http_request(scenario.broker(), "/wal").await;
+
+    assert!(missing.starts_with("HTTP/1.1 401 Unauthorized\r\n"));
+    assert!(ok.starts_with("HTTP/1.1 200 OK\r\n"));
+    assert!(ok.contains("\"active_segment_id\""));
+    assert!(ok.contains("\"active_segment_path\""));
+    assert!(ok.contains("\"active_segment_bytes\""));
+    assert!(ok.contains("\"sealed_segment_count\""));
+    assert!(ok.contains("\"total_wal_bytes\""));
+    assert!(ok.contains("\"retained_message_count\":0"));
+    assert!(ok.contains("\"consumer_count\":1"));
+    assert!(ok.contains("\"next_seq\":2"));
+    assert!(ok.contains("\"next_delivery_id\":2"));
+    assert!(ok.contains("\"last_replay_duration_ms\""));
+    assert!(ok.contains("\"last_checkpoint_duration_ms\""));
+    assert!(ok.contains("\"last_fsync_duration_ms\""));
+    assert!(ok.contains("\"rotations\""));
+    assert!(ok.contains("\"checkpoints\""));
+    assert!(ok.contains("\"truncations\""));
+    assert!(ok.contains("\"deleted_segments\""));
+}
+
+#[tokio::test]
 async fn route_frame_rejects_invalid_auth_token() {
     let frame = AuthenticatedRouteFrame {
         auth_token: "wrong-token".into(),

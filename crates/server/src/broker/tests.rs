@@ -26,6 +26,20 @@ impl Scenario {
         }
     }
 
+    fn new_with_wal_segment_bytes(wal_segment_bytes: u64) -> Self {
+        let dir = TempDir::new().unwrap();
+        let clock = Arc::new(ManualClock::new(1_000));
+        let mut config = test_config(dir.path());
+        config.wal_segment_bytes = wal_segment_bytes;
+        let broker = deterministic_broker(config, clock.clone(), None);
+        Self {
+            _dir: dir,
+            clock,
+            broker,
+            fake_cluster: None,
+        }
+    }
+
     fn new_fake_cluster(node_count: u64) -> Self {
         Self::new_fake_cluster_local_node(node_count, 1, Some(1))
     }
@@ -135,8 +149,10 @@ impl Scenario {
 
     async fn restart_broker(&mut self) {
         self.broker.shutdown().await.unwrap();
+        let mut config = test_config(self._dir.path());
+        config.wal_segment_bytes = self.broker.config.wal_segment_bytes;
         self.broker = deterministic_broker(
-            test_config(self._dir.path()),
+            config,
             self.clock.clone(),
             self.fake_cluster.clone().map(ClusterRuntime::Fake),
         );
@@ -369,6 +385,7 @@ fn test_config(dir: &Path) -> Config {
         http_listen: None,
         admin_token: Some("test-admin-token".to_string()),
         wal_dir: dir.to_path_buf(),
+        wal_segment_bytes: crate::wal::DEFAULT_WAL_SEGMENT_BYTES,
         fsync_interval_ms: 1,
         max_payload: 1024,
         max_control_line: 8192,

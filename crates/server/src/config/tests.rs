@@ -7,6 +7,7 @@ fn parses_json_config() {
         "http_listen": "127.0.0.1:8223",
         "admin_token": "admin-secret",
         "wal_dir": "./target/test-wal-config",
+        "wal_segment_bytes": 4096,
         "fsync_interval_ms": 10,
         "max_payload": 2048,
         "max_control_line": 4096,
@@ -20,6 +21,7 @@ fn parses_json_config() {
     assert_eq!(config.http_listen, Some("127.0.0.1:8223".parse().unwrap()));
     assert_eq!(config.admin_token.as_deref(), Some("admin-secret"));
     assert_eq!(config.wal_dir, PathBuf::from("./target/test-wal-config"));
+    assert_eq!(config.wal_segment_bytes, 4096);
     assert_eq!(config.fsync_interval_ms, 10);
     assert_eq!(config.max_payload, 2048);
     assert_eq!(config.max_control_line, 4096);
@@ -180,6 +182,16 @@ fn rejects_zero_max_control_line() {
     }))
     .unwrap_err();
     assert!(err.to_string().contains("max_control_line"));
+}
+
+#[test]
+fn rejects_zero_wal_segment_bytes() {
+    let err = Config::from_json(&serde_json::json!({
+        "wal_dir": "./target/test-wal-zero-segment",
+        "wal_segment_bytes": 0
+    }))
+    .unwrap_err();
+    assert!(err.to_string().contains("wal_segment_bytes"));
 }
 
 #[test]

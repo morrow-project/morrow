@@ -22,6 +22,7 @@ cp broker.json.example broker.json
   "http_listen": null,
   "admin_token": null,
   "wal_dir": "./broker-wal",
+  "wal_segment_bytes": 67108864,
   "fsync_interval_ms": 5,
   "max_payload": 1048576,
   "max_control_line": 8192,
@@ -41,6 +42,7 @@ Fields:
 - `http_listen`: optional HTTP status listener address.
 - `admin_token`: bearer token required when `http_listen` is set.
 - `wal_dir`: directory for the broker WAL.
+- `wal_segment_bytes`: WAL segment rotation threshold.
 - `fsync_interval_ms`: maximum batching interval before fsync.
 - `max_payload`: maximum accepted `PUB` payload size in bytes.
 - `max_control_line`: maximum accepted protocol control line length in bytes.
@@ -51,6 +53,11 @@ Fields:
 - `cluster`: optional OpenRaft cluster config.
 
 If a field is omitted, the value shown above is used.
+
+WAL directories use versioned segment files named `<20-digit-segment-id>.wal`.
+On first startup with an existing `broker.wal`, the broker replays it, writes a
+compacted `00000000000000000001.wal` segment, and renames the old file to
+`broker.wal.legacy`.
 
 When `cluster` is `null` or omitted, the broker uses the local WAL directly.
 When `cluster.enabled` is true, Raft quorum commit becomes the durability
@@ -103,7 +110,9 @@ listener to loopback or a trusted private interface.
 `GET /cluster` reports cluster size, status, this node's role, leader ID, static
 Raft peers, and route topology. `GET /connections` reports live client
 connections. `GET /subscriptions` reports durable consumers and transient
-subscriptions.
+subscriptions. `GET /wal` reports active segment metadata, retained state
+counts, replay/checkpoint/fsync timings, and rotation/checkpoint/truncation
+counters.
 
 TLS is disabled when `tls` is `null` or omitted. To enable TLS-first client
 connections:

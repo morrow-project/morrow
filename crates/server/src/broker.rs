@@ -28,7 +28,7 @@ use crate::{
     config::Config,
     error::{BrokerError, Result, ResultExt},
     raft::{BrokerCommand, BrokerResponse, DurableState, RaftRuntime, proxy_stream_to_leader},
-    wal::{ConsumerRecord, PublishRecord, ReplayedConsumer, Wal},
+    wal::{ConsumerRecord, DeliveryAttemptRecord, PublishRecord, ReplayedConsumer, Wal, WalStatus},
 };
 
 const DEFAULT_ACK_TIMEOUT_MS: u64 = 30_000;

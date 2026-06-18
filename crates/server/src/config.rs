@@ -13,6 +13,7 @@ pub struct Config {
     pub http_listen: Option<SocketAddr>,
     pub admin_token: Option<String>,
     pub wal_dir: PathBuf,
+    pub wal_segment_bytes: u64,
     pub fsync_interval_ms: u64,
     pub max_payload: usize,
     pub max_control_line: usize,
@@ -99,6 +100,8 @@ impl Config {
         let http_listen = get_http_listen(value)?;
         let admin_token = get_string(value, "admin_token")?.map(str::to_string);
         let wal_dir = PathBuf::from(get_string(value, "wal_dir")?.unwrap_or("./broker-wal"));
+        let wal_segment_bytes =
+            get_u64(value, "wal_segment_bytes")?.unwrap_or(crate::wal::DEFAULT_WAL_SEGMENT_BYTES);
         let fsync_interval_ms = get_u64(value, "fsync_interval_ms")?.unwrap_or(5);
         let max_payload = get_u64(value, "max_payload")?.unwrap_or(1_048_576);
         let max_control_line = get_u64(value, "max_control_line")?.unwrap_or(8192);
@@ -112,6 +115,7 @@ impl Config {
             http_listen,
             admin_token,
             wal_dir,
+            wal_segment_bytes,
             fsync_interval_ms,
             max_payload: max_payload
                 .try_into()
@@ -136,6 +140,10 @@ impl Config {
         crate::broker_ensure!(
             self.max_payload > 0,
             "config field max_payload must be greater than zero"
+        );
+        crate::broker_ensure!(
+            self.wal_segment_bytes > 0,
+            "config field wal_segment_bytes must be greater than zero"
         );
         crate::broker_ensure!(
             self.max_control_line > 0,

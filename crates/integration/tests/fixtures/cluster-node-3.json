@@ -3,6 +3,7 @@
   "http_listen": "127.0.0.1:8223",
   "admin_token": "test-admin-token",
   "wal_dir": "./target/manual-cluster/node3/wal",
+  "wal_segment_bytes": 67108864,
   "fsync_interval_ms": 5,
   "max_payload": 1048576,
   "max_control_line": 8192,

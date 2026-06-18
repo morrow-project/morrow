@@ -1,14 +1,14 @@
 use super::*;
 
-pub(super) fn write_publish_to(file: &mut File, record: &PublishRecord) -> Result<()> {
+pub(super) fn publish_body(record: &PublishRecord) -> Result<Vec<u8>> {
     let mut body = Vec::new();
     put_u64(&mut body, record.seq);
     put_string(&mut body, &record.subject)?;
     put_option_string(&mut body, record.reply_to.as_deref())?;
     put_bytes(&mut body, &record.payload)?;
-    write_record_to(file, KIND_PUBLISH, &body)
+    Ok(body)
 }
-pub(super) fn write_consumer_upsert_to(file: &mut File, record: &ConsumerRecord) -> Result<()> {
+pub(super) fn consumer_upsert_body(record: &ConsumerRecord) -> Result<Vec<u8>> {
     let mut body = Vec::new();
     put_string(&mut body, &record.consumer_id)?;
     put_string(&mut body, &record.filter_subject)?;
@@ -21,19 +21,28 @@ pub(super) fn write_consumer_upsert_to(file: &mut File, record: &ConsumerRecord)
             .try_into()
             .context("max_in_flight too large")?,
     );
-    write_record_to(file, KIND_CONSUMER_UPSERT, &body)
+    Ok(body)
 }
-pub(super) fn write_delivery_attempt_to(
-    file: &mut File,
-    record: &DeliveryAttemptRecord,
-) -> Result<()> {
+pub(super) fn delivery_attempt_body(record: &DeliveryAttemptRecord) -> Result<Vec<u8>> {
     let mut body = Vec::new();
     put_u64(&mut body, record.seq);
     put_string(&mut body, &record.consumer_id)?;
     put_u64(&mut body, record.delivery_id);
     put_u64(&mut body, record.deadline_ms);
     put_u32(&mut body, record.attempt);
-    write_record_to(file, KIND_DELIVERY_ATTEMPT, &body)
+    Ok(body)
+}
+pub(super) fn ack_body(record: &AckRecord) -> Result<Vec<u8>> {
+    let mut body = Vec::new();
+    put_u64(&mut body, record.seq);
+    put_string(&mut body, &record.consumer_id)?;
+    put_u64(&mut body, record.delivery_id);
+    Ok(body)
+}
+pub(super) fn record_size(body: &[u8]) -> Result<u64> {
+    let len = body.len() + 1;
+    let len: u32 = len.try_into().context("WAL record too large")?;
+    Ok(4 + u64::from(len) + 4)
 }
 pub(super) fn write_record_to(file: &mut File, kind: u8, body: &[u8]) -> Result<()> {
     let len = body.len() + 1;

@@ -98,6 +98,33 @@ impl Inner {
         interests
     }
 
+    pub(super) fn replayed_consumers(&self) -> Vec<ReplayedConsumer> {
+        self.consumers
+            .values()
+            .map(|consumer| ReplayedConsumer {
+                record: consumer.record.clone(),
+                pending: consumer.pending.clone(),
+                in_flight: consumer
+                    .in_flight
+                    .iter()
+                    .map(|(seq, in_flight)| {
+                        (
+                            *seq,
+                            DeliveryAttemptRecord {
+                                seq: *seq,
+                                consumer_id: consumer.record.consumer_id.clone(),
+                                delivery_id: in_flight.delivery_id,
+                                deadline_ms: in_flight.deadline_ms,
+                                attempt: in_flight.attempt,
+                            },
+                        )
+                    })
+                    .collect(),
+                acked: consumer.acked.clone(),
+            })
+            .collect()
+    }
+
     pub(super) fn has_matching_durable_consumer(&self, subject_name: &str) -> bool {
         self.consumers
             .values()

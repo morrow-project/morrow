@@ -168,6 +168,43 @@ async fn acked_message_does_not_redeliver_after_restart() {
     assert!(inner.consumers["durable-client1-sid1"].in_flight.is_empty());
     assert!(inner.consumers["durable-client1-sid1"].acked.contains(&1));
 }
+
+#[tokio::test]
+async fn wal_rotation_and_shutdown_checkpoint_preserve_durable_state() {
+    let mut scenario = Scenario::new_with_wal_segment_bytes(128);
+    {
+        let mut subscriber = scenario.connect_durable("client1", 25).await;
+        let mut publisher = scenario.connect_durable("publisher1", 25).await;
+        subscriber.subscribe("orders.*", "sid1").await;
+        subscriber.ping_roundtrip().await;
+        publisher.publish("orders.one", b"first").await;
+        let first = subscriber.expect_msg().await;
+        publisher.publish(&ack_subject(&first), b"").await;
+        publisher.publish("orders.two", b"second").await;
+        let second = subscriber.expect_msg().await;
+        assert!(second.contains(".2.2 "));
+        subscriber.disconnect().await;
+        publisher.disconnect().await;
+    }
+
+    let before_checkpoint = wal_segment_count(scenario._dir.path());
+    assert!(before_checkpoint > 1, "expected rotated WAL segments");
+    scenario.restart_broker().await;
+    assert_eq!(wal_segment_count(scenario._dir.path()), 1);
+
+    scenario.advance_ms(25);
+    let mut subscriber = scenario.connect_durable("client1", 25).await;
+    subscriber.subscribe("orders.*", "sid1").await;
+    scenario.tick_redelivery().await;
+
+    let redelivery = subscriber.expect_msg().await;
+    assert!(redelivery.starts_with("MSG orders.two sid1 _BROKER.ACK.durable-client1-sid1.2.3"));
+    let inner = scenario.broker().inner.lock().await;
+    assert!(!inner.messages.contains_key(&1));
+    assert!(inner.messages.contains_key(&2));
+    assert!(inner.consumers["durable-client1-sid1"].acked.contains(&1));
+}
+
 #[tokio::test]
 async fn request_reply_inbox_delivery_is_transient() {
     let scenario = Scenario::new();
@@ -499,4 +536,12 @@ async fn cluster_response_reports_forming_without_leader() {
     assert_eq!(status.node_id, Some(2));
     assert_eq!(status.role, "unknown");
     assert_eq!(status.leader_id, None);
+}
+
+fn wal_segment_count(dir: &std::path::Path) -> usize {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("wal"))
+        .count()
 }

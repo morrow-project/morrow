@@ -1,4 +1,4 @@
-use crate::error::{Result, ResultExt};
+use crate::error::{BrokerError, Result, ResultExt};
 use protocol::subject;
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
@@ -8,10 +8,16 @@ use std::{
     time::{Duration, Instant},
 };
 const WAL_FILE: &str = "broker.wal";
+const LEGACY_WAL_FILE: &str = "broker.wal.legacy";
+const SEGMENT_EXTENSION: &str = "wal";
+const SEGMENT_TMP_EXTENSION: &str = "wal.tmp";
+const SEGMENT_HEADER: &[u8] = b"BROKERWAL\x01\n";
+const SEGMENT_HEADER_LEN: u64 = SEGMENT_HEADER.len() as u64;
 const KIND_PUBLISH: u8 = 1;
 const KIND_CONSUMER_UPSERT: u8 = 2;
 const KIND_DELIVERY_ATTEMPT: u8 = 3;
 const KIND_ACK: u8 = 4;
+pub const DEFAULT_WAL_SEGMENT_BYTES: u64 = 64 * 1024 * 1024;
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct PublishRecord {
     pub seq: u64,
@@ -54,15 +60,61 @@ pub struct Replay {
     pub consumers: HashMap<String, ReplayedConsumer>,
     pub next_seq: u64,
     pub next_delivery_id: u64,
+    pub duration_ms: u64,
+    pub truncations: u64,
 }
 #[derive(Debug)]
 pub struct Wal {
     pub(super) file: File,
-    pub(super) path: PathBuf,
+    pub(super) dir: PathBuf,
+    pub(super) active_segment_id: u64,
+    pub(super) active_path: PathBuf,
+    pub(super) active_bytes: u64,
+    pub(super) sealed_segments: Vec<SegmentInfo>,
+    pub(super) segment_bytes: u64,
     pub(super) next_seq: u64,
     pub(super) next_delivery_id: u64,
     pub(super) fsync_interval: Duration,
     pub(super) last_sync: Instant,
+    pub(super) metrics: WalMetrics,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SegmentInfo {
+    pub id: u64,
+    pub path: PathBuf,
+    pub bytes: u64,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct WalMetrics {
+    pub last_replay_duration_ms: u64,
+    pub last_checkpoint_duration_ms: u64,
+    pub last_fsync_duration_ms: u64,
+    pub rotations: u64,
+    pub checkpoints: u64,
+    pub truncations: u64,
+    pub deleted_segments: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct WalStatus {
+    pub active_segment_id: u64,
+    pub active_segment_path: String,
+    pub active_segment_bytes: u64,
+    pub sealed_segment_count: usize,
+    pub total_wal_bytes: u64,
+    pub retained_message_count: usize,
+    pub consumer_count: usize,
+    pub next_seq: u64,
+    pub next_delivery_id: u64,
+    pub last_replay_duration_ms: u64,
+    pub last_checkpoint_duration_ms: u64,
+    pub last_fsync_duration_ms: u64,
+    pub rotations: u64,
+    pub checkpoints: u64,
+    pub truncations: u64,
+    pub deleted_segments: u64,
 }
 
 mod cursor;
