@@ -114,6 +114,21 @@ subscriptions. `GET /wal` reports active segment metadata, retained state
 counts, replay/checkpoint/fsync timings, and rotation/checkpoint/truncation
 counters.
 
+## Docker Compose Cluster
+
+`compose.yaml` starts a three-node broker cluster using the local Dockerfile.
+Each node mounts a read-only config from `docker/cluster/` and gets its own
+named data volume:
+
+- `broker-node-1-data`
+- `broker-node-2-data`
+- `broker-node-3-data`
+
+Inside each volume, WAL files live under `/var/lib/broker/wal` and Raft data
+lives under `/var/lib/broker/raft`. Client ports are published as `4221`,
+`4222`, and `4223`; admin ports are published as `8221`, `8222`, and `8223`.
+The example admin bearer token is `change-me-admin-token`.
+
 TLS is disabled when `tls` is `null` or omitted. To enable TLS-first client
 connections:
 

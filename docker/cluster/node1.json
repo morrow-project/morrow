@@ -1,0 +1,51 @@
+{
+  "listen": "0.0.0.0:4222",
+  "http_listen": "0.0.0.0:8222",
+  "admin_token": "change-me-admin-token",
+  "wal_dir": "/var/lib/broker/wal",
+  "wal_segment_bytes": 67108864,
+  "fsync_interval_ms": 5,
+  "max_payload": 1048576,
+  "max_control_line": 8192,
+  "verbose": false,
+  "tls": null,
+  "auth": {
+    "enabled": false,
+    "clients": []
+  },
+  "cluster": {
+    "enabled": true,
+    "node_id": 1,
+    "auth_token": "change-me-cluster-token",
+    "raft_listen": "0.0.0.0:5222",
+    "route_listen": "0.0.0.0:6222",
+    "routes": [
+      "172.30.0.12:6222",
+      "172.30.0.13:6222"
+    ],
+    "route_reconnect_ms": 500,
+    "raft_dir": "/var/lib/broker/raft",
+    "bootstrap": true,
+    "nodes": [
+      {
+        "node_id": 1,
+        "raft_addr": "172.30.0.11:5222",
+        "client_addr": "172.30.0.11:4222"
+      },
+      {
+        "node_id": 2,
+        "raft_addr": "172.30.0.12:5222",
+        "client_addr": "172.30.0.12:4222"
+      },
+      {
+        "node_id": 3,
+        "raft_addr": "172.30.0.13:5222",
+        "client_addr": "172.30.0.13:4222"
+      }
+    ],
+    "election_timeout_min_ms": 150,
+    "election_timeout_max_ms": 300,
+    "heartbeat_interval_ms": 50,
+    "snapshot_threshold": 10000
+  }
+}
