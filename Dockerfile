@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 
-ARG RUST_VERSION=1.96.0
+ARG RUST_VERSION=1.98.0
 ARG RUNTIME_IMAGE=gcr.io/distroless/cc-debian12:nonroot
 
 FROM rust:${RUST_VERSION}-bookworm AS source

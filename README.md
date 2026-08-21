@@ -129,6 +129,21 @@ lives under `/var/lib/broker/raft`. Client ports are published as `4221`,
 `4222`, and `4223`; admin ports are published as `8221`, `8222`, and `8223`.
 The example admin bearer token is `change-me-admin-token`.
 
+## Release Builds
+
+The repo includes a `Justfile` for release binary builds. Each platform task
+builds both `broker` and `broker-cli` into `dist/<platform>/`:
+
+```bash
+just build-linux-amd64
+just build-linux-arm64
+just build-darwin-arm64
+just build-windows-amd64
+just build-windows-arm64
+```
+
+Use `just build-all` to run every platform build.
+
 TLS is disabled when `tls` is `null` or omitted. To enable TLS-first client
 connections:
 
