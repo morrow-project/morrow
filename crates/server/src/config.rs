@@ -1,4 +1,5 @@
 use crate::error::{BrokerError, Result, ResultExt};
+use crate::stream::StreamCatalog;
 use std::{
     collections::HashMap,
     ffi::OsString,
@@ -21,6 +22,7 @@ pub struct Config {
     pub tls: Option<TlsConfig>,
     pub auth: AuthConfig,
     pub cluster: Option<ClusterConfig>,
+    pub streams: StreamCatalog,
 }
 #[derive(Debug, Clone)]
 pub struct TlsConfig {
@@ -109,6 +111,7 @@ impl Config {
         let tls = get_tls_config(value)?;
         let auth = get_auth_config(value)?;
         let cluster = get_cluster_config(value)?;
+        let streams = get_streams_config(value)?;
 
         let config = Self {
             listen,
@@ -127,6 +130,7 @@ impl Config {
             tls,
             auth,
             cluster,
+            streams,
         };
         config.validate()?;
         Ok(config)
@@ -550,6 +554,10 @@ impl From<OsString> for BrokerError {
         BrokerError::msg(format!("invalid argument {:?}", value))
     }
 }
+
+#[path = "config/stream_config.rs"]
+mod stream_config;
+use stream_config::get_streams_config;
 
 #[cfg(test)]
 mod tests;

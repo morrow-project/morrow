@@ -51,6 +51,28 @@ async fn http_subscriptions_endpoint_reports_durable_and_transient_state() {
     assert!(response.contains("\"subject\":\"_INBOX.client1.1\""));
     assert!(response.contains("\"sid\":\"inbox1\""));
 }
+
+#[tokio::test]
+async fn http_streams_endpoint_reports_effective_bindings() {
+    let mut scenario = Scenario::new();
+    scenario.broker.config.streams =
+        crate::stream::StreamCatalog::new(vec![crate::stream::StreamDefinition {
+            name: crate::stream::StreamId::new("orders").unwrap(),
+            subjects: vec!["orders.>".to_string()],
+            partitions: 8,
+            partitioning: Default::default(),
+            storage: Default::default(),
+            retention: Default::default(),
+        }])
+        .unwrap();
+
+    let response = http_request(scenario.broker(), "/streams").await;
+
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+    assert!(response.contains("\"name\":\"orders\""));
+    assert!(response.contains("\"subjects\":[\"orders.>\"]"));
+    assert!(response.contains("\"partitions\":8"));
+}
 #[tokio::test]
 async fn http_status_and_unknown_paths_return_not_found() {
     let scenario = Scenario::new();

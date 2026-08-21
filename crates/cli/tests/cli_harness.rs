@@ -296,6 +296,7 @@ impl Harness {
             tls,
             auth,
             cluster: None,
+            streams: Default::default(),
         };
         let broker = Broker::open(config).unwrap();
         let server = broker.clone();

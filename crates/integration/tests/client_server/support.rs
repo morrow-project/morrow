@@ -146,6 +146,7 @@ impl ClusterHarness {
                     heartbeat_interval_ms: 50,
                     snapshot_threshold: 100,
                 }),
+                streams: Default::default(),
             };
             let broker = Broker::open(config).unwrap();
             let server = broker.clone();
@@ -337,6 +338,7 @@ impl Harness {
             tls,
             auth,
             cluster: None,
+            streams: Default::default(),
         };
         let broker = Broker::open(config).unwrap();
         let server = broker.clone();

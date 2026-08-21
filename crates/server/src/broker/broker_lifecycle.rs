@@ -179,6 +179,12 @@ impl Broker {
         self.inner.lock().await.subscriptions_response()
     }
 
+    pub(super) fn streams_response(&self) -> StreamsResponse<'_> {
+        StreamsResponse {
+            streams: self.config.streams.definitions(),
+        }
+    }
+
     pub(super) async fn wal_status_response(&self) -> WalStatus {
         let inner = self.inner.lock().await;
         inner
@@ -261,6 +267,11 @@ impl Broker {
             "/subscriptions" => {
                 let body = serde_json::to_vec(&self.subscriptions_response().await)
                     .context("serializing HTTP subscriptions response")?;
+                write_http_response(&mut stream, "200 OK", "application/json", &body).await
+            }
+            "/streams" => {
+                let body = serde_json::to_vec(&self.streams_response())
+                    .context("serializing HTTP streams response")?;
                 write_http_response(&mut stream, "200 OK", "application/json", &body).await
             }
             "/wal" => {

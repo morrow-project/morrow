@@ -1,5 +1,7 @@
 use super::*;
 
+mod stream_tests;
+
 #[test]
 fn parses_json_config() {
     let value = serde_json::json!({

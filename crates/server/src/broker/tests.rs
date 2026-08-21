@@ -393,6 +393,7 @@ fn test_config(dir: &Path) -> Config {
         tls: None,
         auth: Default::default(),
         cluster: None,
+        streams: Default::default(),
     }
 }
 fn deterministic_broker(

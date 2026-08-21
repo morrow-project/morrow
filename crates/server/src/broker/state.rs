@@ -104,6 +104,11 @@ pub(super) struct SubscriptionsResponse {
 }
 
 #[derive(Debug, serde::Serialize)]
+pub(super) struct StreamsResponse<'a> {
+    pub(super) streams: &'a [crate::stream::StreamDefinition],
+}
+
+#[derive(Debug, serde::Serialize)]
 pub(super) struct DurableConsumerResponse {
     pub(super) consumer_id: String,
     pub(super) filter_subject: String,
