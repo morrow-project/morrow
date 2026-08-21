@@ -1,9 +1,9 @@
 # syntax=docker/dockerfile:1.7
 
 ARG RUST_VERSION=1.98.0
-ARG RUNTIME_IMAGE=gcr.io/distroless/cc-debian12:nonroot
+ARG RUNTIME_IMAGE=gcr.io/distroless/cc-debian13:nonroot
 
-FROM rust:${RUST_VERSION}-bookworm AS source
+FROM rust:${RUST_VERSION}-trixie AS source
 WORKDIR /workspace
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
