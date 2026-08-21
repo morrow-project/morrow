@@ -67,7 +67,7 @@ impl RouteMesh {
                 interval.tick().await;
                 let addrs = dial_mesh.dial_candidates().await;
                 for addr in addrs {
-                    match TcpStream::connect(addr).await {
+                    match TcpStream::connect(&addr).await {
                         Ok(stream) => {
                             let mesh = dial_mesh.clone();
                             let broker = dial_broker.clone();
@@ -96,33 +96,38 @@ impl RouteMesh {
         Ok(())
     }
 
-    pub(super) async fn dial_candidates(&self) -> Vec<SocketAddr> {
+    pub(super) async fn dial_candidates(&self) -> Vec<String> {
         let state = self.inner.lock().await;
         let mut addrs = state.seeds.clone();
-        addrs.extend(state.known_peers.values().map(|peer| peer.route_addr));
+        addrs.extend(
+            state
+                .known_peers
+                .values()
+                .map(|peer| peer.route_addr.to_string()),
+        );
         addrs.sort();
         addrs.dedup();
         addrs
             .into_iter()
-            .filter(|addr| *addr != state.route_addr)
+            .filter(|addr| *addr != state.route_addr.to_string())
             .filter(|addr| {
                 !state
                     .peers
                     .values()
-                    .any(|peer| peer.info.route_addr == *addr)
+                    .any(|peer| peer.info.route_addr.to_string() == *addr)
             })
             .collect()
     }
 
-    pub(super) async fn note_dial_error(&self, addr: SocketAddr, error: String) {
+    pub(super) async fn note_dial_error(&self, addr: String, error: String) {
         let mut state = self.inner.lock().await;
         for peer in state.known_peers.values_mut() {
-            if peer.route_addr == addr {
+            if peer.route_addr.to_string() == addr {
                 continue;
             }
         }
         for peer in state.peers.values_mut() {
-            if peer.info.route_addr == addr {
+            if peer.info.route_addr.to_string() == addr {
                 peer.last_error = Some(error.clone());
                 peer.reconnect_attempts = peer.reconnect_attempts.saturating_add(1);
             }
@@ -319,7 +324,7 @@ impl RouteMesh {
         connected.sort_by_key(|peer| peer.node_id);
         RouteTopologyResponse {
             listen: state.route_addr.to_string(),
-            seeds: state.seeds.iter().map(ToString::to_string).collect(),
+            seeds: state.seeds.clone(),
             discovered,
             connected,
         }

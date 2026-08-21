@@ -14,8 +14,8 @@ pub struct RaftRuntime {
 }
 #[derive(Debug, Clone)]
 pub struct ClusterNode {
-    pub raft_addr: SocketAddr,
-    pub client_addr: SocketAddr,
+    pub raft_addr: String,
+    pub client_addr: String,
 }
 impl RaftRuntime {
     pub async fn open(
@@ -34,8 +34,8 @@ impl RaftRuntime {
                 (
                     node.node_id,
                     ClusterNode {
-                        raft_addr: node.raft_addr,
-                        client_addr: node.client_addr,
+                        raft_addr: node.raft_addr.clone(),
+                        client_addr: node.client_addr.clone(),
                     },
                 )
             })
@@ -43,7 +43,7 @@ impl RaftRuntime {
         let raft_nodes = config
             .nodes
             .iter()
-            .map(|node| (node.node_id, BasicNode::new(node.raft_addr)))
+            .map(|node| (node.node_id, BasicNode::new(node.raft_addr.clone())))
             .collect::<BTreeMap<_, _>>();
 
         let log_store = LogStore::open(config.raft_dir.join(LOG_FILE))?;
@@ -200,13 +200,13 @@ impl RaftRuntime {
             if *node_id == self.node_id {
                 continue;
             }
-            let addr = node.raft_addr;
+            let addr = node.raft_addr.clone();
             let auth_token = self.auth_token.clone();
             let request = request.clone();
             let committed_records = committed_records.clone();
             joins.spawn(async move {
                 let progress = send_data_progress(
-                    addr,
+                    &addr,
                     auth_token.clone(),
                     DataProgressRequest {
                         stream: request.envelope.stream.as_str().to_string(),
@@ -219,7 +219,7 @@ impl RaftRuntime {
                     .filter(|record| progress.is_none_or(|offset| record.offset > offset))
                 {
                     send_data_append(
-                        addr,
+                        &addr,
                         auth_token.clone(),
                         DataAppendRequest {
                             leader_id: request.leader_id,
@@ -231,7 +231,7 @@ impl RaftRuntime {
                     )
                     .await?;
                 }
-                send_data_append(addr, auth_token, request).await
+                send_data_append(&addr, auth_token, request).await
             });
         }
         while let Some(response) = joins.join_next().await {
@@ -384,9 +384,9 @@ impl RaftRuntime {
         self.raft.current_leader().await
     }
 
-    pub async fn leader_client_addr(&self) -> Option<SocketAddr> {
+    pub async fn leader_client_addr(&self) -> Option<String> {
         let leader = self.raft.current_leader().await?;
-        self.nodes.get(&leader).map(|node| node.client_addr)
+        self.nodes.get(&leader).map(|node| node.client_addr.clone())
     }
 
     pub fn tls_enabled(&self) -> bool {

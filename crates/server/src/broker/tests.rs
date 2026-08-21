@@ -488,8 +488,9 @@ fn fake_cluster_config(dir: &Path, node_count: u64, local_node_id: u64) -> Clust
         nodes: (1..=node_count)
             .map(|node_id| ClusterNodeConfig {
                 node_id,
-                raft_addr: SocketAddr::from(([127, 0, 0, 1], 20_000 + node_id as u16)),
-                client_addr: SocketAddr::from(([127, 0, 0, 1], 10_000 + node_id as u16)),
+                raft_addr: SocketAddr::from(([127, 0, 0, 1], 20_000 + node_id as u16)).to_string(),
+                client_addr: SocketAddr::from(([127, 0, 0, 1], 10_000 + node_id as u16))
+                    .to_string(),
             })
             .collect(),
         election_timeout_min_ms: 150,

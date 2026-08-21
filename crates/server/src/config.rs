@@ -3,7 +3,7 @@ use crate::stream::StreamCatalog;
 use std::{
     collections::HashMap,
     ffi::OsString,
-    net::{SocketAddr, ToSocketAddrs},
+    net::SocketAddr,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -52,7 +52,7 @@ pub struct ClusterConfig {
     pub auth_token: String,
     pub raft_listen: SocketAddr,
     pub route_listen: Option<SocketAddr>,
-    pub routes: Vec<SocketAddr>,
+    pub routes: Vec<String>,
     pub route_reconnect_ms: u64,
     pub raft_dir: PathBuf,
     pub bootstrap: bool,
@@ -65,8 +65,8 @@ pub struct ClusterConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClusterNodeConfig {
     pub node_id: u64,
-    pub raft_addr: SocketAddr,
-    pub client_addr: SocketAddr,
+    pub raft_addr: String,
+    pub client_addr: String,
 }
 impl Config {
     pub fn load_from_args() -> Result<Self> {
@@ -453,7 +453,7 @@ fn get_cluster_config(value: &serde_json::Value) -> Result<Option<ClusterConfig>
         .parse()
         .context("config field cluster.raft_listen must be a socket address")?;
     let route_listen = get_optional_socket_addr(cluster, "route_listen")?;
-    let routes = get_socket_addr_array(cluster, "routes")?;
+    let routes = get_string_array(cluster, "routes")?;
     let route_reconnect_ms = get_u64(cluster, "route_reconnect_ms")?.unwrap_or(500);
     let raft_dir = PathBuf::from(
         get_string(cluster, "raft_dir")?
@@ -502,17 +502,14 @@ fn get_cluster_nodes(value: &serde_json::Value) -> Result<Vec<ClusterNodeConfig>
         };
         let node_id = get_u64(node, "node_id")?
             .ok_or_else(|| BrokerError::msg("config field cluster.nodes[].node_id is required"))?;
-        let raft_addr = resolve_socket_addr(
-            get_string(node, "raft_addr")?.ok_or_else(|| {
-                BrokerError::msg("config field cluster.nodes[].raft_addr is required")
-            })?,
-            "config field cluster.nodes[].raft_addr",
-        )?;
-        let client_addr = get_string(node, "client_addr")?.ok_or_else(|| {
-            BrokerError::msg("config field cluster.nodes[].client_addr is required")
-        })?;
-        let client_addr =
-            resolve_socket_addr(client_addr, "config field cluster.nodes[].client_addr")?;
+        let raft_addr = get_string(node, "raft_addr")?
+            .ok_or_else(|| BrokerError::msg("config field cluster.nodes[].raft_addr is required"))?
+            .to_string();
+        let client_addr = get_string(node, "client_addr")?
+            .ok_or_else(|| {
+                BrokerError::msg("config field cluster.nodes[].client_addr is required")
+            })?
+            .to_string();
         out.push(ClusterNodeConfig {
             node_id,
             raft_addr,
@@ -533,7 +530,7 @@ fn get_optional_socket_addr(value: &serde_json::Value, key: &str) -> Result<Opti
         ))),
     }
 }
-fn get_socket_addr_array(value: &serde_json::Value, key: &str) -> Result<Vec<SocketAddr>> {
+fn get_string_array(value: &serde_json::Value, key: &str) -> Result<Vec<String>> {
     match value.get(key) {
         Some(serde_json::Value::Array(values)) => values
             .iter()
@@ -543,10 +540,7 @@ fn get_socket_addr_array(value: &serde_json::Value, key: &str) -> Result<Vec<Soc
                         "config field cluster.{key} must contain only strings"
                     )));
                 };
-                resolve_socket_addr(
-                    value,
-                    &format!("config field cluster.{key} must contain socket addresses"),
-                )
+                Ok(value.clone())
             })
             .collect(),
         Some(serde_json::Value::Null) | None => Ok(Vec::new()),
@@ -556,13 +550,6 @@ fn get_socket_addr_array(value: &serde_json::Value, key: &str) -> Result<Vec<Soc
     }
 }
 
-fn resolve_socket_addr(value: &str, field: &str) -> Result<SocketAddr> {
-    value
-        .to_socket_addrs()
-        .with_context(|| format!("{field} must be a socket address or resolvable host"))?
-        .next()
-        .ok_or_else(|| BrokerError::msg(format!("{field} resolved to no addresses")))
-}
 impl From<OsString> for BrokerError {
     fn from(value: OsString) -> Self {
         BrokerError::msg(format!("invalid argument {:?}", value))

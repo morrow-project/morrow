@@ -63,13 +63,7 @@ fn parses_cluster_route_mesh_config() {
         cluster.route_listen,
         Some("127.0.0.1:6221".parse().unwrap())
     );
-    assert_eq!(
-        cluster.routes,
-        vec![
-            "127.0.0.1:6222".parse().unwrap(),
-            "127.0.0.1:6223".parse().unwrap()
-        ]
-    );
+    assert_eq!(cluster.routes, vec!["127.0.0.1:6222", "127.0.0.1:6223"]);
     assert_eq!(cluster.route_reconnect_ms, 500);
 }
 

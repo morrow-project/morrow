@@ -10,7 +10,7 @@ pub(super) struct RouteMeshState {
     pub(super) node_id: u64,
     pub(super) route_addr: SocketAddr,
     pub(super) client_addr: SocketAddr,
-    pub(super) seeds: Vec<SocketAddr>,
+    pub(super) seeds: Vec<String>,
     pub(super) reconnect_ms: u64,
     pub(super) peers: HashMap<u64, RoutePeer>,
     pub(super) known_peers: HashMap<u64, RoutePeerInfo>,

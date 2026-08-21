@@ -130,7 +130,7 @@ impl ClusterHarness {
                     routes: if !enable_routes || node.node_id == 1 {
                         Vec::new()
                     } else {
-                        vec![nodes[0].route_addr]
+                        vec![nodes[0].route_addr.to_string()]
                     },
                     route_reconnect_ms: 50,
                     raft_dir: dir.path().join("raft"),
@@ -139,8 +139,8 @@ impl ClusterHarness {
                         .iter()
                         .map(|node| ClusterNodeConfig {
                             node_id: node.node_id,
-                            raft_addr: node.raft_addr,
-                            client_addr: node.client_addr,
+                            raft_addr: node.raft_addr.to_string(),
+                            client_addr: node.client_addr.to_string(),
                         })
                         .collect(),
                     election_timeout_min_ms: 150,

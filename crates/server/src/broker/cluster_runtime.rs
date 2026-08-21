@@ -75,11 +75,14 @@ impl ClusterRuntime {
         }
     }
 
-    pub(super) async fn leader_client_addr(&self) -> Option<SocketAddr> {
+    pub(super) async fn leader_client_addr(&self) -> Option<String> {
         match self {
             Self::Real(runtime) => runtime.leader_client_addr().await,
             #[cfg(test)]
-            Self::Fake(runtime) => runtime.leader_client_addr().await,
+            Self::Fake(runtime) => runtime
+                .leader_client_addr()
+                .await
+                .map(|address| address.to_string()),
         }
     }
 

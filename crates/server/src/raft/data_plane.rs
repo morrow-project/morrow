@@ -160,7 +160,7 @@ impl ReplicaDataStore {
 pub(super) type SharedReplicaData = Arc<StdMutex<ReplicaDataStore>>;
 
 pub(super) async fn send_data_append(
-    addr: SocketAddr,
+    addr: &str,
     auth_token: String,
     request: DataAppendRequest,
 ) -> Result<DataAppendResponse> {
@@ -183,7 +183,7 @@ pub(super) async fn send_data_append(
 }
 
 pub(super) async fn send_data_progress(
-    addr: SocketAddr,
+    addr: &str,
     auth_token: String,
     request: DataProgressRequest,
 ) -> Result<Option<u64>> {
