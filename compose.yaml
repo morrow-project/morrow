@@ -9,10 +9,6 @@ services:
     volumes:
       - ./docker/cluster/node1.json:/etc/broker/cluster/node1.json:ro
       - broker-node-1-data:/var/lib/broker
-    networks:
-      broker-cluster:
-        ipv4_address: 172.30.0.11
-
   broker-2:
     build:
       context: .
@@ -23,9 +19,6 @@ services:
     volumes:
       - ./docker/cluster/node2.json:/etc/broker/cluster/node2.json:ro
       - broker-node-2-data:/var/lib/broker
-    networks:
-      broker-cluster:
-        ipv4_address: 172.30.0.12
     depends_on:
       - broker-1
 
@@ -39,9 +32,6 @@ services:
     volumes:
       - ./docker/cluster/node3.json:/etc/broker/cluster/node3.json:ro
       - broker-node-3-data:/var/lib/broker
-    networks:
-      broker-cluster:
-        ipv4_address: 172.30.0.13
     depends_on:
       - broker-1
 
@@ -49,10 +39,3 @@ volumes:
   broker-node-1-data:
   broker-node-2-data:
   broker-node-3-data:
-
-networks:
-  broker-cluster:
-    driver: bridge
-    ipam:
-      config:
-        - subnet: 172.30.0.0/24

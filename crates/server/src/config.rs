@@ -3,7 +3,7 @@ use crate::stream::StreamCatalog;
 use std::{
     collections::HashMap,
     ffi::OsString,
-    net::SocketAddr,
+    net::{SocketAddr, ToSocketAddrs},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -502,16 +502,17 @@ fn get_cluster_nodes(value: &serde_json::Value) -> Result<Vec<ClusterNodeConfig>
         };
         let node_id = get_u64(node, "node_id")?
             .ok_or_else(|| BrokerError::msg("config field cluster.nodes[].node_id is required"))?;
-        let raft_addr = get_string(node, "raft_addr")?
-            .ok_or_else(|| BrokerError::msg("config field cluster.nodes[].raft_addr is required"))?
-            .parse()
-            .context("config field cluster.nodes[].raft_addr must be a socket address")?;
-        let client_addr = get_string(node, "client_addr")?
-            .ok_or_else(|| {
-                BrokerError::msg("config field cluster.nodes[].client_addr is required")
-            })?
-            .parse()
-            .context("config field cluster.nodes[].client_addr must be a socket address")?;
+        let raft_addr = resolve_socket_addr(
+            get_string(node, "raft_addr")?.ok_or_else(|| {
+                BrokerError::msg("config field cluster.nodes[].raft_addr is required")
+            })?,
+            "config field cluster.nodes[].raft_addr",
+        )?;
+        let client_addr = get_string(node, "client_addr")?.ok_or_else(|| {
+            BrokerError::msg("config field cluster.nodes[].client_addr is required")
+        })?;
+        let client_addr =
+            resolve_socket_addr(client_addr, "config field cluster.nodes[].client_addr")?;
         out.push(ClusterNodeConfig {
             node_id,
             raft_addr,
@@ -542,9 +543,10 @@ fn get_socket_addr_array(value: &serde_json::Value, key: &str) -> Result<Vec<Soc
                         "config field cluster.{key} must contain only strings"
                     )));
                 };
-                value.parse().with_context(|| {
-                    format!("config field cluster.{key} must contain socket addresses")
-                })
+                resolve_socket_addr(
+                    value,
+                    &format!("config field cluster.{key} must contain socket addresses"),
+                )
             })
             .collect(),
         Some(serde_json::Value::Null) | None => Ok(Vec::new()),
@@ -552,6 +554,14 @@ fn get_socket_addr_array(value: &serde_json::Value, key: &str) -> Result<Vec<Soc
             "config field cluster.{key} must be an array"
         ))),
     }
+}
+
+fn resolve_socket_addr(value: &str, field: &str) -> Result<SocketAddr> {
+    value
+        .to_socket_addrs()
+        .with_context(|| format!("{field} must be a socket address or resolvable host"))?
+        .next()
+        .ok_or_else(|| BrokerError::msg(format!("{field} resolved to no addresses")))
 }
 impl From<OsString> for BrokerError {
     fn from(value: OsString) -> Self {

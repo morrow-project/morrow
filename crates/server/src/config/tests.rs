@@ -108,11 +108,12 @@ fn parses_cluster_config() {
             "node_id": 1,
             "auth_token": "cluster-secret",
             "raft_listen": "127.0.0.1:5221",
+            "routes": ["localhost:6222"],
             "raft_dir": "./target/test-wal-cluster-config/raft",
             "bootstrap": true,
             "nodes": [
-                {"node_id": 1, "raft_addr": "127.0.0.1:5221", "client_addr": "127.0.0.1:4221"},
-                {"node_id": 2, "raft_addr": "127.0.0.1:5222", "client_addr": "127.0.0.1:4222"}
+                {"node_id": 1, "raft_addr": "localhost:5221", "client_addr": "localhost:4221"},
+                {"node_id": 2, "raft_addr": "localhost:5222", "client_addr": "localhost:4222"}
             ],
             "election_timeout_min_ms": 200,
             "election_timeout_max_ms": 400,
@@ -126,6 +127,7 @@ fn parses_cluster_config() {
     assert_eq!(cluster.node_id, 1);
     assert_eq!(cluster.auth_token, "cluster-secret");
     assert_eq!(cluster.nodes.len(), 2);
+    assert_eq!(cluster.routes.len(), 1);
     assert!(cluster.bootstrap);
 }
 
