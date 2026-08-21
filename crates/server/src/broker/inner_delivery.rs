@@ -35,21 +35,7 @@ impl Inner {
                     consumer.delivered += 1;
                 }
                 if let Some(client) = self.clients.get(&connection_id) {
-                    let frame = match message.reply_to.as_deref() {
-                        Some(reply_to) => protocol::hmsg(
-                            &message.subject,
-                            &sid,
-                            Some(reply_to),
-                            &[("Broker-Ack", &ack_subject)],
-                            &message.payload,
-                        ),
-                        None => protocol::msg(
-                            &message.subject,
-                            &sid,
-                            Some(&ack_subject),
-                            &message.payload,
-                        ),
-                    };
+                    let frame = durable_message_frame(&message, &sid, &ack_subject);
                     deliveries.push(Delivery {
                         sender: client.sender.clone(),
                         frame,
@@ -142,16 +128,7 @@ impl Inner {
         }
         let ack_subject =
             protocol::ack_subject(&record.consumer_id, record.seq, record.delivery_id);
-        let frame = match message.reply_to.as_deref() {
-            Some(reply_to) => protocol::hmsg(
-                &message.subject,
-                sid,
-                Some(reply_to),
-                &[("Broker-Ack", &ack_subject)],
-                &message.payload,
-            ),
-            None => protocol::msg(&message.subject, sid, Some(&ack_subject), &message.payload),
-        };
+        let frame = durable_message_frame(&message, sid, &ack_subject);
         let delivery = Delivery {
             sender: client.sender.clone(),
             frame,
@@ -160,7 +137,58 @@ impl Inner {
         Some(delivery)
     }
 
-    pub(super) fn sync_durable_state(&mut self, state: DurableState) {
+    pub(super) fn sync_durable_state(&mut self, state: DurableState) -> Result<()> {
+        let mut partition_records = state
+            .messages
+            .values()
+            .filter(|record| {
+                record.stream.is_some() && record.partition.is_some() && record.offset.is_some()
+            })
+            .collect::<Vec<_>>();
+        partition_records.sort_by_key(|record| {
+            (
+                record.stream.as_deref().unwrap_or_default(),
+                record.partition.unwrap_or_default(),
+                record.offset.unwrap_or_default(),
+            )
+        });
+        for record in partition_records {
+            let (Some(stream), Some(partition), Some(offset)) =
+                (record.stream.as_deref(), record.partition, record.offset)
+            else {
+                continue;
+            };
+            let is_new = !self.messages.contains_key(&record.seq);
+            let envelope = crate::partition_log::MessageEnvelope {
+                namespace: if record.namespace.is_empty() {
+                    DEFAULT_NAMESPACE.to_string()
+                } else {
+                    record.namespace.clone()
+                },
+                stream: crate::stream::StreamId::new(stream)?,
+                partition: crate::stream::PartitionId(partition),
+                offset,
+                subject: record.subject.clone(),
+                key: record.key.clone(),
+                headers: record.headers.clone(),
+                timestamp_ms: record.timestamp_ms,
+                reply_to: record.reply_to.clone(),
+                payload: record.payload.clone(),
+                partitioning_epoch: record.partitioning_epoch,
+                leader_epoch: record.leader_epoch,
+                legacy_seq: record.seq,
+            };
+            self.partition_logs.append_committed(envelope)?;
+            if is_new {
+                self.wal.append_partition_append(&PartitionAppendRecord {
+                    seq: record.seq,
+                    stream: stream.to_string(),
+                    partition,
+                    offset,
+                    subject: record.subject.clone(),
+                })?;
+            }
+        }
         self.messages = state.messages;
         let mut next = HashMap::new();
         for (consumer_id, durable) in state.consumers {
@@ -196,6 +224,7 @@ impl Inner {
             );
         }
         self.consumers = next;
+        Ok(())
     }
 
     pub(super) fn cleanup_acked_messages(&mut self) {
@@ -256,4 +285,27 @@ impl Inner {
             }
         }
     }
+}
+
+fn durable_message_frame(message: &PublishRecord, sid: &str, ack_subject: &str) -> Vec<u8> {
+    if message.headers.is_empty() && message.reply_to.is_none() {
+        return protocol::msg(&message.subject, sid, Some(ack_subject), &message.payload);
+    }
+    let mut headers = message
+        .headers
+        .iter()
+        .map(|header| (header.name.clone(), header.value.clone()))
+        .collect::<Vec<_>>();
+    headers.push(("Broker-Ack".into(), ack_subject.into()));
+    let header_refs = headers
+        .iter()
+        .map(|(name, value)| (name.as_str(), value.as_str()))
+        .collect::<Vec<_>>();
+    protocol::hmsg(
+        &message.subject,
+        sid,
+        message.reply_to.as_deref(),
+        &header_refs,
+        &message.payload,
+    )
 }

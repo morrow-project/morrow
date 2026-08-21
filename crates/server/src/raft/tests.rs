@@ -107,6 +107,43 @@ fn publish_without_matching_consumer_is_not_retained() {
 }
 
 #[test]
+fn partition_publish_assigns_offsets_per_partition_and_preserves_envelope() {
+    let mut state = DurableState::new(nodes());
+    for partition in [2, 2, 3] {
+        assert_eq!(
+            state.apply_command(BrokerCommand::PartitionPublish {
+                namespace: "tenant-a".into(),
+                stream: "orders".into(),
+                partition,
+                subject: "orders.created".into(),
+                key: Some(b"customer-7".to_vec()),
+                headers: vec![crate::partition_log::MessageHeader {
+                    name: "Trace-Id".into(),
+                    value: "trace-1".into(),
+                }],
+                timestamp_ms: 42,
+                reply_to: None,
+                payload: b"hello".to_vec(),
+                partitioning_epoch: 7,
+                leader_epoch: 3,
+            }),
+            BrokerResponse::Publish {
+                seq: Some(state.next_seq - 1),
+                retained: true,
+            }
+        );
+    }
+    assert_eq!(state.messages[&1].offset, Some(0));
+    assert_eq!(state.messages[&2].offset, Some(1));
+    assert_eq!(state.messages[&3].offset, Some(0));
+    assert_eq!(state.messages[&1].namespace, "tenant-a");
+    assert_eq!(state.messages[&1].headers[0].value, "trace-1");
+    let encoded = serde_json::to_vec(&state).unwrap();
+    let decoded: DurableState = serde_json::from_slice(&encoded).unwrap();
+    assert_eq!(decoded, state);
+}
+
+#[test]
 fn delivery_attempts_allocate_monotonic_delivery_ids() {
     let mut state = DurableState::new(nodes());
     state.apply_command(BrokerCommand::ConsumerUpsert {

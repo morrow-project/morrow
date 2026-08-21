@@ -103,3 +103,77 @@ async fn ack_does_not_delete_stream_owned_record() {
     assert_eq!(inner.messages[&1].stream.as_deref(), Some("orders"));
     assert!(inner.consumers["durable-consumer-sid"].acked.contains(&1));
 }
+
+#[tokio::test]
+async fn keyed_headers_and_envelope_metadata_survive_restart_and_delivery() {
+    let mut scenario = Scenario::new();
+    let mut subscriber = scenario.connect_durable("consumer", 25).await;
+    let mut publisher = scenario.connect_durable("tenant-a", 25).await;
+    subscriber.subscribe("orders.*", "sid").await;
+    subscriber.ping_roundtrip().await;
+
+    publisher
+        .publish_hpub(
+            "orders.created",
+            &[("Broker-Key", "customer-7"), ("Trace-Id", "trace-1")],
+            b"hello",
+        )
+        .await;
+    let delivery = subscriber.read_frame().await;
+    assert!(delivery.starts_with("HMSG orders.created sid "));
+    assert!(delivery.contains("Trace-Id: trace-1\r\n"));
+    assert!(!delivery.contains("Broker-Key:"));
+
+    subscriber.disconnect().await;
+    publisher.disconnect().await;
+    scenario.restart_broker().await;
+    let inner = scenario.broker().inner.lock().await;
+    let record = &inner.messages[&1];
+    assert_eq!(record.namespace, "tenant-a");
+    assert_eq!(record.key.as_deref(), Some(b"customer-7".as_slice()));
+    assert_eq!(record.headers[0].name, "Trace-Id");
+    assert_eq!(record.partition, Some(0));
+    assert_eq!(record.offset, Some(0));
+    assert_eq!(record.partitioning_epoch, 1);
+    drop(inner);
+
+    let mut restarted = scenario.connect_durable("consumer", 25).await;
+    restarted.subscribe("orders.*", "sid").await;
+    let redelivery = restarted.read_frame().await;
+    assert!(redelivery.starts_with("HMSG orders.created sid "));
+    assert!(redelivery.contains("Trace-Id: trace-1\r\n"));
+}
+
+#[tokio::test]
+async fn transitional_stream_wal_records_migrate_to_partition_history() {
+    let dir = TempDir::new().unwrap();
+    let config = test_config(dir.path());
+    let (mut wal, _) = Wal::open(
+        dir.path(),
+        config.fsync_interval(),
+        config.wal_segment_bytes,
+    )
+    .unwrap();
+    wal.append_stream_publish("orders", "orders.created", None, b"legacy")
+        .unwrap();
+    wal.flush().unwrap();
+    drop(wal);
+
+    let broker = Broker::open(config.clone()).unwrap();
+    {
+        let inner = broker.inner.lock().await;
+        assert_eq!(inner.messages[&1].partition, Some(0));
+        assert_eq!(inner.messages[&1].offset, Some(0));
+        assert_eq!(inner.messages[&1].payload, b"legacy");
+    }
+    broker.shutdown().await.unwrap();
+
+    let (_, replay) = Wal::open(
+        dir.path(),
+        config.fsync_interval(),
+        config.wal_segment_bytes,
+    )
+    .unwrap();
+    assert!(replay.messages.is_empty());
+    assert_eq!(replay.partition_appends[&1].stream, "orders");
+}

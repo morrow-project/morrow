@@ -1,6 +1,16 @@
 use super::*;
 
 impl Wal {
+    pub fn reserve_publish_seq(&mut self) -> u64 {
+        let seq = self.next_seq;
+        self.next_seq = self.next_seq.saturating_add(1);
+        seq
+    }
+
+    pub fn observe_publish_seq(&mut self, seq: u64) {
+        self.next_seq = self.next_seq.max(seq.saturating_add(1));
+    }
+
     pub fn open(
         dir: impl AsRef<Path>,
         fsync_interval: Duration,
@@ -45,6 +55,7 @@ impl Wal {
         Ok((wal, output.replay))
     }
 
+    #[cfg(test)]
     pub fn append_publish(
         &mut self,
         subject: &str,
@@ -54,6 +65,7 @@ impl Wal {
         self.append_publish_with_stream(None, subject, reply_to, payload)
     }
 
+    #[cfg(test)]
     pub fn append_stream_publish(
         &mut self,
         stream: &str,
@@ -64,6 +76,7 @@ impl Wal {
         self.append_publish_with_stream(Some(stream), subject, reply_to, payload)
     }
 
+    #[cfg(test)]
     fn append_publish_with_stream(
         &mut self,
         stream: Option<&str>,
@@ -76,10 +89,18 @@ impl Wal {
 
         let record = PublishRecord {
             seq,
+            namespace: crate::partition_log::DEFAULT_NAMESPACE.to_string(),
             stream: stream.map(str::to_string),
+            partition: None,
+            offset: None,
             subject: subject.to_string(),
+            key: None,
+            headers: Vec::new(),
+            timestamp_ms: 0,
             reply_to: reply_to.map(str::to_string),
             payload: payload.to_vec(),
+            partitioning_epoch: 0,
+            leader_epoch: 0,
         };
         self.write_publish(&record)?;
         Ok(record)
@@ -87,6 +108,11 @@ impl Wal {
 
     pub fn append_consumer_upsert(&mut self, record: &ConsumerRecord) -> Result<()> {
         self.append_record(KIND_CONSUMER_UPSERT, &consumer_upsert_body(record)?)
+    }
+
+    pub fn append_partition_append(&mut self, record: &PartitionAppendRecord) -> Result<()> {
+        self.next_seq = self.next_seq.max(record.seq.saturating_add(1));
+        self.append_record(KIND_PARTITION_APPEND, &partition_append_body(record)?)
     }
 
     pub fn append_delivery_attempt(
@@ -214,6 +240,7 @@ impl Wal {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn write_publish(&mut self, record: &PublishRecord) -> Result<()> {
         self.append_record(KIND_PUBLISH, &publish_body(record)?)
     }
@@ -319,8 +346,20 @@ pub(super) fn write_compact_state(
         }
     }
     for message in messages {
-        let body = publish_body(&message)?;
-        write_record_to(file, KIND_PUBLISH, &body)?;
+        let (kind, body) = match (message.stream.as_deref(), message.partition, message.offset) {
+            (Some(stream), Some(partition), Some(offset)) => (
+                KIND_PARTITION_APPEND,
+                partition_append_body(&PartitionAppendRecord {
+                    seq: message.seq,
+                    stream: stream.to_string(),
+                    partition,
+                    offset,
+                    subject: message.subject,
+                })?,
+            ),
+            _ => (KIND_PUBLISH, publish_body(&message)?),
+        };
+        write_record_to(file, kind, &body)?;
         bytes += record_size(&body)?;
     }
     Ok(bytes)

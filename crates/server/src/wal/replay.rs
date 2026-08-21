@@ -15,6 +15,7 @@ struct ReplayState {
     max_seq: u64,
     max_delivery_id: u64,
     messages: HashMap<u64, PublishRecord>,
+    partition_appends: HashMap<u64, PartitionAppendRecord>,
     consumers: HashMap<String, ReplayedConsumer>,
 }
 
@@ -55,6 +56,7 @@ pub(super) fn replay_dir(dir: &Path) -> Result<ReplayOutput> {
     let active = segments.pop().expect("at least one WAL segment");
     let replay = Replay {
         messages: state.messages,
+        partition_appends: state.partition_appends,
         consumers: state.consumers,
         next_seq: state.max_seq + 1,
         next_delivery_id: state.max_delivery_id + 1,
@@ -169,6 +171,18 @@ fn apply_record(kind: u8, body: &[u8], state: &mut ReplayState) -> Result<()> {
                 consumer.in_flight.remove(&ack.seq);
             }
         }
+        KIND_PARTITION_APPEND => {
+            let record = decode_partition_append(body)?;
+            state.max_seq = state.max_seq.max(record.seq);
+            for consumer in state.consumers.values_mut() {
+                if subject::matches(&consumer.record.filter_subject, &record.subject)
+                    && !consumer.acked.contains(&record.seq)
+                {
+                    consumer.pending.insert(record.seq);
+                }
+            }
+            state.partition_appends.insert(record.seq, record);
+        }
         _ => crate::broker_bail!("unknown WAL record kind {kind}"),
     }
     Ok(())
@@ -240,7 +254,9 @@ fn expire_in_flight(state: &mut ReplayState) {
         let expired: Vec<_> = consumer.in_flight.keys().copied().collect();
         for seq in expired {
             consumer.in_flight.remove(&seq);
-            if !consumer.acked.contains(&seq) && state.messages.contains_key(&seq) {
+            if !consumer.acked.contains(&seq)
+                && (state.messages.contains_key(&seq) || state.partition_appends.contains_key(&seq))
+            {
                 consumer.pending.insert(seq);
             }
         }

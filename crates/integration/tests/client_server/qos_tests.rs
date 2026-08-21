@@ -38,6 +38,11 @@ async fn client_publish_with_qos_receives_producer_ack() {
     assert_eq!(ack.level, client::protocol::AckLevel::Durable);
     assert!(ack.retained);
     assert_eq!(ack.seq, Some(1));
+    assert_eq!(ack.stream.as_deref(), Some("orders"));
+    assert_eq!(ack.partition, Some(0));
+    assert_eq!(ack.offset, Some(0));
+    assert_eq!(ack.partitioning_epoch, Some(1));
+    assert_eq!(ack.leader_epoch, Some(0));
     harness.shutdown().await;
 }
 

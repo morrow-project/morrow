@@ -151,13 +151,16 @@ client sends `CONNECT {"verbose":true}`.
 Producer acknowledgement for a publish that requested per-message QoS.
 
 ```text
-P-ACK <msg-id> <level> OK <retained> <seq>\r\n
+P-ACK <msg-id> <level> OK <retained> <seq> [<stream> <partition> <offset> <partitioning-epoch> <leader-epoch>]\r\n
 ```
 
 `level` is the requested QoS value. `retained` is `true` when the subject is
 bound to a configured stream and the publication is owned by that stream.
 `seq` is the durable sequence number after append, or `-` for an accepted-only
-acknowledgement that does not wait for append.
+acknowledgement that does not wait for append. A committed stream publication
+also includes its stream-owned position and the partitioning and leader epochs
+under which it was appended. `seq` remains a transitional consumer-ACK identity;
+stream offsets are authoritative within each partition.
 
 ### -ERR
 
@@ -540,6 +543,13 @@ QoS headers are producer metadata and are not forwarded to subscribers.
     clustering is disabled.
 - `Broker-Msg-Id`: required when `Broker-QoS` is present. It must be non-empty,
   at most 128 bytes, and contain no whitespace.
+- `Broker-Key`: optional opaque UTF-8 partition key. An explicit key takes
+  precedence over the stream's configured subject or fallback strategy.
+
+Other HPUB headers are application headers. The broker retains them in the
+immutable stream envelope and returns them on durable and live `HMSG`
+deliveries. `Broker-QoS`, `Broker-Msg-Id`, and `Broker-Key` are broker metadata
+and are not forwarded to subscribers.
 
 Successful QoS publishes receive `P-ACK` and do not also receive verbose `+OK`.
 QoS levels 1 through 3 require a configured stream binding for the publish
@@ -651,6 +661,23 @@ Stream retention:
 - `_INBOX.*` publications always remain transient.
 - Live transient delivery is attempted before the durable append or cluster
   commit. A later durability failure can therefore follow a live delivery.
+
+Partition storage:
+
+- Each stream partition has an independent monotonically increasing offset and
+  segmented append log under the configured WAL directory's `streams` tree.
+- The immutable envelope retains namespace, stream, partition, offset, subject,
+  key, application headers, timestamp, reply subject, payload, partitioning
+  epoch, and leader epoch.
+- Explicit keys use a stable hash during a partitioning epoch. Subject-token
+  partitioning uses the configured token; subject-hash and sticky selection are
+  the documented fallbacks when the preferred value is absent.
+- The control WAL stores partition append references and consumer/control state,
+  not new stream payloads. On first startup after upgrading, transitional
+  stream-owned publish records from the previous WAL format are copied into
+  partition history and replaced by references at checkpoint. Missing stream
+  configuration or a dangling reference fails startup with a compatibility
+  error.
 
 Queue durable subscriptions:
 

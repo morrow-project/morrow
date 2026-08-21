@@ -2,6 +2,7 @@ use super::*;
 
 pub(super) struct Inner {
     pub(super) wal: Wal,
+    pub(super) partition_logs: crate::partition_log::PartitionLogSet,
     pub(super) clients: HashMap<u64, Client>,
     pub(super) consumers: HashMap<String, Consumer>,
     pub(super) transient_subscriptions: HashMap<(u64, String), TransientSubscription>,

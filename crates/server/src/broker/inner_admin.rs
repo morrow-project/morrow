@@ -155,6 +155,7 @@ impl Inner {
         &mut self,
         subject_name: &str,
         reply_to: Option<&str>,
+        headers: &[(String, String)],
         payload: &[u8],
     ) -> Vec<Delivery> {
         let matched = self
@@ -163,12 +164,27 @@ impl Inner {
             .filter(|(_, subscription)| subject::matches(&subscription.subject, subject_name))
             .filter_map(|((connection_id, _), subscription)| {
                 let client = self.clients.get(connection_id)?;
+                let header_refs = headers
+                    .iter()
+                    .map(|(name, value)| (name.as_str(), value.as_str()))
+                    .collect::<Vec<_>>();
+                let frame = if header_refs.is_empty() {
+                    protocol::msg(subject_name, &subscription.sid, reply_to, payload)
+                } else {
+                    protocol::hmsg(
+                        subject_name,
+                        &subscription.sid,
+                        reply_to,
+                        &header_refs,
+                        payload,
+                    )
+                };
                 Some((
                     *connection_id,
                     subscription.sid.clone(),
                     Delivery {
                         sender: client.sender.clone(),
-                        frame: protocol::msg(subject_name, &subscription.sid, reply_to, payload),
+                        frame,
                     },
                 ))
             })

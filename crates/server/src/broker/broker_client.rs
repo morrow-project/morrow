@@ -33,10 +33,12 @@ impl Broker {
             Command::Pub {
                 subject,
                 reply_to,
+                headers,
+                key,
                 payload,
                 ack,
             } => {
-                self.publish(connection_id, subject, reply_to, payload, ack)
+                self.publish(connection_id, subject, reply_to, headers, key, payload, ack)
                     .await
             }
         }
@@ -192,7 +194,7 @@ impl Broker {
                     },
                 )
                 .await?;
-                self.sync_from_cluster(&cluster).await;
+                self.sync_from_cluster(&cluster).await?;
             } else {
                 let mut inner = self.inner.lock().await;
                 inner.wal.append_consumer_upsert(&record)?;

@@ -17,14 +17,51 @@ const KIND_PUBLISH: u8 = 1;
 const KIND_CONSUMER_UPSERT: u8 = 2;
 const KIND_DELIVERY_ATTEMPT: u8 = 3;
 const KIND_ACK: u8 = 4;
+const KIND_PARTITION_APPEND: u8 = 5;
 pub const DEFAULT_WAL_SEGMENT_BYTES: u64 = 64 * 1024 * 1024;
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct PublishRecord {
     pub seq: u64,
+    #[serde(default)]
+    pub namespace: String,
     pub stream: Option<String>,
+    #[serde(default)]
+    pub partition: Option<u32>,
+    #[serde(default)]
+    pub offset: Option<u64>,
     pub subject: String,
+    #[serde(default)]
+    pub key: Option<Vec<u8>>,
+    #[serde(default)]
+    pub headers: Vec<crate::partition_log::MessageHeader>,
+    #[serde(default)]
+    pub timestamp_ms: u64,
     pub reply_to: Option<String>,
     pub payload: Vec<u8>,
+    #[serde(default)]
+    pub partitioning_epoch: u64,
+    #[serde(default)]
+    pub leader_epoch: u64,
+}
+
+impl From<crate::partition_log::MessageEnvelope> for PublishRecord {
+    fn from(envelope: crate::partition_log::MessageEnvelope) -> Self {
+        Self {
+            seq: envelope.legacy_seq,
+            namespace: envelope.namespace,
+            stream: Some(envelope.stream.as_str().to_string()),
+            partition: Some(envelope.partition.0),
+            offset: Some(envelope.offset),
+            subject: envelope.subject,
+            key: envelope.key,
+            headers: envelope.headers,
+            timestamp_ms: envelope.timestamp_ms,
+            reply_to: envelope.reply_to,
+            payload: envelope.payload,
+            partitioning_epoch: envelope.partitioning_epoch,
+            leader_epoch: envelope.leader_epoch,
+        }
+    }
 }
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct ConsumerRecord {
@@ -48,6 +85,25 @@ pub struct AckRecord {
     pub consumer_id: String,
     pub delivery_id: u64,
 }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PartitionAppendRecord {
+    pub seq: u64,
+    pub stream: String,
+    pub partition: u32,
+    pub offset: u64,
+    pub subject: String,
+}
+impl From<&crate::partition_log::MessageEnvelope> for PartitionAppendRecord {
+    fn from(envelope: &crate::partition_log::MessageEnvelope) -> Self {
+        Self {
+            seq: envelope.legacy_seq,
+            stream: envelope.stream.as_str().to_string(),
+            partition: envelope.partition.0,
+            offset: envelope.offset,
+            subject: envelope.subject.clone(),
+        }
+    }
+}
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct ReplayedConsumer {
     pub record: ConsumerRecord,
@@ -58,6 +114,7 @@ pub struct ReplayedConsumer {
 #[derive(Debug)]
 pub struct Replay {
     pub messages: HashMap<u64, PublishRecord>,
+    pub partition_appends: HashMap<u64, PartitionAppendRecord>,
     pub consumers: HashMap<String, ReplayedConsumer>,
     pub next_seq: u64,
     pub next_delivery_id: u64,

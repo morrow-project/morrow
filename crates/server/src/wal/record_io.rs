@@ -40,6 +40,15 @@ pub(super) fn ack_body(record: &AckRecord) -> Result<Vec<u8>> {
     put_u64(&mut body, record.delivery_id);
     Ok(body)
 }
+pub(super) fn partition_append_body(record: &PartitionAppendRecord) -> Result<Vec<u8>> {
+    let mut body = Vec::new();
+    put_u64(&mut body, record.seq);
+    put_string(&mut body, &record.stream)?;
+    put_u32(&mut body, record.partition);
+    put_u64(&mut body, record.offset);
+    put_string(&mut body, &record.subject)?;
+    Ok(body)
+}
 pub(super) fn record_size(body: &[u8]) -> Result<u64> {
     let len = body.len() + 1;
     let len: u32 = len.try_into().context("WAL record too large")?;
@@ -102,10 +111,33 @@ pub(super) fn decode_publish(body: &[u8]) -> Result<PublishRecord> {
     };
     let record = PublishRecord {
         seq,
+        namespace: crate::partition_log::DEFAULT_NAMESPACE.to_string(),
         stream,
+        partition: None,
+        offset: None,
         subject,
+        key: None,
+        headers: Vec::new(),
+        timestamp_ms: 0,
         reply_to,
         payload,
+        partitioning_epoch: 0,
+        leader_epoch: 0,
+    };
+    cursor.finish()?;
+    Ok(record)
+}
+pub(super) fn decode_partition_append(body: &[u8]) -> Result<PartitionAppendRecord> {
+    let mut cursor = Cursor {
+        bytes: body,
+        pos: 0,
+    };
+    let record = PartitionAppendRecord {
+        seq: cursor.u64()?,
+        stream: cursor.string()?,
+        partition: cursor.u32()?,
+        offset: cursor.u64()?,
+        subject: cursor.string()?,
     };
     cursor.finish()?;
     Ok(record)

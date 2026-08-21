@@ -301,10 +301,30 @@ impl TestClient {
         stream.get_mut().write_all(b"\r\n").await.unwrap();
     }
 
+    async fn publish_hpub(&mut self, subject: &str, headers: &[(&str, &str)], payload: &[u8]) {
+        let mut block = String::from("NATS/1.0\r\n");
+        for (name, value) in headers {
+            block.push_str(&format!("{name}: {value}\r\n"));
+        }
+        block.push_str("\r\n");
+        self.write_line(&format!(
+            "HPUB {subject} {} {}",
+            block.len(),
+            block.len() + payload.len()
+        ))
+        .await;
+        let stream = self.stream.as_mut().expect("client is disconnected");
+        stream.get_mut().write_all(block.as_bytes()).await.unwrap();
+        stream.get_mut().write_all(payload).await.unwrap();
+        stream.get_mut().write_all(b"\r\n").await.unwrap();
+    }
+
     async fn expect_producer_ack(&mut self, msg_id: &str, level: u8, retained: bool, seq: &str) {
-        assert_eq!(
-            self.read_frame().await,
-            format!("P-ACK {msg_id} {level} OK {retained} {seq}\r\n")
+        let frame = self.read_frame().await;
+        let prefix = format!("P-ACK {msg_id} {level} OK {retained} {seq}");
+        assert!(
+            frame == format!("{prefix}\r\n") || frame.starts_with(&format!("{prefix} ")),
+            "unexpected producer ack {frame:?}"
         );
     }
 

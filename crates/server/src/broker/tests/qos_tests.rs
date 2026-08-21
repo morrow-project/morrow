@@ -138,6 +138,11 @@ async fn cluster_durable_qos_waits_for_fake_cluster_commit() {
     publisher
         .expect_producer_ack("msg-cluster", 3, true, "1")
         .await;
+    let inner = scenario.broker().inner.lock().await;
+    assert_eq!(inner.messages[&1].partition, Some(0));
+    assert_eq!(inner.messages[&1].offset, Some(0));
+    assert_eq!(inner.messages[&1].partitioning_epoch, 1);
+    assert_eq!(inner.messages[&1].leader_epoch, 1);
 }
 
 #[tokio::test]

@@ -164,10 +164,18 @@ fn migrates_legacy_wal_to_segmented_layout() {
     .unwrap();
     let record = PublishRecord {
         seq: 1,
+        namespace: crate::partition_log::DEFAULT_NAMESPACE.to_string(),
         stream: None,
+        partition: None,
+        offset: None,
         subject: "orders.created".into(),
+        key: None,
+        headers: Vec::new(),
+        timestamp_ms: 0,
         reply_to: None,
         payload: b"one".to_vec(),
+        partitioning_epoch: 0,
+        leader_epoch: 0,
     };
     write_record_to(&mut file, KIND_PUBLISH, &publish_body(&record).unwrap()).unwrap();
     file.flush().unwrap();

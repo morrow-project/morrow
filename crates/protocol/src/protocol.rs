@@ -16,6 +16,8 @@ pub enum Command {
     Pub {
         subject: String,
         reply_to: Option<String>,
+        headers: Vec<(String, String)>,
+        key: Option<Vec<u8>>,
         payload: Vec<u8>,
         ack: Option<ProducerAckRequest>,
     },
@@ -334,6 +336,8 @@ async fn read_pub<'a, R: AsyncBufRead + Unpin>(
     Ok(Command::Pub {
         subject,
         reply_to,
+        headers: Vec::new(),
+        key: None,
         payload,
         ack: None,
     })
@@ -390,10 +394,21 @@ async fn read_hpub<'a, R: AsyncBufRead + Unpin>(
     let payload = frame.split_off(headers_len);
     let headers = parse_headers(&frame)?;
     let ack = parse_producer_ack_request(&headers)?;
+    let key = header_value(&headers, "Broker-Key").map(|value| value.as_bytes().to_vec());
+    let headers = headers
+        .into_iter()
+        .filter(|(name, _)| {
+            !name.eq_ignore_ascii_case("Broker-QoS")
+                && !name.eq_ignore_ascii_case("Broker-Msg-Id")
+                && !name.eq_ignore_ascii_case("Broker-Key")
+        })
+        .collect();
 
     Ok(Command::Pub {
         subject,
         reply_to,
+        headers,
+        key,
         payload,
         ack,
     })
@@ -498,6 +513,24 @@ pub fn producer_ack(msg_id: &str, level: AckLevel, retained: bool, seq: Option<u
         .map(|seq| seq.to_string())
         .unwrap_or_else(|| "-".to_string());
     format!("P-ACK {msg_id} {} OK {retained} {seq}\r\n", level as u8).into_bytes()
+}
+
+pub fn producer_ack_with_position(
+    msg_id: &str,
+    level: AckLevel,
+    retained: bool,
+    seq: Option<u64>,
+    position: Option<(&str, u32, u64, u64, u64)>,
+) -> Vec<u8> {
+    let mut frame = String::from_utf8(producer_ack(msg_id, level, retained, seq))
+        .expect("producer ack is UTF-8");
+    if let Some((stream, partition, offset, partitioning_epoch, leader_epoch)) = position {
+        frame.truncate(frame.len() - 2);
+        frame.push_str(&format!(
+            " {stream} {partition} {offset} {partitioning_epoch} {leader_epoch}\r\n"
+        ));
+    }
+    frame.into_bytes()
 }
 
 pub fn err(message: &str) -> Vec<u8> {

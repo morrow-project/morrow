@@ -14,6 +14,8 @@ async fn parses_pub_with_payload() {
         Command::Pub {
             subject: "orders.created".into(),
             reply_to: None,
+            headers: vec![],
+            key: None,
             payload: b"hello".to_vec(),
             ack: None,
         }
@@ -33,6 +35,8 @@ async fn parses_hpub_with_qos_headers() {
         Command::Pub {
             subject: "orders.created".into(),
             reply_to: None,
+            headers: vec![],
+            key: None,
             payload: b"hello".to_vec(),
             ack: Some(ProducerAckRequest {
                 level: AckLevel::Durable,
@@ -61,11 +65,39 @@ async fn parses_hpub_with_reply_to_and_qos_headers() {
         Command::Pub {
             subject: "service.echo".into(),
             reply_to: Some("_INBOX.client.1".into()),
+            headers: vec![],
+            key: None,
             payload: b"hello".to_vec(),
             ack: Some(ProducerAckRequest {
                 level: AckLevel::ClusterDurable,
                 msg_id: "msg-3".into(),
             }),
+        }
+    );
+}
+
+#[tokio::test]
+async fn parses_application_headers_and_partition_key() {
+    let headers = "NATS/1.0\r\nBroker-Key: customer-7\r\nTrace-Id: trace-1\r\n\r\n";
+    let frame = format!(
+        "HPUB orders.created {} {}\r\n{headers}hello\r\n",
+        headers.len(),
+        headers.len() + 5
+    );
+    let mut reader = BufReader::new(frame.as_bytes());
+    let command = read_command(&mut reader, 1024, 8192)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        command,
+        Command::Pub {
+            subject: "orders.created".into(),
+            reply_to: None,
+            headers: vec![("Trace-Id".into(), "trace-1".into())],
+            key: Some(b"customer-7".to_vec()),
+            payload: b"hello".to_vec(),
+            ack: None,
         }
     );
 }
@@ -265,6 +297,16 @@ fn encodes_producer_ack_frames() {
     assert_eq!(
         producer_ack("msg-2", AckLevel::Accepted, false, None),
         b"P-ACK msg-2 0 OK false -\r\n"
+    );
+    assert_eq!(
+        producer_ack_with_position(
+            "msg-3",
+            AckLevel::Durable,
+            true,
+            Some(9),
+            Some(("orders", 2, 41, 7, 3)),
+        ),
+        b"P-ACK msg-3 1 OK true 9 orders 2 41 7 3\r\n"
     );
 }
 

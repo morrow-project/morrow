@@ -27,8 +27,14 @@ use tokio::sync::oneshot;
 use crate::{
     config::Config,
     error::{BrokerError, Result, ResultExt},
+    partition_log::{
+        AppendRequest, DEFAULT_NAMESPACE, MessageHeader, PartitionLogSet, select_partition,
+    },
     raft::{BrokerCommand, BrokerResponse, DurableState, RaftRuntime, proxy_stream_to_leader},
-    wal::{ConsumerRecord, DeliveryAttemptRecord, PublishRecord, ReplayedConsumer, Wal, WalStatus},
+    wal::{
+        ConsumerRecord, DeliveryAttemptRecord, PartitionAppendRecord, PublishRecord,
+        ReplayedConsumer, Wal, WalStatus,
+    },
 };
 
 const DEFAULT_ACK_TIMEOUT_MS: u64 = 30_000;
@@ -44,6 +50,7 @@ mod broker_client;
 mod broker_lifecycle;
 mod broker_publish;
 mod cluster_delivery;
+mod cluster_operations;
 mod cluster_runtime;
 mod consumer;
 mod fake_cluster;
@@ -53,6 +60,7 @@ mod http;
 mod inner_admin;
 mod inner_delivery;
 mod manual_clock;
+mod producer_ack;
 mod route_mesh;
 mod route_state;
 mod state;

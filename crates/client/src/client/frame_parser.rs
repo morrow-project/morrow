@@ -92,15 +92,51 @@ pub(super) fn parse_producer_ack<'a>(
                 .map_err(|_| ClientError::msg("P-ACK sequence must be an integer"))?,
         ),
     };
+    let stream = parts.next().map(str::to_string);
+    let partition = parse_optional_position(&mut parts, "partition")?;
+    let offset = parse_optional_position(&mut parts, "offset")?;
+    let partitioning_epoch = parse_optional_position(&mut parts, "partitioning epoch")?;
+    let leader_epoch = parse_optional_position(&mut parts, "leader epoch")?;
+    if stream.is_some() && leader_epoch.is_none() {
+        return Err(ClientError::msg(
+            "P-ACK has an incomplete partition position",
+        ));
+    }
     if parts.next().is_some() {
         return Err(ClientError::msg("P-ACK has too many arguments"));
     }
+    let partition = partition
+        .map(|value| {
+            value
+                .try_into()
+                .map_err(|_| ClientError::msg("P-ACK partition is too large"))
+        })
+        .transpose()?;
     Ok(ServerFrame::ProducerAck(ProducerAck {
         msg_id,
         level,
         retained,
         seq,
+        stream,
+        partition,
+        offset,
+        partitioning_epoch,
+        leader_epoch,
     }))
+}
+
+fn parse_optional_position<'a>(
+    parts: &mut impl Iterator<Item = &'a str>,
+    field: &str,
+) -> Result<Option<u64>> {
+    parts
+        .next()
+        .map(|value| {
+            value
+                .parse()
+                .map_err(|_| ClientError::msg(format!("P-ACK {field} must be an integer")))
+        })
+        .transpose()
 }
 
 pub(super) async fn parse_msg<'a>(

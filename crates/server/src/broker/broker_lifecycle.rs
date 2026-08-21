@@ -7,11 +7,87 @@ impl Broker {
 
     pub(crate) fn open_with_hooks(config: Config, hooks: BrokerHooks) -> Result<Self> {
         config.validate()?;
-        let (wal, replay) = Wal::open(
+        let (mut wal, mut replay) = Wal::open(
             &config.wal_dir,
             config.fsync_interval(),
             config.wal_segment_bytes,
         )?;
+        let (mut partition_logs, mut envelopes) =
+            PartitionLogSet::open(&config.wal_dir, &config.streams, config.wal_segment_bytes)?;
+        let mut envelope_seqs = envelopes
+            .iter()
+            .map(|envelope| envelope.legacy_seq)
+            .collect::<HashSet<_>>();
+        let legacy_stream_records = replay
+            .messages
+            .values()
+            .filter(|record| record.stream.is_some())
+            .cloned()
+            .collect::<Vec<_>>();
+        for record in legacy_stream_records {
+            let stream_name = record.stream.as_deref().unwrap();
+            let stream = config
+                .streams
+                .definitions()
+                .iter()
+                .find(|stream| stream.name.as_str() == stream_name)
+                .ok_or_else(|| {
+                    BrokerError::msg(format!(
+                        "legacy WAL record {} references unconfigured stream {stream_name}",
+                        record.seq
+                    ))
+                })?;
+            if !envelope_seqs.contains(&record.seq) {
+                let envelope = partition_logs.append(AppendRequest {
+                    namespace: DEFAULT_NAMESPACE,
+                    stream,
+                    subject: &record.subject,
+                    key: record.key.as_deref(),
+                    partition_hint: record.partition.map(crate::stream::PartitionId),
+                    headers: &record.headers,
+                    timestamp_ms: record.timestamp_ms,
+                    reply_to: record.reply_to.as_deref(),
+                    payload: &record.payload,
+                    leader_epoch: record.leader_epoch,
+                    legacy_seq: Some(record.seq),
+                })?;
+                envelope_seqs.insert(record.seq);
+                envelopes.push(envelope);
+            }
+        }
+        partition_logs.flush()?;
+        for envelope in &envelopes {
+            wal.observe_publish_seq(envelope.legacy_seq);
+            if !replay.partition_appends.contains_key(&envelope.legacy_seq) {
+                let record = PartitionAppendRecord::from(envelope);
+                wal.append_partition_append(&record)?;
+                replay.partition_appends.insert(record.seq, record);
+            }
+        }
+        let envelope_by_seq = envelopes
+            .into_iter()
+            .map(|envelope| (envelope.legacy_seq, envelope))
+            .collect::<HashMap<_, _>>();
+        for reference in replay.partition_appends.values() {
+            let envelope = envelope_by_seq.get(&reference.seq).ok_or_else(|| {
+                BrokerError::msg(format!(
+                    "control WAL references missing stream record {}:{}:{}",
+                    reference.stream, reference.partition, reference.offset
+                ))
+            })?;
+            crate::broker_ensure!(
+                envelope.stream.as_str() == reference.stream
+                    && envelope.partition.0 == reference.partition
+                    && envelope.offset == reference.offset,
+                "control WAL partition reference does not match stream data"
+            );
+        }
+        replay.messages.retain(|_, record| record.stream.is_none());
+        replay.messages.extend(
+            envelope_by_seq
+                .into_iter()
+                .map(|(seq, envelope)| (seq, PublishRecord::from(envelope))),
+        );
         let tls_acceptor = config
             .tls
             .as_ref()
@@ -36,6 +112,7 @@ impl Broker {
         Ok(Self {
             inner: Arc::new(Mutex::new(Inner {
                 wal,
+                partition_logs,
                 clients: HashMap::new(),
                 consumers,
                 transient_subscriptions: HashMap::new(),
@@ -104,6 +181,7 @@ impl Broker {
         let mut inner = self.inner.lock().await;
         let messages = inner.messages.values().cloned().collect::<Vec<_>>();
         let consumers = inner.replayed_consumers();
+        inner.partition_logs.flush()?;
         inner.wal.checkpoint(messages, consumers)?;
         inner.wal.flush()?;
         Ok(())

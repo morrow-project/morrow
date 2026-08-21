@@ -58,6 +58,11 @@ pub struct ProducerAck {
     pub level: protocol::AckLevel,
     pub retained: bool,
     pub seq: Option<u64>,
+    pub stream: Option<String>,
+    pub partition: Option<u32>,
+    pub offset: Option<u64>,
+    pub partitioning_epoch: Option<u64>,
+    pub leader_epoch: Option<u64>,
 }
 #[derive(Debug, Clone)]
 pub struct ClientAuth {

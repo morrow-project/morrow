@@ -1,6 +1,7 @@
 use crate::{
     config::ClusterConfig,
     error::{BrokerError, Result, ResultExt},
+    partition_log::MessageHeader,
     wal::{ConsumerRecord, DeliveryAttemptRecord, PublishRecord},
 };
 use openraft::{
@@ -56,6 +57,19 @@ pub enum BrokerCommand {
         reply_to: Option<String>,
         payload: Vec<u8>,
     },
+    PartitionPublish {
+        namespace: String,
+        stream: String,
+        partition: u32,
+        subject: String,
+        key: Option<Vec<u8>>,
+        headers: Vec<MessageHeader>,
+        timestamp_ms: u64,
+        reply_to: Option<String>,
+        payload: Vec<u8>,
+        partitioning_epoch: u64,
+        leader_epoch: u64,
+    },
     ConsumerUpsert {
         record: ConsumerRecord,
     },
@@ -99,6 +113,8 @@ pub struct DurableState {
     pub messages: HashMap<u64, PublishRecord>,
     pub consumers: HashMap<String, DurableConsumer>,
     pub next_seq: u64,
+    #[serde(default)]
+    pub next_partition_offsets: HashMap<String, u64>,
     pub next_delivery_id: u64,
     pub last_applied: Option<LogId<u64>>,
     pub last_membership: StoredMembership<u64, BasicNode>,
@@ -111,6 +127,7 @@ impl DurableState {
             messages: HashMap::new(),
             consumers: HashMap::new(),
             next_seq: 1,
+            next_partition_offsets: HashMap::new(),
             next_delivery_id: 1,
             last_applied: None,
             last_membership: StoredMembership::new(None, membership),
@@ -144,10 +161,18 @@ impl DurableState {
                 self.next_seq += 1;
                 let record = PublishRecord {
                     seq,
+                    namespace: crate::partition_log::DEFAULT_NAMESPACE.to_string(),
                     stream,
+                    partition: None,
+                    offset: None,
                     subject,
+                    key: None,
+                    headers: Vec::new(),
+                    timestamp_ms: 0,
                     reply_to,
                     payload,
+                    partitioning_epoch: 0,
+                    leader_epoch: 0,
                 };
                 self.messages.insert(seq, record);
                 for consumer_id in matching_consumers {
@@ -160,6 +185,33 @@ impl DurableState {
                     retained: true,
                 }
             }
+            BrokerCommand::PartitionPublish {
+                namespace,
+                stream,
+                partition,
+                subject,
+                key,
+                headers,
+                timestamp_ms,
+                reply_to,
+                payload,
+                partitioning_epoch,
+                leader_epoch,
+            } => self.apply_partition_publish(PublishRecord {
+                seq: 0,
+                namespace,
+                stream: Some(stream),
+                partition: Some(partition),
+                offset: None,
+                subject,
+                key,
+                headers,
+                timestamp_ms,
+                reply_to,
+                payload,
+                partitioning_epoch,
+                leader_epoch,
+            }),
             BrokerCommand::ConsumerUpsert { record } => {
                 self.consumers
                     .entry(record.consumer_id.clone())
@@ -261,6 +313,41 @@ impl DurableState {
             .collect::<Vec<_>>();
         for seq in removable {
             self.messages.remove(&seq);
+        }
+    }
+
+    fn apply_partition_publish(&mut self, mut record: PublishRecord) -> BrokerResponse {
+        let stream = record
+            .stream
+            .clone()
+            .expect("partition publish has a stream");
+        let partition = record.partition.expect("partition publish has a partition");
+        let offset = self
+            .next_partition_offsets
+            .entry(format!("{stream}:{partition}"))
+            .or_default();
+        record.offset = Some(*offset);
+        *offset = offset.saturating_add(1);
+        let seq = self.next_seq;
+        self.next_seq = self.next_seq.saturating_add(1);
+        record.seq = seq;
+        let matching_consumers = self
+            .consumers
+            .iter()
+            .filter(|(_, consumer)| {
+                subject::matches(&consumer.record.filter_subject, &record.subject)
+            })
+            .map(|(consumer_id, _)| consumer_id.clone())
+            .collect::<Vec<_>>();
+        self.messages.insert(seq, record);
+        for consumer_id in matching_consumers {
+            if let Some(consumer) = self.consumers.get_mut(&consumer_id) {
+                consumer.pending.insert(seq);
+            }
+        }
+        BrokerResponse::Publish {
+            seq: Some(seq),
+            retained: true,
         }
     }
 }

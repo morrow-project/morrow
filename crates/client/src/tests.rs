@@ -75,8 +75,31 @@ async fn parses_producer_ack_frame() {
             level: protocol::AckLevel::HighDurability,
             retained: true,
             seq: Some(42),
+            stream: None,
+            partition: None,
+            offset: None,
+            partitioning_epoch: None,
+            leader_epoch: None,
         })
     );
+}
+
+#[tokio::test]
+async fn parses_partition_position_from_producer_ack() {
+    let (_writer, reader) = tokio::io::duplex(64);
+    let mut reader = BufReader::new(Box::new(reader) as Box<dyn ClientStream>);
+    let frame = parse_frame(&mut reader, "P-ACK msg-1 1 OK true 9 orders 2 41 7 3", 1024)
+        .await
+        .unwrap()
+        .unwrap();
+    let ServerFrame::ProducerAck(ack) = frame else {
+        panic!("expected producer ack");
+    };
+    assert_eq!(ack.stream.as_deref(), Some("orders"));
+    assert_eq!(ack.partition, Some(2));
+    assert_eq!(ack.offset, Some(41));
+    assert_eq!(ack.partitioning_epoch, Some(7));
+    assert_eq!(ack.leader_epoch, Some(3));
 }
 
 #[tokio::test]
