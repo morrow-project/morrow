@@ -332,13 +332,15 @@ fn encodes_pull_delivery_frames() {
             "orders",
             2,
             41,
+            Some(b"customer-7"),
+            1234,
             3,
             900,
             7,
             9,
             b"hello"
         ),
-        b"DMSG worker orders.created - orders 2 41 3 900 7 9 12 17\r\nNATS/1.0\r\n\r\nhello\r\n"
+        b"DMSG worker orders.created - orders 2 41 637573746f6d65722d37 1234 3 900 7 9 12 17\r\nNATS/1.0\r\n\r\nhello\r\n"
     );
 }
 

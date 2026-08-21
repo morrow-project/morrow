@@ -53,6 +53,8 @@ pub struct Message {
     pub sid: String,
     pub reply_to: Option<String>,
     pub ack_subject: Option<String>,
+    pub key: Option<Vec<u8>>,
+    pub timestamp_ms: Option<u64>,
     pub headers: Vec<(String, String)>,
     pub payload: Vec<u8>,
 }
@@ -77,6 +79,8 @@ pub struct DurableMessage {
     pub stream: String,
     pub partition: u32,
     pub offset: u64,
+    pub key: Option<Vec<u8>>,
+    pub timestamp_ms: u64,
     pub attempt: u32,
     pub lease_deadline_ms: u64,
     pub seq: u64,

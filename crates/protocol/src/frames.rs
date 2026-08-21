@@ -128,6 +128,8 @@ pub fn durable_message(
     stream: &str,
     partition: u32,
     offset: u64,
+    key: Option<&[u8]>,
+    timestamp_ms: u64,
     attempt: u32,
     lease_deadline_ms: u64,
     seq: u64,
@@ -145,8 +147,9 @@ pub fn durable_message(
     let headers_len = header_block.len();
     let total_len = headers_len + payload.len();
     let reply_to = reply_to.unwrap_or("-");
+    let key = key.map(hex).unwrap_or_else(|| "-".to_string());
     let protocol_header = format!(
-        "DMSG {name} {subject} {reply_to} {stream} {partition} {offset} {attempt} {lease_deadline_ms} {seq} {delivery_id} {headers_len} {total_len}\r\n"
+        "DMSG {name} {subject} {reply_to} {stream} {partition} {offset} {key} {timestamp_ms} {attempt} {lease_deadline_ms} {seq} {delivery_id} {headers_len} {total_len}\r\n"
     );
     let mut frame = Vec::with_capacity(protocol_header.len() + total_len + 2);
     frame.extend_from_slice(protocol_header.as_bytes());
@@ -154,6 +157,16 @@ pub fn durable_message(
     frame.extend_from_slice(payload);
     frame.extend_from_slice(b"\r\n");
     frame
+}
+
+fn hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut value = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        value.push(DIGITS[(byte >> 4) as usize] as char);
+        value.push(DIGITS[(byte & 0xf) as usize] as char);
+    }
+    value
 }
 
 fn payload_frame(header: String, payload: &[u8]) -> Vec<u8> {

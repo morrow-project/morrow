@@ -403,6 +403,10 @@ fn durable_message_frame(
             .map(|header| (header.name.clone(), header.value.clone()))
             .collect::<Vec<_>>();
         headers.push(("Broker-Ack".into(), ack_subject.into()));
+        if let Some(key) = &message.key {
+            headers.push(("Broker-Key-Hex".into(), hex(key)));
+        }
+        headers.push(("Broker-Timestamp".into(), message.timestamp_ms.to_string()));
         if let (Some(stream), Some(partition), Some(offset)) =
             (&message.stream, message.partition, message.offset)
         {
@@ -444,4 +448,14 @@ fn durable_message_frame(
         &header_refs,
         &message.payload,
     )
+}
+
+fn hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut value = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        value.push(DIGITS[(byte >> 4) as usize] as char);
+        value.push(DIGITS[(byte & 0xf) as usize] as char);
+    }
+    value
 }

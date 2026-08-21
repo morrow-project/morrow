@@ -112,9 +112,10 @@ async fn ack_does_not_delete_stream_owned_record() {
 #[tokio::test]
 async fn keyed_headers_and_envelope_metadata_survive_restart_and_delivery() {
     let mut scenario = Scenario::new();
-    let mut subscriber = scenario.connect_durable("consumer", 25).await;
+    let mut subscriber = TestClient::connect_pull(scenario.broker(), "consumer", 25).await;
     let mut publisher = scenario.connect_durable("tenant-a", 25).await;
     subscriber.subscribe("orders.*", "sid").await;
+    subscriber.write_line("CREDIT sid 1 1024").await;
     subscriber.ping_roundtrip().await;
 
     publisher
@@ -128,6 +129,8 @@ async fn keyed_headers_and_envelope_metadata_survive_restart_and_delivery() {
     assert!(delivery.starts_with("HMSG orders.created sid "));
     assert!(delivery.contains("Trace-Id: trace-1\r\n"));
     assert!(!delivery.contains("Broker-Key:"));
+    assert!(delivery.contains("Broker-Key-Hex: 637573746f6d65722d37\r\n"));
+    assert!(delivery.contains("Broker-Timestamp: 1000\r\n"));
 
     subscriber.disconnect().await;
     publisher.disconnect().await;
@@ -142,8 +145,9 @@ async fn keyed_headers_and_envelope_metadata_survive_restart_and_delivery() {
     assert_eq!(record.partitioning_epoch, 1);
     drop(inner);
 
-    let mut restarted = scenario.connect_durable("consumer", 25).await;
+    let mut restarted = TestClient::connect_pull(scenario.broker(), "consumer", 25).await;
     restarted.subscribe("orders.*", "sid").await;
+    restarted.write_line("CREDIT sid 1 1024").await;
     let redelivery = restarted.read_frame().await;
     assert!(redelivery.starts_with("HMSG orders.created sid "));
     assert!(redelivery.contains("Trace-Id: trace-1\r\n"));

@@ -57,7 +57,7 @@ async fn nack_delay_uses_the_durable_lease_deadline() {
         consumer
             .read_frame()
             .await
-            .starts_with("DMSG worker orders.created - orders 0 0 1 ")
+            .starts_with("DMSG worker orders.created - orders 0 0 - 1000 1 ")
     );
     consumer.write_line("NACK worker 1 1 20").await;
     assert_eq!(consumer.read_frame().await, "D-OK NACK worker 1 1\r\n");
@@ -71,7 +71,7 @@ async fn nack_delay_uses_the_durable_lease_deadline() {
         consumer
             .read_frame()
             .await
-            .starts_with("DMSG worker orders.created - orders 0 0 2 ")
+            .starts_with("DMSG worker orders.created - orders 0 0 - 1000 2 ")
     );
 }
 
@@ -89,7 +89,7 @@ async fn pull_lease_attempt_survives_restart() {
     consumer.write_line("FETCH worker 1 3 0").await;
     assert_eq!(consumer.read_frame().await, "BATCH worker 1 3\r\n");
     let first = consumer.read_frame().await;
-    assert!(first.starts_with("DMSG worker orders.created - orders 0 0 1 "));
+    assert!(first.starts_with("DMSG worker orders.created - orders 0 0 - 1000 1 "));
     consumer.disconnect().await;
     publisher.disconnect().await;
 
@@ -98,7 +98,7 @@ async fn pull_lease_attempt_survives_restart() {
     consumer.write_line("FETCH worker 1 3 0").await;
     assert_eq!(consumer.read_frame().await, "BATCH worker 1 3\r\n");
     let redelivery = consumer.read_frame().await;
-    assert!(redelivery.starts_with("DMSG worker orders.created - orders 0 0 2 "));
+    assert!(redelivery.starts_with("DMSG worker orders.created - orders 0 0 - 1000 2 "));
     consumer.write_line("CONSUMER DELETE worker").await;
     assert_eq!(consumer.read_frame().await, "C-OK DELETE worker\r\n");
     consumer.disconnect().await;
@@ -121,7 +121,7 @@ async fn fake_cluster_replicates_pull_fetch_and_ack() {
     consumer.write_line("FETCH worker 1 3 0").await;
     assert_eq!(consumer.read_frame().await, "BATCH worker 1 3\r\n");
     let delivery = consumer.read_frame().await;
-    assert!(delivery.starts_with("DMSG worker orders.created - orders 0 0 1 "));
+    assert!(delivery.starts_with("DMSG worker orders.created - orders 0 0 - 1000 1 "));
     consumer.write_line("ACK worker 1 1").await;
     assert_eq!(consumer.read_frame().await, "D-OK ACK worker 1 1\r\n");
 

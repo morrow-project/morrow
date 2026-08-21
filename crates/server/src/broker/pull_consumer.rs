@@ -197,6 +197,8 @@ impl Broker {
                 message.stream.as_deref().unwrap_or_default(),
                 message.partition.unwrap_or_default(),
                 message.offset.unwrap_or_default(),
+                message.key.as_deref(),
+                message.timestamp_ms,
                 delivery.lease.attempt,
                 delivery.lease.deadline_ms,
                 delivery.lease.seq,

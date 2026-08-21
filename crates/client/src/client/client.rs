@@ -221,7 +221,25 @@ impl Client {
         level: protocol::AckLevel,
         msg_id: &str,
     ) -> Result<ProducerAck> {
+        self.publish_with_qos_and_key(subject, reply_to, payload, level, msg_id, None)
+            .await
+    }
+
+    pub async fn publish_with_qos_and_key(
+        &mut self,
+        subject: &str,
+        reply_to: Option<&str>,
+        payload: &[u8],
+        level: protocol::AckLevel,
+        msg_id: &str,
+        key: Option<&str>,
+    ) -> Result<ProducerAck> {
         validate_producer_msg_id(msg_id)?;
+        if key.is_some_and(|key| key.is_empty() || key.contains(['\r', '\n'])) {
+            return Err(ClientError::msg(
+                "publish key must be non-empty and single-line",
+            ));
+        }
         if payload.len() > self.max_payload {
             return Err(ClientError::msg(format!(
                 "payload size {} exceeds max payload {}",
@@ -229,10 +247,14 @@ impl Client {
                 self.max_payload
             )));
         }
-        let headers = format!(
+        let mut headers = format!(
             "NATS/1.0\r\nBroker-QoS: {}\r\nBroker-Msg-Id: {msg_id}\r\n\r\n",
             level as u8
         );
+        if let Some(key) = key {
+            headers.truncate(headers.len() - 2);
+            headers.push_str(&format!("Broker-Key: {key}\r\n\r\n"));
+        }
         let total_len = headers.len() + payload.len();
         if total_len > self.max_payload {
             return Err(ClientError::msg(format!(

@@ -187,15 +187,19 @@ requested fetch byte limit.
 
 ```text
 BATCH <consumer-name> <messages> <bytes>\r\n
-DMSG <consumer-name> <subject> <reply-to-or-> <stream> <partition> <offset> <attempt> <lease-deadline-ms> <seq> <delivery-id> <headers-len> <total-len>\r\n
+DMSG <consumer-name> <subject> <reply-to-or-> <stream> <partition> <offset> <key-hex-or-> <timestamp-ms> <attempt> <lease-deadline-ms> <seq> <delivery-id> <headers-len> <total-len>\r\n
 <headers><payload>\r\n
 ```
 
 The `(consumer-name, seq, delivery-id)` tuple is the ACK identity. The stream,
-partition, and offset identify the immutable stored record. `reply-to-or-` is
-the application reply subject or `-`; the header block uses the same NATS/1.0
-format as `HMSG`. Clients must reject invalid lengths or a `total-len` above
-their configured payload limit before allocating or reading the body.
+partition, and offset identify the immutable stored record. `key-hex-or-`
+preserves the opaque partition key as lowercase hex or uses `-` when absent;
+`timestamp-ms` is the immutable append timestamp. `reply-to-or-` is the
+application reply subject or `-`; the header block uses the same NATS/1.0 format
+as `HMSG`. Version 2 durable push `HMSG` frames expose the same fields as
+`Broker-Key-Hex` and `Broker-Timestamp` headers. Clients must reject invalid
+lengths or a `total-len` above their configured payload limit before allocating
+or reading the body.
 
 ### -ERR
 

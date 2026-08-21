@@ -1,6 +1,52 @@
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 
 use super::*;
+
+#[tokio::test]
+async fn keyed_qos_publish_encodes_partition_key_and_waits_for_commit_ack() {
+    let (client_io, server_io) = tokio::io::duplex(1024);
+    let mut client = Client {
+        stream: BufReader::new(Box::new(client_io)),
+        max_payload: 1024,
+        inbox_prefix: "_INBOX.test".to_string(),
+        inbox_counter: 0,
+        durable: true,
+        push_credit_messages: 1,
+    };
+    let server = tokio::spawn(async move {
+        let mut server = tokio::io::BufReader::new(server_io);
+        let mut line = String::new();
+        server.read_line(&mut line).await.unwrap();
+        let parts = line.split_whitespace().collect::<Vec<_>>();
+        assert_eq!(parts[0], "HPUB");
+        assert_eq!(parts[1], "orders.created");
+        let total = parts[3].parse::<usize>().unwrap();
+        let mut body = vec![0; total + 2];
+        server.read_exact(&mut body).await.unwrap();
+        let encoded = String::from_utf8(body).unwrap();
+        assert!(encoded.contains("Broker-Key: customer-7\r\n"));
+        assert!(encoded.ends_with("\r\n\r\nhello\r\n"));
+        server
+            .get_mut()
+            .write_all(b"P-ACK msg-1 2 OK true 9 orders 0 4 1 0\r\n")
+            .await
+            .unwrap();
+    });
+
+    let ack = client
+        .publish_with_qos_and_key(
+            "orders.created",
+            None,
+            b"hello",
+            protocol::AckLevel::HighDurability,
+            "msg-1",
+            Some("customer-7"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(ack.offset, Some(4));
+    server.await.unwrap();
+}
 
 #[tokio::test]
 async fn parses_hmsg_with_reply_and_broker_ack_header() {
@@ -169,7 +215,7 @@ async fn parses_pull_batch_and_durable_message_frames() {
     let mut reader = BufReader::new(Box::new(reader) as Box<dyn ClientStream>);
     let frame = parse_frame(
         &mut reader,
-        "DMSG worker orders.created _INBOX.reply orders 2 41 3 900 7 9 27 32",
+        "DMSG worker orders.created _INBOX.reply orders 2 41 637573746f6d65722d37 1234 3 900 7 9 27 32",
         1024,
     )
     .await
@@ -185,6 +231,8 @@ async fn parses_pull_batch_and_durable_message_frames() {
             stream: "orders".into(),
             partition: 2,
             offset: 41,
+            key: Some(b"customer-7".to_vec()),
+            timestamp_ms: 1234,
             attempt: 3,
             lease_deadline_ms: 900,
             seq: 7,
@@ -200,7 +248,7 @@ async fn rejects_oversized_pull_delivery_before_allocating_body() {
     let mut reader = BufReader::new(Box::new(reader) as Box<dyn ClientStream>);
     let error = parse_frame(
         &mut reader,
-        "DMSG worker orders.created - orders 0 0 1 900 7 9 12 2048",
+        "DMSG worker orders.created - orders 0 0 - 0 1 900 7 9 12 2048",
         1024,
     )
     .await

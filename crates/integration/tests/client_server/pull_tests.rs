@@ -30,8 +30,17 @@ async fn client_pull_consumer_supports_bounded_fetch_and_delivery_controls() {
         .connect_durable("publisher", false, 5_000, 8)
         .await
         .unwrap();
-    publisher.publish("orders.created", b"one").await.unwrap();
-    publisher.ping_roundtrip().await.unwrap();
+    publisher
+        .publish_with_qos_and_key(
+            "orders.created",
+            None,
+            b"one",
+            client::protocol::AckLevel::HighDurability,
+            "pull-keyed-1",
+            Some("customer-7"),
+        )
+        .await
+        .unwrap();
 
     let first = consumer
         .fetch("worker", 1, 3, Duration::ZERO)
@@ -43,6 +52,8 @@ async fn client_pull_consumer_supports_bounded_fetch_and_delivery_controls() {
     assert_eq!(first.stream, "orders");
     assert_eq!(first.partition, 0);
     assert_eq!(first.offset, 0);
+    assert_eq!(first.key.as_deref(), Some(b"customer-7".as_slice()));
+    assert!(first.timestamp_ms > 0);
     assert_eq!(first.attempt, 1);
 
     consumer

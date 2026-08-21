@@ -129,6 +129,14 @@ pub(super) async fn parse_durable_message<'a>(
         "DMSG partition",
     )?;
     let offset = parse_number(next_part(&mut parts, "DMSG missing offset")?, "DMSG offset")?;
+    let key = match next_part(&mut parts, "DMSG missing key")? {
+        "-" => None,
+        key => Some(decode_hex(key, "DMSG key")?),
+    };
+    let timestamp_ms = parse_number(
+        next_part(&mut parts, "DMSG missing timestamp")?,
+        "DMSG timestamp",
+    )?;
     let attempt = parse_number(
         next_part(&mut parts, "DMSG missing attempt")?,
         "DMSG attempt",
@@ -183,6 +191,8 @@ pub(super) async fn parse_durable_message<'a>(
         stream: durable_stream,
         partition,
         offset,
+        key,
+        timestamp_ms,
         attempt,
         lease_deadline_ms,
         seq,
@@ -358,6 +368,8 @@ pub(super) async fn parse_msg<'a>(
         sid,
         reply_to,
         ack_subject,
+        key: None,
+        timestamp_ms: None,
         headers: Vec::new(),
         payload,
     }))
@@ -415,14 +427,37 @@ pub(super) async fn parse_hmsg<'a>(
     let payload = frame.split_off(headers_len);
     let headers = parse_headers(&frame)?;
     let ack_subject = header_value(&headers, "Broker-Ack").map(str::to_string);
+    let key = header_value(&headers, "Broker-Key-Hex")
+        .map(|key| decode_hex(key, "Broker-Key-Hex"))
+        .transpose()?;
+    let timestamp_ms = header_value(&headers, "Broker-Timestamp")
+        .map(|value| parse_number(value, "Broker-Timestamp"))
+        .transpose()?;
     Ok(ServerFrame::Message(Message {
         subject,
         sid,
         reply_to,
         ack_subject,
+        key,
+        timestamp_ms,
         headers,
         payload,
     }))
+}
+
+fn decode_hex(value: &str, field: &str) -> Result<Vec<u8>> {
+    if !value.len().is_multiple_of(2) {
+        return Err(ClientError::msg(format!("{field} must be even-length hex")));
+    }
+    value
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let text = std::str::from_utf8(pair).expect("hex pair is ASCII-sized");
+            u8::from_str_radix(text, 16)
+                .map_err(|_| ClientError::msg(format!("{field} must be hex")))
+        })
+        .collect()
 }
 
 pub(super) fn parse_frame_len(value: &str, field: &str) -> Result<usize> {
