@@ -19,7 +19,9 @@ tokio.workspace = true
 tokio-rustls.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+wasmtime.workspace = true
 
 [dev-dependencies]
 ed25519-dalek.workspace = true
 tempfile = "3.23.0"
+wat = "1.254.0"

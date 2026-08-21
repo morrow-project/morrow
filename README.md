@@ -306,6 +306,9 @@ documented in [Partition replication strategy](docs/partition-replication-strate
 Routing-trie behavior, sealed subject-index limits, fallback policy, and measured
 tradeoffs are documented in
 [Routing trie and segment subject index](docs/routing-and-subject-indexes.md).
+The programmable policy ABI, resource limits, connector SPI, and adapter
+delivery boundaries are documented in
+[Middleware and connectors](docs/middleware-and-connectors.md).
 
 Durable subscriptions default to `@latest`. A caller can select retained
 history explicitly, for example `SUB orders.* sid1 @earliest`,

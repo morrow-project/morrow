@@ -2,6 +2,7 @@
 members = [
     "crates/client",
     "crates/cli",
+    "crates/connector",
     "crates/integration",
     "crates/protocol",
     "crates/server",
@@ -17,6 +18,7 @@ client = { path = "crates/client" }
 cli = { path = "crates/cli" }
 protocol = { path = "crates/protocol" }
 server = { path = "crates/server" }
+connector = { path = "crates/connector" }
 crc32fast = { version = "1.5.0", default-features = false, features = ["std"] }
 ed25519-dalek = { version = "2.2.0", default-features = false, features = ["alloc"] }
 getrandom = { version = "0.4.2", default-features = false, features = ["std"] }
@@ -29,6 +31,7 @@ tokio = { version = "1.52.3", default-features = false, features = ["fs", "io-ut
 tokio-rustls = { version = "0.26.4", default-features = false }
 tracing = { version = "0.1.44", default-features = false, features = ["std"] }
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["ansi", "env-filter", "fmt", "std"] }
+wasmtime = { version = "47.0.2", default-features = false, features = ["anyhow", "cranelift", "runtime", "std"] }
 
 [profile.release]
 codegen-units = 1

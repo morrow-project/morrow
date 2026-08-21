@@ -29,6 +29,48 @@ impl Inner {
                     }
                     continue;
                 };
+                let outcome = self
+                    .middleware
+                    .process(
+                        MiddlewareStage::BeforeDeliver,
+                        MiddlewareMessage {
+                            subject: message.subject.clone(),
+                            key: message.key.clone(),
+                            headers: message
+                                .headers
+                                .iter()
+                                .map(|header| (header.name.clone(), header.value.clone()))
+                                .collect(),
+                            payload: message.payload.clone(),
+                            reply_to: message.reply_to.clone(),
+                        },
+                        0,
+                    )
+                    .map_err(|err| {
+                        BrokerError::with_source("before-deliver middleware failed", err)
+                    })?;
+                crate::broker_ensure!(
+                    outcome.emitted.is_empty(),
+                    "before-deliver middleware cannot emit publications"
+                );
+                if outcome.decision == MiddlewareDecision::Reject {
+                    crate::broker_bail!("before-deliver middleware rejected delivery");
+                }
+                if outcome.decision == MiddlewareDecision::Drop {
+                    self.acknowledge_filtered_delivery(&consumer_id, &message)?;
+                    continue;
+                }
+                let mut delivery_message = message.clone();
+                delivery_message.subject = outcome.message.subject;
+                delivery_message.key = outcome.message.key;
+                delivery_message.headers = outcome
+                    .message
+                    .headers
+                    .into_iter()
+                    .map(|(name, value)| MessageHeader { name, value })
+                    .collect();
+                delivery_message.payload = outcome.message.payload;
+                delivery_message.reply_to = outcome.message.reply_to;
                 let delivery =
                     self.wal
                         .append_delivery_attempt(seq, &consumer_id, deadline_ms, attempt)?;
@@ -60,7 +102,7 @@ impl Inner {
                 }
                 if let Some(client) = self.clients.get(&connection_id) {
                     let frame = durable_message_frame(
-                        &message,
+                        &delivery_message,
                         &sid,
                         &ack_subject,
                         delivery.attempt,
@@ -71,12 +113,35 @@ impl Inner {
                         sender: client.sender.clone(),
                         frame,
                     });
-                    self.consume_durable_member(&consumer_id, connection_id, message.payload.len());
+                    self.consume_durable_member(
+                        &consumer_id,
+                        connection_id,
+                        delivery_message.payload.len(),
+                    );
                 }
             }
         }
         self.wal.flush_due()?;
         Ok(deliveries)
+    }
+
+    fn acknowledge_filtered_delivery(
+        &mut self,
+        consumer_id: &str,
+        message: &PublishRecord,
+    ) -> Result<()> {
+        let consumer = self
+            .consumers
+            .get(consumer_id)
+            .ok_or_else(|| BrokerError::msg("middleware consumer disappeared"))?;
+        let mut cursors = consumer.cursors.clone();
+        cursors.acknowledge(message, &consumer.record.filter_subject, &self.messages)?;
+        self.consumers.get_mut(consumer_id).unwrap().cursors = cursors.clone();
+        self.wal.append_consumer_cursor(&ConsumerCursorRecord {
+            consumer_id: consumer_id.to_string(),
+            cursors,
+        })?;
+        Ok(())
     }
 
     pub(super) fn next_delivery_for(

@@ -8,5 +8,12 @@ pub struct Broker {
     pub(super) tls_acceptor: Option<TlsAcceptor>,
     pub(super) cluster: Arc<Mutex<Option<ClusterRuntime>>>,
     pub(super) route_mesh: Option<RouteMesh>,
+    pub(super) middleware: MiddlewareRuntime,
     pub(super) hooks: BrokerHooks,
+}
+
+impl Broker {
+    pub fn middleware_runtime(&self) -> MiddlewareRuntime {
+        self.middleware.clone()
+    }
 }

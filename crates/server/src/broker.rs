@@ -27,6 +27,7 @@ use tokio::sync::oneshot;
 use crate::{
     config::Config,
     error::{BrokerError, Result, ResultExt},
+    middleware::{MiddlewareDecision, MiddlewareMessage, MiddlewareRuntime, MiddlewareStage},
     partition_log::{
         AppendRequest, DEFAULT_NAMESPACE, MessageEnvelope, MessageHeader, PartitionLogSet,
         select_partition,
@@ -60,6 +61,7 @@ mod http;
 mod inner_admin;
 mod inner_delivery;
 mod manual_clock;
+mod middleware_hooks;
 mod producer_ack;
 mod pull_consumer;
 mod route_mesh;

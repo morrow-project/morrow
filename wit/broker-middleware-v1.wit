@@ -1,0 +1,31 @@
+package broker:middleware@1.0.0;
+
+interface host {
+  resource message;
+
+  enum field { subject, key, headers, payload, reply-to }
+
+  read-field: func(value: borrow<message>, field: field) -> list<u8>;
+  write-field: func(value: borrow<message>, field: field, bytes: list<u8>) -> result<_, string>;
+  emit: func(subject: string, payload: list<u8>) -> result<_, string>;
+  kv-get: func(store: string, key: string) -> result<option<list<u8>>, string>;
+  secret-get: func(name: string) -> result<list<u8>, string>;
+  http-request: func(allow-list: string, request: list<u8>) -> result<list<u8>, string>;
+  clock-ms: func() -> result<u64, string>;
+  random-u64: func() -> result<u64, string>;
+  telemetry: func(event: string, value: u64) -> result<_, string>;
+}
+
+interface policy {
+  use host.{message};
+
+  enum stage { ingress, route, before-append, after-commit, before-deliver, after-ack }
+  enum decision { continue, drop, reject }
+
+  process: func(stage: stage, value: borrow<message>) -> result<decision, string>;
+}
+
+world middleware-v1 {
+  import host;
+  export policy;
+}

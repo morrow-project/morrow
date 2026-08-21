@@ -11,6 +11,31 @@ impl Broker {
         payload: Vec<u8>,
         producer_ack: Option<protocol::ProducerAckRequest>,
     ) -> Result<()> {
+        self.publish_with_depth(
+            publisher_id,
+            subject_name,
+            reply_to,
+            headers,
+            key,
+            payload,
+            producer_ack,
+            0,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn publish_with_depth(
+        &self,
+        publisher_id: u64,
+        subject_name: String,
+        reply_to: Option<String>,
+        headers: Vec<(String, String)>,
+        key: Option<Vec<u8>>,
+        payload: Vec<u8>,
+        producer_ack: Option<protocol::ProducerAckRequest>,
+        recursion_depth: usize,
+    ) -> Result<()> {
         if let Some(consumer_ack) = protocol::parse_ack_subject(&subject_name) {
             self.authorize_ack_publish(publisher_id, &consumer_ack)
                 .await?;
@@ -35,7 +60,68 @@ impl Broker {
             payload.len() <= self.config.max_payload,
             "payload exceeds max payload"
         );
+        let mut middleware_message = MiddlewareMessage {
+            subject: subject_name,
+            key,
+            headers,
+            payload,
+            reply_to,
+        };
+        let mut emitted_messages = Vec::new();
+        for stage in [
+            MiddlewareStage::Ingress,
+            MiddlewareStage::Route,
+            MiddlewareStage::BeforeAppend,
+        ] {
+            let outcome = self
+                .middleware
+                .process(stage, middleware_message, recursion_depth)
+                .map_err(|err| BrokerError::with_source("middleware rejected publish", err))?;
+            middleware_message = outcome.message;
+            emitted_messages.extend(outcome.emitted);
+            match outcome.decision {
+                MiddlewareDecision::Continue => {}
+                MiddlewareDecision::Drop => {
+                    if let Some(ack) = &producer_ack {
+                        self.send_producer_ack(publisher_id, ack, false, None)
+                            .await?;
+                    } else {
+                        self.send_verbose_ok(publisher_id).await?;
+                    }
+                    return Ok(());
+                }
+                MiddlewareDecision::Reject => crate::broker_bail!("middleware rejected publish"),
+            }
+        }
+        let MiddlewareMessage {
+            subject: subject_name,
+            key,
+            headers,
+            payload,
+            reply_to,
+        } = middleware_message;
+        crate::broker_ensure!(
+            subject::validate_subject(&subject_name),
+            "middleware produced invalid publish subject"
+        );
+        crate::broker_ensure!(
+            payload.len() <= self.config.max_payload,
+            "middleware payload exceeds max payload"
+        );
         self.authorize_publish(publisher_id, &subject_name).await?;
+        for emitted in emitted_messages {
+            Box::pin(self.publish_with_depth(
+                publisher_id,
+                emitted.subject,
+                None,
+                Vec::new(),
+                None,
+                emitted.payload,
+                None,
+                recursion_depth.saturating_add(1),
+            ))
+            .await?;
+        }
         let ack = producer_ack.as_ref();
         if ack.is_some_and(|ack| ack.level == protocol::AckLevel::ClusterDurable)
             && self.cluster_runtime().await.is_none()
@@ -128,13 +214,12 @@ impl Broker {
             let fsync = ack.is_none_or(|ack| ack.level == protocol::AckLevel::HighDurability);
             let envelope = cluster.replicate_partition(envelope, fsync).await?;
             self.sync_from_cluster(&cluster).await?;
-            if let Some(ack) = ack.filter(|_| !accepted_ack) {
-                self.send_positioned_producer_ack(
-                    publisher_id,
-                    ack,
-                    &PublishRecord::from(envelope),
-                )
+            let committed_record = PublishRecord::from(envelope.clone());
+            self.run_after_commit_middleware(publisher_id, &committed_record)
                 .await?;
+            if let Some(ack) = ack.filter(|_| !accepted_ack) {
+                self.send_positioned_producer_ack(publisher_id, ack, &committed_record)
+                    .await?;
             }
             self.deliver_pending().await?;
             if ack.is_none() && verbose {
@@ -184,6 +269,9 @@ impl Broker {
             inner.messages.insert(record.seq, record.clone());
             record
         };
+
+        self.run_after_commit_middleware(publisher_id, &record)
+            .await?;
 
         if ack.is_none_or(|ack| ack.level == protocol::AckLevel::HighDurability) {
             match self.hooks.durable_publish_flush_mode {
@@ -315,6 +403,7 @@ impl Broker {
     pub(super) async fn ack(&self, ack: AckSubject) -> Result<bool> {
         let mut inner = self.inner.lock().await;
         let mut should_cleanup = false;
+        let mut acknowledged_record = None;
         let valid = inner
             .consumers
             .get(&ack.consumer_id)
@@ -322,6 +411,7 @@ impl Broker {
             .is_some_and(|in_flight| in_flight.delivery_id == ack.delivery_id);
         if valid {
             let message = inner.messages.get(&ack.seq).cloned();
+            acknowledged_record = message.clone();
             let acknowledged_cursors = match message.as_ref() {
                 Some(message) if message.offset.is_some() => {
                     let consumer = &inner.consumers[&ack.consumer_id];
@@ -359,6 +449,31 @@ impl Broker {
         inner.wal.flush_due()?;
         if should_cleanup {
             inner.cleanup_acked_messages();
+        }
+        drop(inner);
+        if let Some(record) = acknowledged_record {
+            let outcome = self
+                .middleware
+                .process(
+                    MiddlewareStage::AfterAck,
+                    MiddlewareMessage {
+                        subject: record.subject,
+                        key: record.key,
+                        headers: record
+                            .headers
+                            .into_iter()
+                            .map(|header| (header.name, header.value))
+                            .collect(),
+                        payload: record.payload,
+                        reply_to: record.reply_to,
+                    },
+                    0,
+                )
+                .map_err(|err| BrokerError::with_source("after-ack middleware failed", err))?;
+            crate::broker_ensure!(
+                outcome.decision != MiddlewareDecision::Reject,
+                "after-ack middleware rejected acknowledgement"
+            );
         }
         Ok(valid)
     }

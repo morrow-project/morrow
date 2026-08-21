@@ -10,6 +10,7 @@ pub(super) struct Inner {
     pub(super) consumer_interest_index: subject::SubjectTrie<String>,
     pub(super) messages: HashMap<u64, PublishRecord>,
     pub(super) partition_sequences: HashMap<(String, u32, u64), u64>,
+    pub(super) middleware: MiddlewareRuntime,
 }
 
 pub(super) struct Client {

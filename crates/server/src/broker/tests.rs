@@ -465,6 +465,7 @@ fn deterministic_broker(
             clock,
             start_redelivery_loop: false,
             durable_publish_flush_mode: DurablePublishFlushMode::FlushImmediately,
+            middleware: MiddlewareRuntime::default(),
             initial_cluster,
         },
     )
@@ -528,6 +529,7 @@ async fn http_request_with_auth(broker: &Broker, path: &str, token: Option<&str>
 mod auth_tests;
 mod cluster_admin_tests;
 mod cursor_tests;
+mod middleware_tests;
 mod pull_tests;
 mod qos_tests;
 mod semantic_tests;

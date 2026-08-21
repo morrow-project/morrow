@@ -142,12 +142,14 @@ impl Broker {
                 consumer_interest_index,
                 messages: replay.messages,
                 partition_sequences,
+                middleware: hooks.middleware.clone(),
             })),
             next_connection_id: Arc::new(AtomicU64::new(1)),
             config,
             tls_acceptor,
             cluster: Arc::new(Mutex::new(cluster)),
             route_mesh,
+            middleware: hooks.middleware.clone(),
             hooks,
         })
     }
