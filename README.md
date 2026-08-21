@@ -303,6 +303,9 @@ Clustered message data is replicated directly between partition replicas; the
 OpenRaft metadata log carries only definitions, assignments, epochs, and committed
 high-watermarks. The selected strategy, failure rules, and benchmark record are
 documented in [Partition replication strategy](docs/partition-replication-strategy.md).
+Routing-trie behavior, sealed subject-index limits, fallback policy, and measured
+tradeoffs are documented in
+[Routing trie and segment subject index](docs/routing-and-subject-indexes.md).
 
 Durable subscriptions default to `@latest`. A caller can select retained
 history explicitly, for example `SUB orders.* sid1 @earliest`,

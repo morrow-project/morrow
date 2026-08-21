@@ -112,4 +112,16 @@ impl PartitionLogSet {
             .ok_or_else(|| crate::error::BrokerError::msg("unknown stream partition"))?
             .rewrite(records)
     }
+
+    pub(crate) fn matching_offsets(
+        &self,
+        stream: &str,
+        partition: PartitionId,
+        filter: &str,
+    ) -> Result<SubjectIndexQuery> {
+        self.logs
+            .get(&(stream.to_string(), partition))
+            .ok_or_else(|| crate::error::BrokerError::msg("unknown stream partition"))?
+            .matching_offsets(filter)
+    }
 }

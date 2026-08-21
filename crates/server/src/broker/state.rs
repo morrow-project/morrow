@@ -6,7 +6,10 @@ pub(super) struct Inner {
     pub(super) clients: HashMap<u64, Client>,
     pub(super) consumers: HashMap<String, Consumer>,
     pub(super) transient_subscriptions: HashMap<(u64, String), TransientSubscription>,
+    pub(super) transient_interest_index: subject::SubjectTrie<(u64, String)>,
+    pub(super) consumer_interest_index: subject::SubjectTrie<String>,
     pub(super) messages: HashMap<u64, PublishRecord>,
+    pub(super) partition_sequences: HashMap<(String, u32, u64), u64>,
 }
 
 pub(super) struct Client {

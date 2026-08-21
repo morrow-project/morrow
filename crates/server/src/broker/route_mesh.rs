@@ -183,6 +183,7 @@ impl RouteMesh {
                 reconnect_attempts: 0,
                 last_error: None,
                 remote_interests: Vec::new(),
+                remote_interest_index: subject::SubjectTrie::default(),
             },
         );
         Some(added)
@@ -216,6 +217,10 @@ impl RouteMesh {
     pub(super) async fn set_remote_interests(&self, node_id: u64, subjects: Vec<String>) {
         let mut state = self.inner.lock().await;
         if let Some(peer) = state.peers.get_mut(&node_id) {
+            peer.remote_interest_index = subject::SubjectTrie::default();
+            for subject in &subjects {
+                peer.remote_interest_index.insert(subject, ());
+            }
             peer.remote_interests = subjects;
         }
     }
@@ -265,11 +270,7 @@ impl RouteMesh {
             state
                 .peers
                 .values()
-                .filter(|peer| {
-                    peer.remote_interests
-                        .iter()
-                        .any(|interest| subject::matches(interest, subject))
-                })
+                .filter(|peer| peer.remote_interest_index.matches_any(subject))
                 .map(|peer| peer.sender.clone())
                 .collect::<Vec<_>>()
         };

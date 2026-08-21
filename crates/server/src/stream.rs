@@ -145,6 +145,7 @@ impl StreamDefinition {
 #[derive(Debug, Clone, Default)]
 pub struct StreamCatalog {
     streams: Vec<StreamDefinition>,
+    bindings: subject::SubjectTrie<usize>,
 }
 
 impl StreamCatalog {
@@ -170,7 +171,13 @@ impl StreamCatalog {
                 }
             }
         }
-        Ok(Self { streams })
+        let mut bindings = subject::SubjectTrie::default();
+        for (index, stream) in streams.iter().enumerate() {
+            for binding in &stream.subjects {
+                bindings.insert(binding, index);
+            }
+        }
+        Ok(Self { streams, bindings })
     }
 
     pub fn definitions(&self) -> &[StreamDefinition] {
@@ -181,12 +188,11 @@ impl StreamCatalog {
         if !subject::validate_subject(concrete_subject) || concrete_subject.starts_with("_INBOX.") {
             return None;
         }
-        self.streams.iter().find(|stream| {
-            stream
-                .subjects
-                .iter()
-                .any(|binding| subject::matches(binding, concrete_subject))
-        })
+        self.bindings
+            .matching(concrete_subject)
+            .into_iter()
+            .next()
+            .and_then(|index| self.streams.get(index))
     }
 
     pub fn streams_for_filter(&self, filter_subject: &str) -> Vec<&StreamDefinition> {

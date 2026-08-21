@@ -31,6 +31,7 @@ pub(super) struct RoutePeer {
     pub(super) reconnect_attempts: u64,
     pub(super) last_error: Option<String>,
     pub(super) remote_interests: Vec<String>,
+    pub(super) remote_interest_index: subject::SubjectTrie<()>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

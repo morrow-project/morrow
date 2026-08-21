@@ -1,7 +1,7 @@
-use super::{codec::*, *};
+use super::{codec::*, subject_index::*, *};
 use crate::error::{BrokerError, ResultExt};
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     fs::{File, OpenOptions},
     io::{Seek, Write},
     path::PathBuf,
@@ -20,6 +20,9 @@ pub(super) struct PartitionLog {
     segment_bytes: u64,
     next_offset: u64,
     record_checksums: HashMap<u64, u32>,
+    sealed_subject_segments: Vec<SubjectSegment>,
+    active_subjects: Vec<(String, u64)>,
+    subject_index_cache_bytes: usize,
 }
 
 impl PartitionLog {
@@ -43,10 +46,27 @@ impl PartitionLog {
 
         let mut envelopes = Vec::new();
         let mut truncations = 0;
+        let mut sealed_subject_segments = Vec::new();
+        let mut active_subjects = Vec::new();
+        let mut subject_index_cache_bytes = 0;
         for (index, (_, path)) in paths.iter().enumerate() {
             let active = index + 1 == paths.len();
+            let first_record = envelopes.len();
             truncations += replay_segment(path, active, stream, partition, &mut envelopes)?;
             rebuild_index(path, &envelopes, stream, partition)?;
+            let subjects = envelopes[first_record..]
+                .iter()
+                .map(|envelope| (envelope.subject.clone(), envelope.offset))
+                .collect::<Vec<_>>();
+            if active {
+                active_subjects = subjects;
+            } else {
+                let mut segment = SubjectSegment::new(path.clone(), subjects);
+                subject_index_cache_bytes += segment.rebuild(
+                    MAX_PARTITION_INDEX_CACHE_BYTES.saturating_sub(subject_index_cache_bytes),
+                )?;
+                sealed_subject_segments.push(segment);
+            }
         }
         envelopes.sort_by_key(|envelope| envelope.offset);
         for (expected, envelope) in envelopes.iter().enumerate() {
@@ -79,6 +99,9 @@ impl PartitionLog {
                 segment_bytes,
                 next_offset,
                 record_checksums,
+                sealed_subject_segments,
+                active_subjects,
+                subject_index_cache_bytes,
             },
             envelopes,
             truncations,
@@ -118,6 +141,8 @@ impl PartitionLog {
         self.next_offset += 1;
         self.record_checksums
             .insert(envelope.offset, envelope_checksum(&envelope)?);
+        self.active_subjects
+            .push((envelope.subject.clone(), envelope.offset));
         if envelope.offset % INDEX_STRIDE == 0 {
             append_index(
                 &segment_path(&self.dir, self.segment_id),
@@ -142,6 +167,10 @@ impl PartitionLog {
             if index.exists() {
                 std::fs::remove_file(index)?;
             }
+            let subject_index = path.with_extension("sidx");
+            if subject_index.exists() {
+                std::fs::remove_file(subject_index)?;
+            }
         }
         self.segment_id = 1;
         let path = segment_path(&self.dir, self.segment_id);
@@ -149,6 +178,9 @@ impl PartitionLog {
         self.active_bytes = SEGMENT_HEADER_LEN;
         self.next_offset = 0;
         self.record_checksums.clear();
+        self.sealed_subject_segments.clear();
+        self.active_subjects.clear();
+        self.subject_index_cache_bytes = 0;
         for record in records {
             self.append_committed(record.clone())?;
         }
@@ -157,11 +189,34 @@ impl PartitionLog {
 
     fn rotate(&mut self) -> Result<()> {
         self.flush()?;
+        let mut sealed = SubjectSegment::new(
+            segment_path(&self.dir, self.segment_id),
+            std::mem::take(&mut self.active_subjects),
+        );
+        self.subject_index_cache_bytes += sealed.rebuild(
+            MAX_PARTITION_INDEX_CACHE_BYTES.saturating_sub(self.subject_index_cache_bytes),
+        )?;
+        self.sealed_subject_segments.push(sealed);
         self.segment_id += 1;
         let path = segment_path(&self.dir, self.segment_id);
         self.file = create_segment(&path)?;
         self.active_bytes = SEGMENT_HEADER_LEN;
         Ok(())
+    }
+
+    pub(super) fn matching_offsets(&self, filter: &str) -> Result<SubjectIndexQuery> {
+        let mut offsets = BTreeSet::new();
+        let mut used_index = false;
+        for segment in &self.sealed_subject_segments {
+            let query = segment.matching_offsets(filter)?;
+            offsets.extend(query.offsets);
+            used_index |= query.used_index;
+        }
+        offsets.extend(active_matching_offsets(&self.active_subjects, filter).offsets);
+        Ok(SubjectIndexQuery {
+            offsets: offsets.into_iter().collect(),
+            used_index,
+        })
     }
 }
 

@@ -44,6 +44,12 @@ fn request<'a>(
     }
 }
 
+fn request_for_subject<'a>(stream: &'a StreamDefinition, subject: &'a str) -> AppendRequest<'a> {
+    let mut request = request(stream, None, &[]);
+    request.subject = subject;
+    request
+}
+
 #[test]
 fn keyed_partition_is_stable_during_epoch() {
     let stream = definition(11);
@@ -168,4 +174,107 @@ fn rewriting_a_partition_removes_an_uncommitted_suffix() {
     drop(logs);
     let (_, replay) = PartitionLogSet::open(dir.path(), &catalog, 4096).unwrap();
     assert_eq!(replay, vec![first]);
+}
+
+#[test]
+fn sealed_subject_index_matches_ordered_full_scan_results() {
+    let dir = TempDir::new().unwrap();
+    let catalog = catalog(1);
+    let stream = &catalog.definitions()[0];
+    let (mut logs, _) = PartitionLogSet::open(dir.path(), &catalog, 1).unwrap();
+    let subjects = [
+        "orders.created",
+        "orders.eu.created",
+        "orders.updated",
+        "orders.eu.deleted",
+    ];
+    for subject in subjects {
+        logs.append(request_for_subject(stream, subject)).unwrap();
+    }
+    for filter in ["orders.created", "orders.*", "orders.>"] {
+        let query = logs
+            .matching_offsets("orders", PartitionId(0), filter)
+            .unwrap();
+        let expected = subjects
+            .iter()
+            .enumerate()
+            .filter(|(_, concrete)| protocol::subject::matches(filter, concrete))
+            .map(|(offset, _)| offset as u64)
+            .collect::<Vec<_>>();
+        assert_eq!(query.offsets, expected);
+        if filter == "orders.created" {
+            assert!(query.used_index);
+        }
+    }
+}
+
+#[test]
+fn missing_and_corrupt_subject_indexes_fall_back_and_rebuild() {
+    let dir = TempDir::new().unwrap();
+    let catalog = catalog(1);
+    let stream = &catalog.definitions()[0];
+    let (mut logs, _) = PartitionLogSet::open(dir.path(), &catalog, 1).unwrap();
+    logs.append(request_for_subject(stream, "orders.created"))
+        .unwrap();
+    logs.append(request_for_subject(stream, "orders.updated"))
+        .unwrap();
+    let sealed = dir
+        .path()
+        .join("streams/orders/partition-00000/00000000000000000001.sidx");
+    drop(logs);
+
+    std::fs::remove_file(&sealed).unwrap();
+    let (logs, _) = PartitionLogSet::open(dir.path(), &catalog, 1).unwrap();
+    let missing = logs
+        .matching_offsets("orders", PartitionId(0), "orders.created")
+        .unwrap();
+    assert_eq!(missing.offsets, vec![0]);
+    assert!(missing.used_index);
+    drop(logs);
+
+    std::fs::write(&sealed, b"corrupt index").unwrap();
+    let (logs, _) = PartitionLogSet::open(dir.path(), &catalog, 1).unwrap();
+    let corrupt = logs
+        .matching_offsets("orders", PartitionId(0), "orders.created")
+        .unwrap();
+    assert_eq!(corrupt.offsets, vec![0]);
+    assert!(corrupt.used_index);
+}
+
+#[test]
+#[ignore = "manual sealed-subject-index microbenchmark"]
+fn benchmark_sealed_subject_index_exact_star_and_tail_filters() {
+    let dir = TempDir::new().unwrap();
+    let catalog = catalog(1);
+    let stream = &catalog.definitions()[0];
+    let (mut logs, _) = PartitionLogSet::open(dir.path(), &catalog, 512 * 1024).unwrap();
+    let subjects = (0..10_000)
+        .map(|id| format!("orders.{}.event", id % 1_000))
+        .collect::<Vec<_>>();
+    for subject in &subjects {
+        logs.append(request_for_subject(stream, subject)).unwrap();
+    }
+    for filter in ["orders.42.event", "orders.*.event", "orders.>"] {
+        let started = std::time::Instant::now();
+        for _ in 0..100 {
+            std::hint::black_box(
+                logs.matching_offsets("orders", PartitionId(0), filter)
+                    .unwrap(),
+            );
+        }
+        let indexed = started.elapsed();
+        let started = std::time::Instant::now();
+        for _ in 0..100 {
+            std::hint::black_box(
+                subjects
+                    .iter()
+                    .filter(|subject| protocol::subject::matches(filter, subject))
+                    .count(),
+            );
+        }
+        eprintln!(
+            "filter={filter} index={indexed:?} scan={:?}",
+            started.elapsed()
+        );
+    }
 }

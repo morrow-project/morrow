@@ -7,6 +7,7 @@ use std::{collections::HashMap, path::Path};
 mod codec;
 mod log;
 mod set;
+mod subject_index;
 
 pub use self::set::PartitionLogSet;
 
@@ -59,6 +60,12 @@ pub struct PartitionPosition {
     pub offset: u64,
     pub partitioning_epoch: u64,
     pub leader_epoch: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SubjectIndexQuery {
+    pub(crate) offsets: Vec<u64>,
+    pub(crate) used_index: bool,
 }
 
 pub fn select_partition(

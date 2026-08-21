@@ -82,6 +82,9 @@ impl Broker {
                 cursors: cursors.clone(),
             })?;
             inner.wal.flush_due()?;
+            inner
+                .consumer_interest_index
+                .insert(&record.filter_subject, consumer_id.clone());
             inner.consumers.insert(
                 consumer_id,
                 Consumer {
@@ -123,7 +126,11 @@ impl Broker {
             let mut inner = self.inner.lock().await;
             inner.wal.append_consumer_delete(&consumer_id)?;
             inner.wal.flush_due()?;
-            inner.consumers.remove(&consumer_id);
+            if let Some(consumer) = inner.consumers.remove(&consumer_id) {
+                inner
+                    .consumer_interest_index
+                    .remove(&consumer.record.filter_subject, &consumer_id);
+            }
         }
         self.send_to(connection_id, protocol::consumer_ok("DELETE", &name))
             .await

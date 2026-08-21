@@ -150,6 +150,12 @@ impl Inner {
         catalog: &crate::stream::StreamCatalog,
     ) -> &mut Consumer {
         let consumer_id = record.consumer_id.clone();
+        if let Some(existing) = self.consumers.get(&consumer_id) {
+            self.consumer_interest_index
+                .remove(&existing.record.filter_subject, &consumer_id);
+        }
+        self.consumer_interest_index
+            .insert(&record.filter_subject, consumer_id.clone());
         let initial_cursors = crate::consumer_cursor::ConsumerCursorSet::new(
             &record.filter_subject,
             record.start_position,
@@ -182,10 +188,12 @@ impl Inner {
         payload: &[u8],
     ) -> Vec<Delivery> {
         let matched = self
-            .transient_subscriptions
-            .iter()
-            .filter(|(_, subscription)| subject::matches(&subscription.subject, subject_name))
-            .filter_map(|((connection_id, _), subscription)| {
+            .transient_interest_index
+            .matching(subject_name)
+            .into_iter()
+            .filter_map(|key| {
+                let subscription = self.transient_subscriptions.get(&key)?;
+                let (connection_id, _) = &key;
                 let client = self.clients.get(connection_id)?;
                 let header_refs = headers
                     .iter()

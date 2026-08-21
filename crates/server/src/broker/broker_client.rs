@@ -244,8 +244,18 @@ impl Broker {
                     queue.is_none(),
                     "transient subscriptions do not support queue groups"
                 );
+                let key = (connection_id, sid.clone());
+                if let Some(existing) = inner.transient_subscriptions.get(&key) {
+                    let existing_subject = existing.subject.clone();
+                    inner
+                        .transient_interest_index
+                        .remove(&existing_subject, &key);
+                }
+                inner
+                    .transient_interest_index
+                    .insert(&sub_subject, key.clone());
                 inner.transient_subscriptions.insert(
-                    (connection_id, sid.clone()),
+                    key,
                     TransientSubscription {
                         subject: sub_subject,
                         sid,
@@ -391,9 +401,10 @@ impl Broker {
             if let Some(max_messages) = max_messages {
                 subscription.remaining_deliveries = Some(max_messages);
             } else {
-                inner
-                    .transient_subscriptions
-                    .remove(&(connection_id, sid.to_string()));
+                let key = (connection_id, sid.to_string());
+                let subject = subscription.subject.clone();
+                inner.transient_subscriptions.remove(&key);
+                inner.transient_interest_index.remove(&subject, &key);
             }
         }
         for consumer in inner.consumers.values_mut() {

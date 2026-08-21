@@ -1,4 +1,9 @@
-use crate::{error::Result, stream::StreamCatalog, wal::PublishRecord};
+use crate::{
+    error::Result,
+    partition_log::PartitionLogSet,
+    stream::{PartitionId, StreamCatalog},
+    wal::PublishRecord,
+};
 use protocol::{StartPosition, subject};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -78,6 +83,46 @@ impl ConsumerCursorSet {
             })
             .min_by_key(|(_, record)| record_position(record))
             .map(|(seq, _)| *seq)
+    }
+
+    pub fn next_indexed_candidate(
+        &mut self,
+        filter_subject: &str,
+        messages: &HashMap<u64, PublishRecord>,
+        partition_sequences: &HashMap<(String, u32, u64), u64>,
+        logs: &PartitionLogSet,
+        leased: &HashSet<u64>,
+    ) -> Option<u64> {
+        self.observe_retention(messages);
+        self.partitions
+            .values()
+            .flat_map(|cursor| {
+                logs.matching_offsets(
+                    &cursor.stream,
+                    PartitionId(cursor.partition),
+                    filter_subject,
+                )
+                .ok()
+                .into_iter()
+                .flat_map(|query| query.offsets)
+                .filter(move |offset| {
+                    *offset >= cursor.committed_offset
+                        && !cursor.acknowledged_offsets.contains(offset)
+                })
+                .filter_map(|offset| {
+                    partition_sequences
+                        .get(&(cursor.stream.clone(), cursor.partition, offset))
+                        .copied()
+                })
+            })
+            .filter(|seq| !leased.contains(seq))
+            .filter_map(|seq| {
+                messages
+                    .get(&seq)
+                    .map(|record| (seq, record_position(record)))
+            })
+            .min_by_key(|(_, position)| *position)
+            .map(|(seq, _)| seq)
     }
 
     pub fn mark_delivered(&mut self, record: &PublishRecord) {

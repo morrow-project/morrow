@@ -3,7 +3,19 @@ use super::*;
 impl Inner {
     pub(super) fn prepare_durable_deliveries(&mut self, now: u64) -> Result<Vec<Delivery>> {
         let mut deliveries = Vec::new();
-        let consumer_ids: Vec<_> = self.consumers.keys().cloned().collect();
+        let mut consumer_ids = BTreeSet::new();
+        let mut subjects = HashSet::new();
+        for message in self.messages.values() {
+            if subjects.insert(message.subject.as_str()) {
+                consumer_ids.extend(self.consumer_interest_index.matching(&message.subject));
+            }
+        }
+        consumer_ids.extend(
+            self.consumers
+                .iter()
+                .filter(|(_, consumer)| !consumer.pending.is_empty())
+                .map(|(consumer_id, _)| consumer_id.clone()),
+        );
         for consumer_id in consumer_ids {
             loop {
                 let Some((seq, connection_id, sid, attempt, deadline_ms)) =
@@ -78,16 +90,30 @@ impl Inner {
             return None;
         }
         let leased = consumer.in_flight.keys().copied().collect::<HashSet<_>>();
-        let seq = consumer
-            .cursors
-            .next_candidate(&consumer.record.filter_subject, &self.messages, &leased)
-            .or_else(|| {
-                consumer
-                    .pending
-                    .iter()
-                    .find(|seq| !leased.contains(seq))
-                    .copied()
-            })?;
+        let seq = if consumer.record.filter_subject.contains('*')
+            || consumer.record.filter_subject.contains('>')
+        {
+            consumer.cursors.next_candidate(
+                &consumer.record.filter_subject,
+                &self.messages,
+                &leased,
+            )
+        } else {
+            consumer.cursors.next_indexed_candidate(
+                &consumer.record.filter_subject,
+                &self.messages,
+                &self.partition_sequences,
+                &self.partition_logs,
+                &leased,
+            )
+        }
+        .or_else(|| {
+            consumer
+                .pending
+                .iter()
+                .find(|seq| !leased.contains(seq))
+                .copied()
+        })?;
         let payload_len = self.messages.get(&seq)?.payload.len();
         let (connection_id, member) = consumer
             .members
@@ -162,6 +188,16 @@ impl Inner {
             }
         }
         self.messages = state.messages;
+        self.partition_sequences = self
+            .messages
+            .values()
+            .filter_map(|record| {
+                Some((
+                    (record.stream.clone()?, record.partition?, record.offset?),
+                    record.seq,
+                ))
+            })
+            .collect();
         let mut next = HashMap::new();
         for (consumer_id, durable) in state.consumers {
             let existing = self.consumers.remove(&consumer_id);
@@ -201,6 +237,11 @@ impl Inner {
             );
         }
         self.consumers = next;
+        self.consumer_interest_index = subject::SubjectTrie::default();
+        for (consumer_id, consumer) in &self.consumers {
+            self.consumer_interest_index
+                .insert(&consumer.record.filter_subject, consumer_id.clone());
+        }
         Ok(())
     }
 
@@ -233,7 +274,13 @@ impl Inner {
             .map(|(seq, _)| *seq)
             .collect();
         for seq in removable {
-            self.messages.remove(&seq);
+            if let Some(record) = self.messages.remove(&seq)
+                && let (Some(stream), Some(partition), Some(offset)) =
+                    (record.stream, record.partition, record.offset)
+            {
+                self.partition_sequences
+                    .remove(&(stream, partition, offset));
+            }
         }
     }
 
@@ -245,7 +292,10 @@ impl Inner {
             .and_then(|subscription| decrement_remaining(&mut subscription.remaining_deliveries))
             .unwrap_or(false);
         if should_remove {
-            self.transient_subscriptions.remove(&key);
+            if let Some(subscription) = self.transient_subscriptions.remove(&key) {
+                self.transient_interest_index
+                    .remove(&subscription.subject, &key);
+            }
         }
     }
 

@@ -96,7 +96,7 @@ impl Broker {
             .as_ref()
             .map(crate::tls::load_acceptor)
             .transpose()?;
-        let consumers = replay
+        let consumers: HashMap<_, _> = replay
             .consumers
             .into_iter()
             .map(|(id, consumer)| {
@@ -104,6 +104,20 @@ impl Broker {
                     id,
                     Consumer::from_replay(consumer, &config.streams, &replay.messages),
                 )
+            })
+            .collect();
+        let mut consumer_interest_index = subject::SubjectTrie::default();
+        for (consumer_id, consumer) in &consumers {
+            consumer_interest_index.insert(&consumer.record.filter_subject, consumer_id.clone());
+        }
+        let partition_sequences = replay
+            .messages
+            .values()
+            .filter_map(|record| {
+                Some((
+                    (record.stream.clone()?, record.partition?, record.offset?),
+                    record.seq,
+                ))
             })
             .collect();
         let cluster = {
@@ -124,7 +138,10 @@ impl Broker {
                 clients: HashMap::new(),
                 consumers,
                 transient_subscriptions: HashMap::new(),
+                transient_interest_index: subject::SubjectTrie::default(),
+                consumer_interest_index,
                 messages: replay.messages,
+                partition_sequences,
             })),
             next_connection_id: Arc::new(AtomicU64::new(1)),
             config,

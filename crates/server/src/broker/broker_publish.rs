@@ -174,6 +174,13 @@ impl Broker {
             let reference = PartitionAppendRecord::from(&envelope);
             inner.wal.append_partition_append(&reference)?;
             let record = PublishRecord::from(envelope);
+            if let (Some(stream), Some(partition), Some(offset)) =
+                (record.stream.clone(), record.partition, record.offset)
+            {
+                inner
+                    .partition_sequences
+                    .insert((stream, partition, offset), record.seq);
+            }
             inner.messages.insert(record.seq, record.clone());
             record
         };
@@ -444,9 +451,16 @@ impl Broker {
     pub(super) async fn remove_client(&self, connection_id: u64) -> Result<()> {
         let mut inner = self.inner.lock().await;
         inner.clients.remove(&connection_id);
-        inner
+        let removed = inner
             .transient_subscriptions
-            .retain(|(client_id, _), _| *client_id != connection_id);
+            .iter()
+            .filter(|((client_id, _), _)| *client_id == connection_id)
+            .map(|(key, subscription)| (key.clone(), subscription.subject.clone()))
+            .collect::<Vec<_>>();
+        for (key, subject) in removed {
+            inner.transient_subscriptions.remove(&key);
+            inner.transient_interest_index.remove(&subject, &key);
+        }
         for consumer in inner.consumers.values_mut() {
             consumer.members.remove(&connection_id);
         }
