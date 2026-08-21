@@ -5,8 +5,8 @@ core replicated primitive: durable clients declare an identity before
 subscribing, delivered durable messages require explicit acks, and unacked
 messages are redelivered after their ack timeout. Non-durable clients can also
 create live transient subscriptions. By default the broker runs as a single
-node; clustered mode uses OpenRaft for replicated durability and leader
-election.
+node; clustered mode uses OpenRaft for metadata consensus and leader election,
+with message data replicated directly between partition replicas.
 
 ## Configuration
 
@@ -60,8 +60,10 @@ compacted `00000000000000000001.wal` segment, and renames the old file to
 `broker.wal.legacy`.
 
 When `cluster` is `null` or omitted, the broker uses the local WAL directly.
-When `cluster.enabled` is true, Raft quorum commit becomes the durability
-boundary for durable consumers, publishes, delivery attempts, and ACKs:
+When `cluster.enabled` is true, OpenRaft commits definitions, assignments,
+consumer metadata, epochs, and partition high-watermarks. Message envelopes use
+the separate partition replication path; delivery attempts and ACKs remain on
+the broker WAL rather than entering metadata consensus:
 
 ```json
 {
@@ -100,7 +102,7 @@ If `route_listen` is set, the node also starts an internal route listener.
 connections after authenticating with `cluster.auth_token`, and dial until they
 form a full mesh. Route traffic is live-only:
 transient subscriptions and `_INBOX.*` request/reply traffic can cross nodes,
-while durable storage and ACK/redelivery state stay Raft-owned. Without
+while durable stream data stays on partition replicas. Without
 `route_listen`, clients can still connect to any Raft node through the legacy
 follower proxy path.
 
@@ -108,7 +110,7 @@ When `http_listen` is set, `admin_token` is required and the broker exposes JSON
 admin endpoints protected by `Authorization: Bearer <admin_token>`. Bind this
 listener to loopback or a trusted private interface.
 `GET /cluster` reports cluster size, status, this node's role, leader ID, static
-Raft peers, and route topology. `GET /connections` reports live client
+Raft peers, partition leaders/high-watermarks, and route topology. `GET /connections` reports live client
 connections. `GET /subscriptions` reports durable consumers and transient
 subscriptions. `GET /wal` reports active segment metadata, retained state
 counts, replay/checkpoint/fsync timings, and rotation/checkpoint/truncation
@@ -296,6 +298,11 @@ fenced ACK identity. `ACK`, delayed `NACK`, and `EXTEND` operate on that identit
 Version 2 durable `SUB` remains available as a push facade but delivers only
 against explicit `CREDIT <sid> <messages> <bytes>` grants. Clients that omit
 `protocol_version` remain on version 1 compatibility behavior.
+
+Clustered message data is replicated directly between partition replicas; the
+OpenRaft metadata log carries only definitions, assignments, epochs, and committed
+high-watermarks. The selected strategy, failure rules, and benchmark record are
+documented in [Partition replication strategy](docs/partition-replication-strategy.md).
 
 Durable subscriptions default to `@latest`. A caller can select retained
 history explicitly, for example `SUB orders.* sid1 @earliest`,

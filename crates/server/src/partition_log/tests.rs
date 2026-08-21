@@ -151,3 +151,21 @@ fn committed_envelopes_are_immutable() {
     let error = logs.append_committed(changed).unwrap_err();
     assert!(error.to_string().contains("immutable committed record"));
 }
+
+#[test]
+fn rewriting_a_partition_removes_an_uncommitted_suffix() {
+    let dir = TempDir::new().unwrap();
+    let catalog = catalog(1);
+    let stream = &catalog.definitions()[0];
+    let (mut logs, _) = PartitionLogSet::open(dir.path(), &catalog, 4096).unwrap();
+    let first = logs.append(request(stream, None, &[])).unwrap();
+    let mut second_request = request(stream, None, &[]);
+    second_request.payload = b"uncommitted";
+    logs.append(second_request).unwrap();
+
+    logs.rewrite_partition("orders", PartitionId(0), std::slice::from_ref(&first))
+        .unwrap();
+    drop(logs);
+    let (_, replay) = PartitionLogSet::open(dir.path(), &catalog, 4096).unwrap();
+    assert_eq!(replay, vec![first]);
+}

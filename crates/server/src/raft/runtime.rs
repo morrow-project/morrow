@@ -8,6 +8,9 @@ pub struct RaftRuntime {
     auth_token: String,
     node_id: u64,
     tls_enabled: bool,
+    partition_data: SharedReplicaData,
+    configured_streams: Vec<crate::stream::StreamDefinition>,
+    security_references: BTreeSet<String>,
 }
 #[derive(Debug, Clone)]
 pub struct ClusterNode {
@@ -15,7 +18,12 @@ pub struct ClusterNode {
     pub client_addr: SocketAddr,
 }
 impl RaftRuntime {
-    pub async fn open(config: &ClusterConfig, tls_enabled: bool) -> Result<Self> {
+    pub async fn open(
+        config: &ClusterConfig,
+        tls_enabled: bool,
+        streams: &crate::stream::StreamCatalog,
+        segment_bytes: u64,
+    ) -> Result<Self> {
         std::fs::create_dir_all(&config.raft_dir)
             .with_context(|| format!("creating Raft directory {}", config.raft_dir.display()))?;
 
@@ -44,6 +52,11 @@ impl RaftRuntime {
             config.raft_dir.join(SNAPSHOT_FILE),
             raft_nodes.clone(),
         )?;
+        let partition_data = Arc::new(std::sync::Mutex::new(ReplicaDataStore::open(
+            &config.raft_dir.join("partition-data"),
+            streams,
+            segment_bytes,
+        )?));
         let network = NetworkFactory {
             nodes: nodes.clone(),
             auth_token: config.auth_token.clone(),
@@ -89,14 +102,21 @@ impl RaftRuntime {
             auth_token: config.auth_token.clone(),
             node_id: config.node_id,
             tls_enabled,
+            partition_data,
+            configured_streams: streams.definitions().to_vec(),
+            security_references: ["cluster-auth-token".to_string()].into_iter().collect(),
         })
     }
 
     pub fn spawn_listener(&self, listen: SocketAddr) {
         let raft = self.raft.clone();
+        let state_machine = self.state_machine.clone();
         let auth_token = self.auth_token.clone();
+        let partition_data = self.partition_data.clone();
         tokio::spawn(async move {
-            if let Err(err) = serve_raft(raft, listen, auth_token).await {
+            if let Err(err) =
+                serve_raft(raft, state_machine, listen, auth_token, partition_data).await
+            {
                 error!(error = ?err, "raft transport error");
             }
         });
@@ -112,7 +132,248 @@ impl RaftRuntime {
     }
 
     pub fn durable_state(&self) -> DurableState {
-        self.state_machine.durable_state()
+        let mut state = self.state_machine.durable_state();
+        for envelope in self
+            .partition_data
+            .lock()
+            .unwrap()
+            .committed_records(&state)
+        {
+            state.messages.insert(
+                envelope.legacy_seq,
+                crate::wal::PublishRecord::from(envelope),
+            );
+        }
+        state
+    }
+
+    pub async fn replicate_partition(
+        &self,
+        mut envelope: crate::partition_log::MessageEnvelope,
+        fsync: bool,
+    ) -> Result<crate::partition_log::MessageEnvelope> {
+        crate::broker_ensure!(
+            self.raft.current_leader().await == Some(self.node_id),
+            "not partition leader"
+        );
+        self.ensure_metadata_ready().await?;
+        let metadata = self.state_machine.durable_state();
+        crate::broker_ensure!(
+            self.partition_data
+                .lock()
+                .unwrap()
+                .has_committed_prefix(&metadata),
+            "no safe replica available"
+        );
+        let key = partition_key(envelope.stream.as_str(), envelope.partition.0);
+        let assignment = metadata
+            .partition_assignments
+            .get(&key)
+            .cloned()
+            .ok_or_else(|| BrokerError::msg("partition has no metadata assignment"))?;
+        crate::broker_ensure!(
+            assignment.leader_id == self.node_id,
+            "partition leader assignment is not committed"
+        );
+        let previous = metadata.partition_commits.get(&key);
+        envelope.offset = previous.map_or(0, |commit| commit.high_watermark.saturating_add(1));
+        let leader_epoch = assignment.leader_epoch;
+        envelope.leader_epoch = leader_epoch;
+        let request = DataAppendRequest {
+            leader_id: self.node_id,
+            leader_epoch,
+            fsync,
+            committed_high_watermark: previous.map(|commit| commit.high_watermark),
+            envelope: envelope.clone(),
+        };
+        let quorum = self.nodes.len() / 2 + 1;
+        let mut replicated = 1usize;
+        let mut flushed = usize::from(fsync);
+        let mut joins = tokio::task::JoinSet::new();
+        let committed_records = self.partition_data.lock().unwrap().catch_up_records(
+            &metadata,
+            envelope.stream.as_str(),
+            envelope.partition,
+            None,
+        );
+        for (node_id, node) in &self.nodes {
+            if *node_id == self.node_id {
+                continue;
+            }
+            let addr = node.raft_addr;
+            let auth_token = self.auth_token.clone();
+            let request = request.clone();
+            let committed_records = committed_records.clone();
+            joins.spawn(async move {
+                let progress = send_data_progress(
+                    addr,
+                    auth_token.clone(),
+                    DataProgressRequest {
+                        stream: request.envelope.stream.as_str().to_string(),
+                        partition: request.envelope.partition,
+                    },
+                )
+                .await?;
+                for record in committed_records
+                    .into_iter()
+                    .filter(|record| progress.is_none_or(|offset| record.offset > offset))
+                {
+                    send_data_append(
+                        addr,
+                        auth_token.clone(),
+                        DataAppendRequest {
+                            leader_id: request.leader_id,
+                            leader_epoch: request.leader_epoch,
+                            fsync: request.fsync,
+                            committed_high_watermark: request.committed_high_watermark,
+                            envelope: record,
+                        },
+                    )
+                    .await?;
+                }
+                send_data_append(addr, auth_token, request).await
+            });
+        }
+        while let Some(response) = joins.join_next().await {
+            if let Ok(Ok(response)) = response {
+                if response.match_offset == envelope.offset {
+                    replicated += 1;
+                }
+                if response.flushed_offset == Some(envelope.offset) {
+                    flushed += 1;
+                }
+            }
+        }
+        crate::broker_ensure!(replicated >= quorum, "partition quorum unavailable");
+        if fsync {
+            crate::broker_ensure!(flushed >= quorum, "partition fsync quorum unavailable");
+        }
+        self.partition_data.lock().unwrap().append(&request)?;
+        let response = self
+            .client_write(BrokerCommand::PartitionCommit {
+                stream: envelope.stream.as_str().to_string(),
+                partition: envelope.partition.0,
+                offset: envelope.offset,
+                checksum: crate::partition_log::committed_envelope_checksum(&envelope)?,
+                leader_id: self.node_id,
+                leader_epoch,
+            })
+            .await?;
+        crate::broker_ensure!(
+            matches!(
+                response,
+                BrokerResponse::PartitionCommit {
+                    high_watermark,
+                    leader_epoch: committed_epoch,
+                } if high_watermark == envelope.offset && committed_epoch == leader_epoch
+            ),
+            "partition metadata commit rejected"
+        );
+        Ok(envelope)
+    }
+
+    async fn ensure_metadata_bootstrap(&self) -> Result<()> {
+        let metadata = self.state_machine.durable_state();
+        if !metadata.stream_definitions.is_empty() {
+            return self.validate_metadata_configuration(&metadata);
+        }
+        let replicas = self.nodes.keys().copied().collect::<BTreeSet<_>>();
+        let mut assignments = HashMap::new();
+        for stream in &self.configured_streams {
+            for partition in 0..stream.partitions {
+                assignments.insert(
+                    partition_key(stream.name.as_str(), partition),
+                    PartitionAssignmentMetadata {
+                        replicas: replicas.clone(),
+                        leader_id: self.node_id,
+                        leader_epoch: 1,
+                    },
+                );
+            }
+        }
+        let response = self
+            .client_write(BrokerCommand::MetadataBootstrap {
+                streams: self.configured_streams.clone(),
+                assignments,
+                security_references: self.security_references.clone(),
+                feature_gates: [
+                    "pull-consumers-v2".to_string(),
+                    "controller-directed-replication-v1".to_string(),
+                ]
+                .into_iter()
+                .collect(),
+            })
+            .await?;
+        crate::broker_ensure!(
+            matches!(
+                response,
+                BrokerResponse::MetadataBootstrap | BrokerResponse::Noop
+            ),
+            "metadata bootstrap rejected"
+        );
+        self.validate_metadata_configuration(&self.state_machine.durable_state())
+    }
+
+    pub async fn ensure_metadata_ready(&self) -> Result<()> {
+        crate::broker_ensure!(
+            self.raft.current_leader().await == Some(self.node_id),
+            "not metadata leader"
+        );
+        self.ensure_metadata_bootstrap().await?;
+        let assignments = self
+            .state_machine
+            .durable_state()
+            .partition_assignments
+            .into_iter()
+            .filter(|(_, assignment)| assignment.leader_id != self.node_id)
+            .collect::<Vec<_>>();
+        for (key, assignment) in assignments {
+            let (stream, partition) = key
+                .rsplit_once(':')
+                .ok_or_else(|| BrokerError::msg("invalid partition assignment key"))?;
+            let partition = partition
+                .parse::<u32>()
+                .map_err(|_| BrokerError::msg("invalid partition assignment number"))?;
+            let leader_epoch = assignment.leader_epoch.saturating_add(1);
+            let response = self
+                .client_write(BrokerCommand::PartitionLeaderUpdate {
+                    stream: stream.to_string(),
+                    partition,
+                    leader_id: self.node_id,
+                    leader_epoch,
+                })
+                .await?;
+            crate::broker_ensure!(
+                matches!(
+                    response,
+                    BrokerResponse::PartitionLeaderUpdate {
+                        leader_id,
+                        leader_epoch: committed_epoch,
+                    } if leader_id == self.node_id && committed_epoch == leader_epoch
+                ),
+                "partition leader epoch update rejected"
+            );
+        }
+        Ok(())
+    }
+
+    fn validate_metadata_configuration(&self, metadata: &DurableState) -> Result<()> {
+        crate::broker_ensure!(
+            metadata.stream_definitions.len() == self.configured_streams.len()
+                && self.configured_streams.iter().all(|stream| {
+                    metadata.stream_definitions.get(stream.name.as_str()) == Some(stream)
+                }),
+            "local stream configuration differs from metadata consensus"
+        );
+        let replicas = self.nodes.keys().copied().collect::<BTreeSet<_>>();
+        crate::broker_ensure!(
+            metadata
+                .partition_assignments
+                .values()
+                .all(|assignment| assignment.replicas == replicas),
+            "local cluster membership differs from partition assignments"
+        );
+        Ok(())
     }
 
     pub async fn is_leader(&self) -> bool {

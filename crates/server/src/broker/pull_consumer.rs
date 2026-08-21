@@ -206,11 +206,6 @@ impl Broker {
         max_messages: usize,
         max_bytes: usize,
     ) -> Result<PullBatch> {
-        if let Some(cluster) = self.cluster_runtime().await {
-            return self
-                .fetch_pull_clustered(cluster, consumer_id, max_messages, max_bytes)
-                .await;
-        }
         let mut inner = self.inner.lock().await;
         inner.prepare_pull_batch(
             consumer_id,
@@ -218,57 +213,6 @@ impl Broker {
             max_bytes,
             self.hooks.clock.now_ms(),
         )
-    }
-
-    async fn fetch_pull_clustered(
-        &self,
-        cluster: ClusterRuntime,
-        consumer_id: &str,
-        max_messages: usize,
-        max_bytes: usize,
-    ) -> Result<PullBatch> {
-        let mut deliveries = Vec::new();
-        let mut bytes = 0usize;
-        while deliveries.len() < max_messages {
-            let candidate = {
-                let mut inner = self.inner.lock().await;
-                inner.next_pull_candidate(consumer_id, self.hooks.clock.now_ms())
-            };
-            let Some((seq, attempt, deadline_ms)) = candidate else {
-                break;
-            };
-            let message = {
-                let inner = self.inner.lock().await;
-                inner.messages.get(&seq).cloned()
-            };
-            let Some(message) = message else {
-                break;
-            };
-            if bytes.saturating_add(message.payload.len()) > max_bytes {
-                break;
-            }
-            let response = self
-                .cluster_write(
-                    &cluster,
-                    BrokerCommand::DeliveryAttempt {
-                        seq,
-                        consumer_id: consumer_id.to_string(),
-                        deadline_ms,
-                        attempt,
-                    },
-                )
-                .await?;
-            self.sync_from_cluster(&cluster).await?;
-            let BrokerResponse::DeliveryAttempt {
-                record: Some(lease),
-            } = response
-            else {
-                break;
-            };
-            bytes += message.payload.len();
-            deliveries.push(PullDelivery { message, lease });
-        }
-        Ok(PullBatch { deliveries, bytes })
     }
 
     pub(super) async fn control_pull_delivery(
@@ -329,25 +273,6 @@ impl Broker {
         delivery_id: u64,
         deadline_ms: u64,
     ) -> Result<()> {
-        if let Some(cluster) = self.cluster_runtime().await {
-            let response = self
-                .cluster_write(
-                    &cluster,
-                    BrokerCommand::DeliveryLeaseUpdate {
-                        seq,
-                        consumer_id: consumer_id.to_string(),
-                        delivery_id,
-                        deadline_ms,
-                    },
-                )
-                .await?;
-            self.sync_from_cluster(&cluster).await?;
-            let BrokerResponse::DeliveryLeaseUpdate { accepted } = response else {
-                crate::broker_bail!("unexpected cluster lease response")
-            };
-            crate::broker_ensure!(accepted, "stale or unknown delivery identity");
-            return Ok(());
-        }
         let mut inner = self.inner.lock().await;
         let lease = inner
             .consumers

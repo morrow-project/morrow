@@ -109,95 +109,6 @@ impl Inner {
         ))
     }
 
-    pub(super) fn next_cluster_delivery(&mut self, now: u64) -> Option<ClusterDeliveryCandidate> {
-        let consumer_ids = self.consumers.keys().cloned().collect::<Vec<_>>();
-        for consumer_id in consumer_ids {
-            let consumer = self.consumers.get_mut(&consumer_id)?;
-            if consumer.members.is_empty() {
-                continue;
-            }
-            let expired = consumer
-                .in_flight
-                .iter()
-                .filter(|(_, in_flight)| in_flight.deadline_ms <= now)
-                .map(|(seq, _)| *seq)
-                .min();
-            let seq = if let Some(expired) = expired {
-                expired
-            } else {
-                if consumer.in_flight.len() >= consumer.record.max_in_flight {
-                    continue;
-                }
-                let leased = consumer.in_flight.keys().copied().collect::<HashSet<_>>();
-                consumer
-                    .cursors
-                    .next_candidate(&consumer.record.filter_subject, &self.messages, &leased)
-                    .or_else(|| {
-                        consumer
-                            .pending
-                            .iter()
-                            .find(|seq| !leased.contains(seq))
-                            .copied()
-                    })?
-            };
-            let payload_len = self.messages.get(&seq)?.payload.len();
-            let (connection_id, member) = consumer
-                .members
-                .iter()
-                .filter(|(connection_id, member)| {
-                    self.clients.contains_key(connection_id)
-                        && member.credit_messages > 0
-                        && member.credit_bytes >= payload_len
-                })
-                .min_by_key(|(connection_id, _)| **connection_id)?;
-            let attempt = consumer
-                .in_flight
-                .get(&seq)
-                .map(|in_flight| in_flight.attempt.saturating_add(1))
-                .or_else(|| consumer.pending_attempts.get(&seq).copied())
-                .unwrap_or(1);
-            let deadline_ms = now.saturating_add(consumer.record.ack_timeout_ms);
-            return Some(ClusterDeliveryCandidate {
-                consumer_id,
-                seq,
-                connection_id: *connection_id,
-                sid: member.sid.clone(),
-                attempt,
-                deadline_ms,
-            });
-        }
-        None
-    }
-
-    pub(super) fn delivery_for_record(
-        &mut self,
-        record: &crate::wal::DeliveryAttemptRecord,
-        connection_id: u64,
-        sid: &str,
-    ) -> Option<Delivery> {
-        let message = self.messages.get(&record.seq)?.clone();
-        let client = self.clients.get(&connection_id)?;
-        if let Some(consumer) = self.consumers.get_mut(&record.consumer_id) {
-            consumer.delivered += 1;
-        }
-        let ack_subject =
-            protocol::ack_subject(&record.consumer_id, record.seq, record.delivery_id);
-        let frame = durable_message_frame(
-            &message,
-            sid,
-            &ack_subject,
-            record.attempt,
-            record.deadline_ms,
-            client.protocol_version,
-        );
-        let delivery = Delivery {
-            sender: client.sender.clone(),
-            frame,
-        };
-        self.consume_durable_member(&record.consumer_id, connection_id, message.payload.len());
-        Some(delivery)
-    }
-
     pub(super) fn sync_durable_state(&mut self, state: DurableState) -> Result<()> {
         let mut partition_records = state
             .messages
@@ -253,34 +164,38 @@ impl Inner {
         self.messages = state.messages;
         let mut next = HashMap::new();
         for (consumer_id, durable) in state.consumers {
-            let (members, delivered) = self
-                .consumers
-                .remove(&consumer_id)
-                .map(|consumer| (consumer.members, consumer.delivered))
+            let existing = self.consumers.remove(&consumer_id);
+            let (members, delivered) = existing
+                .as_ref()
+                .map(|consumer| (consumer.members.clone(), consumer.delivered))
                 .unwrap_or_default();
+            let cursors = existing
+                .as_ref()
+                .map(|consumer| consumer.cursors.clone())
+                .unwrap_or(durable.cursors);
+            let pending = existing
+                .as_ref()
+                .map(|consumer| consumer.pending.clone())
+                .unwrap_or_default();
+            let pending_attempts = existing
+                .as_ref()
+                .map(|consumer| consumer.pending_attempts.clone())
+                .unwrap_or_default();
+            let in_flight = existing
+                .as_ref()
+                .map(|consumer| consumer.in_flight.clone())
+                .unwrap_or_default();
+            let acked = existing.map(|consumer| consumer.acked).unwrap_or_default();
             next.insert(
                 consumer_id,
                 Consumer {
                     record: durable.record,
-                    cursors: durable.cursors,
+                    cursors,
                     members,
-                    pending: durable.pending,
-                    pending_attempts: durable.pending_attempts,
-                    in_flight: durable
-                        .in_flight
-                        .into_iter()
-                        .map(|(seq, attempt)| {
-                            (
-                                seq,
-                                InFlight {
-                                    delivery_id: attempt.delivery_id,
-                                    deadline_ms: attempt.deadline_ms,
-                                    attempt: attempt.attempt,
-                                },
-                            )
-                        })
-                        .collect(),
-                    acked: durable.acked,
+                    pending,
+                    pending_attempts,
+                    in_flight,
+                    acked,
                     delivered,
                 },
             );

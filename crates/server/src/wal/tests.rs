@@ -276,6 +276,15 @@ fn interrupted_checkpoint_tmp_is_ignored() {
     assert!(!tmp_segment_path(dir.path(), 1).exists());
 }
 
+#[test]
+fn clustered_delivery_ids_are_namespaced_by_node() {
+    let dir = TestDir::new();
+    let (mut wal, _) = open_wal(dir.path());
+    wal.namespace_delivery_ids(7);
+    let attempt = wal.append_delivery_attempt(1, "consumer", 10, 1).unwrap();
+    assert_eq!(attempt.delivery_id >> 48, 7);
+}
+
 fn open_wal(dir: &Path) -> (Wal, Replay) {
     Wal::open(dir, Duration::from_millis(1), DEFAULT_WAL_SEGMENT_BYTES).unwrap()
 }

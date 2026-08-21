@@ -5,7 +5,13 @@ impl Broker {
         let Some(cluster_config) = &self.config.cluster else {
             return Ok(());
         };
-        let runtime = RaftRuntime::open(cluster_config, self.tls_acceptor.is_some()).await?;
+        let runtime = RaftRuntime::open(
+            cluster_config,
+            self.tls_acceptor.is_some(),
+            &self.config.streams,
+            self.config.wal_segment_bytes,
+        )
+        .await?;
         runtime.spawn_listener(cluster_config.raft_listen);
         let runtime = ClusterRuntime::real(runtime);
         self.sync_from_cluster(&runtime).await?;
@@ -39,6 +45,12 @@ impl Broker {
             tokio::time::interval(Duration::from_millis(CLUSTER_LOG_SCAN_INTERVAL_MS));
         loop {
             interval.tick().await;
+            if let Some(cluster) = self.cluster_runtime().await
+                && cluster.is_leader().await
+                && let Err(err) = cluster.ensure_metadata_ready().await
+            {
+                error!(error = ?err, "cluster metadata reconciliation failed");
+            }
             let leader = self.current_leader_for_log().await;
             if leader != previous_leader {
                 self.log_cluster_event("cluster leader changed").await;
@@ -112,43 +124,5 @@ impl Broker {
         } else {
             cluster.client_write(command).await
         }
-    }
-
-    pub(super) async fn deliver_pending_clustered(&self, cluster: ClusterRuntime) -> Result<()> {
-        loop {
-            let candidate = {
-                let mut inner = self.inner.lock().await;
-                inner.next_cluster_delivery(self.hooks.clock.now_ms())
-            };
-            let Some(candidate) = candidate else {
-                break;
-            };
-            let response = self
-                .cluster_write(
-                    &cluster,
-                    BrokerCommand::DeliveryAttempt {
-                        seq: candidate.seq,
-                        consumer_id: candidate.consumer_id.clone(),
-                        deadline_ms: candidate.deadline_ms,
-                        attempt: candidate.attempt,
-                    },
-                )
-                .await?;
-            self.sync_from_cluster(&cluster).await?;
-            let crate::raft::BrokerResponse::DeliveryAttempt {
-                record: Some(record),
-            } = response
-            else {
-                continue;
-            };
-            let delivery = {
-                let mut inner = self.inner.lock().await;
-                inner.delivery_for_record(&record, candidate.connection_id, &candidate.sid)
-            };
-            if let Some(delivery) = delivery {
-                let _ = delivery.sender.send(delivery.frame).await;
-            }
-        }
-        Ok(())
     }
 }

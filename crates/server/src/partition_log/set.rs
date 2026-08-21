@@ -100,4 +100,16 @@ impl PartitionLogSet {
             .ok_or_else(|| crate::error::BrokerError::msg("unknown stream partition"))?
             .append_committed(envelope)
     }
+
+    pub(crate) fn rewrite_partition(
+        &mut self,
+        stream: &str,
+        partition: PartitionId,
+        records: &[MessageEnvelope],
+    ) -> Result<()> {
+        self.logs
+            .get_mut(&(stream.to_string(), partition))
+            .ok_or_else(|| crate::error::BrokerError::msg("unknown stream partition"))?
+            .rewrite(records)
+    }
 }

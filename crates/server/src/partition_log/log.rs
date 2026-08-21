@@ -134,6 +134,27 @@ impl PartitionLog {
         Ok(())
     }
 
+    pub(super) fn rewrite(&mut self, records: &[MessageEnvelope]) -> Result<()> {
+        self.flush()?;
+        for (_, path) in segment_paths(&self.dir)? {
+            std::fs::remove_file(&path)?;
+            let index = path.with_extension(INDEX_EXTENSION);
+            if index.exists() {
+                std::fs::remove_file(index)?;
+            }
+        }
+        self.segment_id = 1;
+        let path = segment_path(&self.dir, self.segment_id);
+        self.file = create_segment(&path)?;
+        self.active_bytes = SEGMENT_HEADER_LEN;
+        self.next_offset = 0;
+        self.record_checksums.clear();
+        for record in records {
+            self.append_committed(record.clone())?;
+        }
+        self.flush()
+    }
+
     fn rotate(&mut self) -> Result<()> {
         self.flush()?;
         self.segment_id += 1;

@@ -174,10 +174,15 @@ impl ClusterHarness {
     pub(super) async fn wait_for_leader(&self) -> u64 {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         loop {
+            let mut observed = Vec::with_capacity(self.brokers.len());
             for broker in &self.brokers {
-                if let Some(leader) = broker.cluster_leader().await {
-                    return leader;
-                }
+                observed.push(broker.cluster_leader().await);
+            }
+            if let Some(leader) = observed.first().copied().flatten()
+                && observed.iter().all(|observed| *observed == Some(leader))
+                && self.nodes.iter().any(|node| node.node_id == leader)
+            {
+                return leader;
             }
             assert!(
                 tokio::time::Instant::now() < deadline,
@@ -282,6 +287,37 @@ pub(super) async fn cluster_json(addr: SocketAddr) -> Option<serde_json::Value> 
     let response = String::from_utf8(response).ok()?;
     let (_, body) = response.split_once("\r\n\r\n")?;
     serde_json::from_str(body).ok()
+}
+
+pub(super) async fn wait_for_partition_metadata(
+    addr: SocketAddr,
+    stream: &str,
+    partition: u64,
+    high_watermark: Option<u64>,
+) -> serde_json::Value {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(value) = cluster_json(addr).await
+            && let Some(found) =
+                value["partitions"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .find(|candidate| {
+                        candidate["stream"] == stream
+                            && candidate["partition"] == partition
+                            && high_watermark
+                                .is_none_or(|expected| candidate["high_watermark"] == expected)
+                    })
+        {
+            return found.clone();
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "partition metadata did not converge"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
 }
 impl Harness {
     pub(super) async fn start() -> Self {

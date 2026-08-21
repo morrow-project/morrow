@@ -1,9 +1,41 @@
 use super::*;
+use crate::stream::{
+    PartitionFallback, PartitioningPolicy, PartitioningStrategy, RetentionPolicy, StoragePolicy,
+    StreamDefinition, StreamId,
+};
 
 fn nodes() -> BTreeMap<u64, BasicNode> {
     [(1, BasicNode::new("127.0.0.1:5221"))]
         .into_iter()
         .collect()
+}
+
+fn stream() -> StreamDefinition {
+    StreamDefinition {
+        name: StreamId::new("orders").unwrap(),
+        subjects: vec!["orders.>".into()],
+        partitions: 1,
+        partitioning: PartitioningPolicy {
+            strategy: PartitioningStrategy::Key,
+            fallback: PartitionFallback::Sticky,
+            epoch: 1,
+        },
+        storage: StoragePolicy::default(),
+        retention: RetentionPolicy::default(),
+    }
+}
+
+fn assignment() -> HashMap<String, PartitionAssignmentMetadata> {
+    [(
+        partition_key("orders", 0),
+        PartitionAssignmentMetadata {
+            replicas: [1].into_iter().collect(),
+            leader_id: 1,
+            leader_epoch: 1,
+        },
+    )]
+    .into_iter()
+    .collect()
 }
 
 #[tokio::test]
@@ -31,7 +63,148 @@ async fn raft_request_rejects_invalid_auth_token() {
 }
 
 #[test]
-fn applies_publish_attempt_and_ack() {
+fn metadata_bootstrap_and_partition_commit_contain_no_message_data() {
+    let mut state = DurableState::new(nodes());
+    assert_eq!(
+        state.apply_command(BrokerCommand::MetadataBootstrap {
+            streams: vec![stream()],
+            assignments: assignment(),
+            security_references: ["cluster-auth-token".into()].into_iter().collect(),
+            feature_gates: ["controller-directed-replication-v1".into()]
+                .into_iter()
+                .collect(),
+        }),
+        BrokerResponse::MetadataBootstrap
+    );
+    assert_eq!(
+        state.apply_command(BrokerCommand::PartitionCommit {
+            stream: "orders".into(),
+            partition: 0,
+            offset: 0,
+            checksum: 7,
+            leader_id: 1,
+            leader_epoch: 1,
+        }),
+        BrokerResponse::PartitionCommit {
+            high_watermark: 0,
+            leader_epoch: 1,
+        }
+    );
+    assert!(state.messages.is_empty());
+    let encoded = serde_json::to_vec(&state).unwrap();
+    assert!(
+        !encoded
+            .windows(b"payload-marker".len())
+            .any(|bytes| bytes == b"payload-marker")
+    );
+    assert!(encoded.len() < 4_096);
+}
+
+#[test]
+fn partition_commit_is_idempotent_but_rejects_gaps_and_stale_epochs() {
+    let mut state = DurableState::new(nodes());
+    state.apply_command(BrokerCommand::MetadataBootstrap {
+        streams: vec![stream()],
+        assignments: assignment(),
+        security_references: BTreeSet::new(),
+        feature_gates: BTreeSet::new(),
+    });
+    let first = BrokerCommand::PartitionCommit {
+        stream: "orders".into(),
+        partition: 0,
+        offset: 0,
+        checksum: 7,
+        leader_id: 1,
+        leader_epoch: 1,
+    };
+    assert!(matches!(
+        state.apply_command(first.clone()),
+        BrokerResponse::PartitionCommit { .. }
+    ));
+    assert!(matches!(
+        state.apply_command(first),
+        BrokerResponse::PartitionCommit { .. }
+    ));
+    assert_eq!(
+        state.apply_command(BrokerCommand::PartitionCommit {
+            stream: "orders".into(),
+            partition: 0,
+            offset: 1,
+            checksum: 8,
+            leader_id: 2,
+            leader_epoch: 0,
+        }),
+        BrokerResponse::Noop
+    );
+    assert_eq!(
+        state.apply_command(BrokerCommand::PartitionCommit {
+            stream: "orders".into(),
+            partition: 0,
+            offset: 2,
+            checksum: 9,
+            leader_id: 2,
+            leader_epoch: 2,
+        }),
+        BrokerResponse::Noop
+    );
+}
+
+#[test]
+fn partition_leader_epoch_must_be_committed_before_the_new_leader_can_commit_data() {
+    let mut state = DurableState::new(nodes());
+    let mut assignments = assignment();
+    assignments
+        .get_mut(&partition_key("orders", 0))
+        .unwrap()
+        .replicas
+        .insert(2);
+    state.apply_command(BrokerCommand::MetadataBootstrap {
+        streams: vec![stream()],
+        assignments,
+        security_references: BTreeSet::new(),
+        feature_gates: BTreeSet::new(),
+    });
+    assert_eq!(
+        state.apply_command(BrokerCommand::PartitionCommit {
+            stream: "orders".into(),
+            partition: 0,
+            offset: 0,
+            checksum: 7,
+            leader_id: 2,
+            leader_epoch: 2,
+        }),
+        BrokerResponse::Noop
+    );
+    assert_eq!(
+        state.apply_command(BrokerCommand::PartitionLeaderUpdate {
+            stream: "orders".into(),
+            partition: 0,
+            leader_id: 2,
+            leader_epoch: 2,
+        }),
+        BrokerResponse::PartitionLeaderUpdate {
+            leader_id: 2,
+            leader_epoch: 2,
+        }
+    );
+    assert_eq!(
+        state.apply_command(BrokerCommand::PartitionCommit {
+            stream: "orders".into(),
+            partition: 0,
+            offset: 0,
+            checksum: 7,
+            leader_id: 2,
+            leader_epoch: 2,
+        }),
+        BrokerResponse::PartitionCommit {
+            high_watermark: 0,
+            leader_epoch: 2,
+        }
+    );
+}
+
+#[test]
+fn consumer_metadata_upsert_and_delete_are_consensus_managed() {
     let mut state = DurableState::new(nodes());
     let record = ConsumerRecord {
         consumer_id: "durable-client-sid".into(),
@@ -42,254 +215,17 @@ fn applies_publish_attempt_and_ack() {
         start_position: protocol::StartPosition::Latest,
     };
     assert_eq!(
-        state.apply_command(BrokerCommand::ConsumerUpsert { record }),
+        state.apply_command(BrokerCommand::ConsumerUpsert {
+            record: record.clone(),
+        }),
         BrokerResponse::ConsumerUpsert
     );
+    assert_eq!(state.consumers["durable-client-sid"].record, record);
     assert_eq!(
-        state.apply_command(BrokerCommand::Publish {
-            stream: Some("orders".into()),
-            subject: "orders.created".into(),
-            reply_to: None,
-            payload: b"ok".to_vec(),
-        }),
-        BrokerResponse::Publish {
-            seq: Some(1),
-            retained: true
-        }
-    );
-    assert!(state.consumers["durable-client-sid"].pending.contains(&1));
-
-    let response = state.apply_command(BrokerCommand::DeliveryAttempt {
-        seq: 1,
-        consumer_id: "durable-client-sid".into(),
-        deadline_ms: 10,
-        attempt: 1,
-    });
-    let BrokerResponse::DeliveryAttempt {
-        record: Some(attempt),
-    } = response
-    else {
-        panic!("expected delivery attempt");
-    };
-    assert_eq!(attempt.delivery_id, 1);
-    assert!(
-        state.consumers["durable-client-sid"]
-            .in_flight
-            .contains_key(&1)
-    );
-
-    assert_eq!(
-        state.apply_command(BrokerCommand::Ack {
-            seq: 1,
+        state.apply_command(BrokerCommand::ConsumerDelete {
             consumer_id: "durable-client-sid".into(),
-            delivery_id: 1,
         }),
-        BrokerResponse::Ack { accepted: true }
+        BrokerResponse::ConsumerDelete
     );
-    assert_eq!(state.messages[&1].stream.as_deref(), Some("orders"));
-}
-
-#[test]
-fn publish_without_matching_consumer_is_not_retained() {
-    let mut state = DurableState::new(nodes());
-    assert_eq!(
-        state.apply_command(BrokerCommand::Publish {
-            stream: None,
-            subject: "orders.created".into(),
-            reply_to: None,
-            payload: b"ok".to_vec(),
-        }),
-        BrokerResponse::Publish {
-            seq: None,
-            retained: false
-        }
-    );
-    assert!(state.messages.is_empty());
-}
-
-#[test]
-fn partition_publish_assigns_offsets_per_partition_and_preserves_envelope() {
-    let mut state = DurableState::new(nodes());
-    for partition in [2, 2, 3] {
-        assert_eq!(
-            state.apply_command(BrokerCommand::PartitionPublish {
-                namespace: "tenant-a".into(),
-                stream: "orders".into(),
-                partition,
-                subject: "orders.created".into(),
-                key: Some(b"customer-7".to_vec()),
-                headers: vec![crate::partition_log::MessageHeader {
-                    name: "Trace-Id".into(),
-                    value: "trace-1".into(),
-                }],
-                timestamp_ms: 42,
-                reply_to: None,
-                payload: b"hello".to_vec(),
-                partitioning_epoch: 7,
-                leader_epoch: 3,
-            }),
-            BrokerResponse::Publish {
-                seq: Some(state.next_seq - 1),
-                retained: true,
-            }
-        );
-    }
-    assert_eq!(state.messages[&1].offset, Some(0));
-    assert_eq!(state.messages[&2].offset, Some(1));
-    assert_eq!(state.messages[&3].offset, Some(0));
-    assert_eq!(state.messages[&1].namespace, "tenant-a");
-    assert_eq!(state.messages[&1].headers[0].value, "trace-1");
-    let encoded = serde_json::to_vec(&state).unwrap();
-    let decoded: DurableState = serde_json::from_slice(&encoded).unwrap();
-    assert_eq!(decoded, state);
-}
-
-#[test]
-fn delivery_attempts_allocate_monotonic_delivery_ids() {
-    let mut state = DurableState::new(nodes());
-    state.apply_command(BrokerCommand::ConsumerUpsert {
-        record: ConsumerRecord {
-            consumer_id: "durable-client-sid".into(),
-            filter_subject: "orders.*".into(),
-            queue_group: None,
-            ack_timeout_ms: 30_000,
-            max_in_flight: 1024,
-            start_position: protocol::StartPosition::Latest,
-        },
-    });
-    state.apply_command(BrokerCommand::Publish {
-        stream: Some("orders".into()),
-        subject: "orders.created".into(),
-        reply_to: None,
-        payload: b"one".to_vec(),
-    });
-    state.apply_command(BrokerCommand::Publish {
-        stream: Some("orders".into()),
-        subject: "orders.updated".into(),
-        reply_to: None,
-        payload: b"two".to_vec(),
-    });
-
-    let BrokerResponse::DeliveryAttempt {
-        record: Some(first),
-    } = state.apply_command(BrokerCommand::DeliveryAttempt {
-        seq: 1,
-        consumer_id: "durable-client-sid".into(),
-        deadline_ms: 10,
-        attempt: 1,
-    })
-    else {
-        panic!("expected first delivery attempt");
-    };
-    let BrokerResponse::DeliveryAttempt {
-        record: Some(second),
-    } = state.apply_command(BrokerCommand::DeliveryAttempt {
-        seq: 2,
-        consumer_id: "durable-client-sid".into(),
-        deadline_ms: 20,
-        attempt: 1,
-    })
-    else {
-        panic!("expected second delivery attempt");
-    };
-
-    assert_eq!(first.delivery_id, 1);
-    assert_eq!(second.delivery_id, 2);
-}
-
-#[test]
-fn ack_rejects_stale_delivery_id() {
-    let mut state = DurableState::new(nodes());
-    state.apply_command(BrokerCommand::ConsumerUpsert {
-        record: ConsumerRecord {
-            consumer_id: "durable-client-sid".into(),
-            filter_subject: "orders.*".into(),
-            queue_group: None,
-            ack_timeout_ms: 30_000,
-            max_in_flight: 1024,
-            start_position: protocol::StartPosition::Latest,
-        },
-    });
-    state.apply_command(BrokerCommand::Publish {
-        stream: Some("orders".into()),
-        subject: "orders.created".into(),
-        reply_to: None,
-        payload: b"one".to_vec(),
-    });
-    state.apply_command(BrokerCommand::DeliveryAttempt {
-        seq: 1,
-        consumer_id: "durable-client-sid".into(),
-        deadline_ms: 10,
-        attempt: 1,
-    });
-
-    assert_eq!(
-        state.apply_command(BrokerCommand::Ack {
-            seq: 1,
-            consumer_id: "durable-client-sid".into(),
-            delivery_id: 2,
-        }),
-        BrokerResponse::Ack { accepted: false }
-    );
-    assert!(state.messages.contains_key(&1));
-    assert!(
-        state.consumers["durable-client-sid"]
-            .in_flight
-            .contains_key(&1)
-    );
-}
-
-#[test]
-fn cleanup_waits_for_all_interested_consumers_to_ack() {
-    let mut state = DurableState::new(nodes());
-    for consumer_id in ["durable-a-sid", "durable-b-sid"] {
-        state.apply_command(BrokerCommand::ConsumerUpsert {
-            record: ConsumerRecord {
-                consumer_id: consumer_id.into(),
-                filter_subject: "orders.*".into(),
-                queue_group: None,
-                ack_timeout_ms: 30_000,
-                max_in_flight: 1024,
-                start_position: protocol::StartPosition::Latest,
-            },
-        });
-    }
-    state.apply_command(BrokerCommand::Publish {
-        stream: None,
-        subject: "orders.created".into(),
-        reply_to: None,
-        payload: b"one".to_vec(),
-    });
-    state.apply_command(BrokerCommand::DeliveryAttempt {
-        seq: 1,
-        consumer_id: "durable-a-sid".into(),
-        deadline_ms: 10,
-        attempt: 1,
-    });
-    state.apply_command(BrokerCommand::DeliveryAttempt {
-        seq: 1,
-        consumer_id: "durable-b-sid".into(),
-        deadline_ms: 10,
-        attempt: 1,
-    });
-
-    assert_eq!(
-        state.apply_command(BrokerCommand::Ack {
-            seq: 1,
-            consumer_id: "durable-a-sid".into(),
-            delivery_id: 1,
-        }),
-        BrokerResponse::Ack { accepted: true }
-    );
-    assert!(state.messages.contains_key(&1));
-
-    assert_eq!(
-        state.apply_command(BrokerCommand::Ack {
-            seq: 1,
-            consumer_id: "durable-b-sid".into(),
-            delivery_id: 2,
-        }),
-        BrokerResponse::Ack { accepted: true }
-    );
-    assert!(state.messages.is_empty());
+    assert!(state.consumers.is_empty());
 }

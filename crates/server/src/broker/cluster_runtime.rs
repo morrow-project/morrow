@@ -39,6 +39,18 @@ impl ClusterRuntime {
         }
     }
 
+    pub(super) async fn replicate_partition(
+        &self,
+        envelope: MessageEnvelope,
+        fsync: bool,
+    ) -> Result<MessageEnvelope> {
+        match self {
+            Self::Real(runtime) => runtime.replicate_partition(envelope, fsync).await,
+            #[cfg(test)]
+            Self::Fake(runtime) => runtime.replicate_partition(envelope, fsync).await,
+        }
+    }
+
     pub(super) async fn is_leader(&self) -> bool {
         match self {
             Self::Real(runtime) => runtime.is_leader().await,
@@ -52,6 +64,14 @@ impl ClusterRuntime {
             Self::Real(runtime) => runtime.current_leader().await,
             #[cfg(test)]
             Self::Fake(runtime) => runtime.current_leader().await,
+        }
+    }
+
+    pub(super) async fn ensure_metadata_ready(&self) -> Result<()> {
+        match self {
+            Self::Real(runtime) => runtime.ensure_metadata_ready().await,
+            #[cfg(test)]
+            Self::Fake(_) => Ok(()),
         }
     }
 

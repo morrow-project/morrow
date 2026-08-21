@@ -125,8 +125,8 @@ async fn fake_cluster_replicates_pull_fetch_and_ack() {
     consumer.write_line("ACK worker 1 1").await;
     assert_eq!(consumer.read_frame().await, "D-OK ACK worker 1 1\r\n");
 
-    let state = scenario.fake_cluster().durable_state();
-    let consumer = state.consumers.values().next().unwrap();
+    let inner = scenario.broker().inner.lock().await;
+    let consumer = inner.consumers.values().next().unwrap();
     assert!(consumer.in_flight.is_empty());
     assert_eq!(consumer.cursors.committed_offset("orders", 0), Some(1));
 }

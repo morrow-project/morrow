@@ -12,6 +12,10 @@ pub use self::set::PartitionLogSet;
 
 pub const DEFAULT_NAMESPACE: &str = "default";
 
+pub(crate) fn committed_envelope_checksum(envelope: &MessageEnvelope) -> Result<u32> {
+    codec::envelope_checksum(envelope)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct MessageHeader {
     pub name: String,

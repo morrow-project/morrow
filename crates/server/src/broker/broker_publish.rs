@@ -108,42 +108,33 @@ impl Broker {
                     name: name.clone(),
                     value: value.clone(),
                 })
-                .collect();
-            let response = self
-                .cluster_write(
-                    &cluster,
-                    BrokerCommand::PartitionPublish {
-                        namespace,
-                        stream: stream.name.as_str().to_string(),
-                        partition: partition.0,
-                        subject: subject_name,
-                        key,
-                        headers: stored_headers,
-                        timestamp_ms: self.hooks.clock.now_ms(),
-                        reply_to,
-                        payload,
-                        partitioning_epoch: stream.partitioning.epoch,
-                        leader_epoch: 1,
-                    },
+                .collect::<Vec<_>>();
+            let seq = self.inner.lock().await.wal.reserve_publish_seq();
+            let envelope = MessageEnvelope {
+                namespace,
+                stream: stream.name.clone(),
+                partition,
+                offset: 0,
+                subject: subject_name,
+                key,
+                headers: stored_headers,
+                timestamp_ms: self.hooks.clock.now_ms(),
+                reply_to,
+                payload,
+                partitioning_epoch: stream.partitioning.epoch,
+                leader_epoch: 0,
+                legacy_seq: seq,
+            };
+            let fsync = ack.is_none_or(|ack| ack.level == protocol::AckLevel::HighDurability);
+            let envelope = cluster.replicate_partition(envelope, fsync).await?;
+            self.sync_from_cluster(&cluster).await?;
+            if let Some(ack) = ack.filter(|_| !accepted_ack) {
+                self.send_positioned_producer_ack(
+                    publisher_id,
+                    ack,
+                    &PublishRecord::from(envelope),
                 )
                 .await?;
-            self.sync_from_cluster(&cluster).await?;
-            let (retained, seq) = match response {
-                BrokerResponse::Publish { seq, retained } => (retained, seq),
-                _ => (false, None),
-            };
-            if let Some(ack) = ack.filter(|_| !accepted_ack) {
-                let record = match seq {
-                    Some(seq) => self.inner.lock().await.messages.get(&seq).cloned(),
-                    None => None,
-                };
-                if let Some(record) = record {
-                    self.send_positioned_producer_ack(publisher_id, ack, &record)
-                        .await?;
-                } else {
-                    self.send_producer_ack(publisher_id, ack, retained, seq)
-                        .await?;
-                }
             }
             self.deliver_pending().await?;
             if ack.is_none() && verbose {
@@ -315,23 +306,6 @@ impl Broker {
     }
 
     pub(super) async fn ack(&self, ack: AckSubject) -> Result<bool> {
-        if let Some(cluster) = self.cluster_runtime().await {
-            let response = self
-                .cluster_write(
-                    &cluster,
-                    BrokerCommand::Ack {
-                        seq: ack.seq,
-                        consumer_id: ack.consumer_id,
-                        delivery_id: ack.delivery_id,
-                    },
-                )
-                .await?;
-            self.sync_from_cluster(&cluster).await?;
-            let BrokerResponse::Ack { accepted } = response else {
-                crate::broker_bail!("unexpected cluster ACK response")
-            };
-            return Ok(accepted);
-        }
         let mut inner = self.inner.lock().await;
         let mut should_cleanup = false;
         let valid = inner
@@ -398,9 +372,6 @@ impl Broker {
     }
 
     pub(super) async fn deliver_pending(&self) -> Result<()> {
-        if let Some(cluster) = self.cluster_runtime().await {
-            return self.deliver_pending_clustered(cluster).await;
-        }
         let deliveries = {
             let mut inner = self.inner.lock().await;
             inner.prepare_durable_deliveries(self.hooks.clock.now_ms())?
@@ -424,9 +395,6 @@ impl Broker {
     }
 
     pub(super) async fn expire_and_redeliver(&self) -> Result<()> {
-        if self.cluster_runtime().await.is_some() {
-            return self.deliver_pending().await;
-        }
         {
             let mut inner = self.inner.lock().await;
             let now = self.hooks.clock.now_ms();

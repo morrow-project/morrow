@@ -653,11 +653,10 @@ QoS headers are producer metadata and are not forwarded to subscribers.
 - `Broker-QoS`: optional numeric value.
   - `0`: accepted after validation, authorization, transient delivery
     preparation, and route forwarding.
-  - `1`: durable after local durable append or successful cluster write.
-  - `2`: high durability after local WAL flush, or successful cluster write in
-    clustered mode.
-  - `3`: cluster durable after successful cluster write; rejected when
-    clustering is disabled.
+  - `1`: durable after local durable append or a partition-replica quorum append.
+  - `2`: high durability after local flush or a partition-replica quorum fsync.
+  - `3`: cluster durable after a partition-replica quorum append and payload-free
+    metadata high-watermark commit; rejected when clustering is disabled.
 - `Broker-Msg-Id`: required when `Broker-QoS` is present. It must be non-empty,
   at most 128 bytes, and contain no whitespace.
 - `Broker-Key`: optional opaque UTF-8 partition key. An explicit key takes
@@ -763,7 +762,8 @@ Transient subscriptions:
 
 Durable subscriptions:
 
-- Persist consumer state in the WAL or Raft state, depending on server mode.
+- Persist delivery/cursor state in the broker WAL; clustered metadata consensus
+  retains the consumer definition but does not receive delivery hot-path writes.
 - Read retained messages owned by configured streams that match their subject.
 - Track independent delivered and committed offsets for each matching stream
   partition. Queue-group members attach to the same durable consumer and share

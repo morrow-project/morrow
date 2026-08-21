@@ -440,6 +440,44 @@ async fn clustered_follower_proxies_client_to_leader() {
 
     harness.shutdown().await;
 }
+
+#[tokio::test]
+async fn clustered_partition_metadata_exposes_direct_leader_discovery() {
+    let harness = ClusterHarness::start_three_routed().await;
+    let leader = harness.wait_for_leader().await;
+    let leader_node = harness
+        .nodes
+        .iter()
+        .find(|node| node.node_id == leader)
+        .unwrap();
+    let assignment = wait_for_partition_metadata(leader_node.http_addr, "orders", 0, None).await;
+    assert_eq!(assignment["leader_id"], leader);
+    assert_eq!(
+        assignment["leader_client_addr"],
+        leader_node.client_addr.to_string()
+    );
+
+    let direct_addr = assignment["leader_client_addr"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let mut publisher = Client::connect(direct_addr, harness.max_payload)
+        .await
+        .unwrap();
+    publisher.read_info().await.unwrap();
+    publisher
+        .connect_durable("metadata-publisher", false, 5_000, 16)
+        .await
+        .unwrap();
+    publisher.publish("orders.created", b"hello").await.unwrap();
+    publisher.ping_roundtrip().await.unwrap();
+
+    let committed = wait_for_partition_metadata(leader_node.http_addr, "orders", 0, Some(0)).await;
+    assert_eq!(committed["leader_epoch"], assignment["leader_epoch"]);
+
+    harness.shutdown().await;
+}
 #[tokio::test]
 async fn routed_cluster_forms_full_mesh_and_forwards_transient_publish() {
     let harness = ClusterHarness::start_three_routed().await;

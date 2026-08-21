@@ -10,7 +10,7 @@ async fn client_pull_consumer_supports_bounded_fetch_and_delivery_controls() {
     assert_eq!(info.proto, 2);
     assert_eq!(info.protocol_versions, vec![1, 2]);
     consumer
-        .connect_durable("puller", false, 40, 8)
+        .connect_durable("puller", false, 1_000, 8)
         .await
         .unwrap();
     consumer
@@ -31,6 +31,7 @@ async fn client_pull_consumer_supports_bounded_fetch_and_delivery_controls() {
         .await
         .unwrap();
     publisher.publish("orders.created", b"one").await.unwrap();
+    publisher.ping_roundtrip().await.unwrap();
 
     let first = consumer
         .fetch("worker", 1, 3, Duration::ZERO)
@@ -45,7 +46,7 @@ async fn client_pull_consumer_supports_bounded_fetch_and_delivery_controls() {
     assert_eq!(first.attempt, 1);
 
     consumer
-        .extend_lease(&first, Duration::from_millis(100))
+        .extend_lease(&first, Duration::from_secs(1))
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -83,6 +84,7 @@ async fn client_pull_consumer_supports_bounded_fetch_and_delivery_controls() {
         .publish("orders.created", b"123456")
         .await
         .unwrap();
+    publisher.ping_roundtrip().await.unwrap();
     assert!(
         consumer
             .fetch("worker", 2, 5, Duration::ZERO)

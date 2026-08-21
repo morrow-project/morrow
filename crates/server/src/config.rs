@@ -196,6 +196,10 @@ impl ClusterConfig {
             "cluster.node_id must be greater than zero"
         );
         crate::broker_ensure!(
+            self.node_id <= u64::from(u16::MAX),
+            "cluster.node_id must fit in 16 bits"
+        );
+        crate::broker_ensure!(
             !self.auth_token.is_empty(),
             "cluster.auth_token must not be empty"
         );

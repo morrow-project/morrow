@@ -12,6 +12,9 @@ impl Broker {
             config.fsync_interval(),
             config.wal_segment_bytes,
         )?;
+        if let Some(cluster) = &config.cluster {
+            wal.namespace_delivery_ids(cluster.node_id);
+        }
         let (mut partition_logs, mut envelopes) =
             PartitionLogSet::open(&config.wal_dir, &config.streams, config.wal_segment_bytes)?;
         let mut envelope_seqs = envelopes
@@ -239,6 +242,41 @@ impl Broker {
                     .collect()
             })
             .unwrap_or_default();
+        let mut partitions = cluster
+            .as_ref()
+            .map(|cluster| cluster.durable_state())
+            .into_iter()
+            .flat_map(|state| {
+                state
+                    .partition_assignments
+                    .into_iter()
+                    .filter_map(move |(key, assignment)| {
+                        let (stream, partition) = key.rsplit_once(':')?;
+                        let partition = partition.parse::<u32>().ok()?;
+                        let high_watermark = state
+                            .partition_commits
+                            .get(&key)
+                            .map(|commit| commit.high_watermark);
+                        let leader_client_addr = cluster_config.and_then(|cluster| {
+                            cluster
+                                .nodes
+                                .iter()
+                                .find(|node| node.node_id == assignment.leader_id)
+                                .map(|node| node.client_addr.to_string())
+                        });
+                        Some(PartitionLeaderResponse {
+                            stream: stream.to_string(),
+                            partition,
+                            replicas: assignment.replicas.into_iter().collect(),
+                            leader_id: assignment.leader_id,
+                            leader_client_addr,
+                            leader_epoch: assignment.leader_epoch,
+                            high_watermark,
+                        })
+                    })
+            })
+            .collect::<Vec<_>>();
+        partitions.sort_by_key(|partition| (partition.stream.clone(), partition.partition));
         let routes = match &self.route_mesh {
             Some(route_mesh) => Some(route_mesh.topology_response().await),
             None => None,
@@ -250,6 +288,7 @@ impl Broker {
             role,
             leader_id,
             peers,
+            partitions,
             routes,
         }
     }

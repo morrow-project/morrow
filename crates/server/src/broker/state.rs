@@ -70,7 +70,19 @@ pub(super) struct ClusterResponse {
     pub(super) role: &'static str,
     pub(super) leader_id: Option<u64>,
     pub(super) peers: Vec<ClusterPeerResponse>,
+    pub(super) partitions: Vec<PartitionLeaderResponse>,
     pub(super) routes: Option<RouteTopologyResponse>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub(super) struct PartitionLeaderResponse {
+    pub(super) stream: String,
+    pub(super) partition: u32,
+    pub(super) replicas: Vec<u64>,
+    pub(super) leader_id: u64,
+    pub(super) leader_client_addr: Option<String>,
+    pub(super) leader_epoch: u64,
+    pub(super) high_watermark: Option<u64>,
 }
 
 #[derive(Debug, serde::Serialize)]

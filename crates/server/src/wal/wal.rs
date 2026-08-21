@@ -11,6 +11,11 @@ impl Wal {
         self.next_seq = self.next_seq.max(seq.saturating_add(1));
     }
 
+    pub(crate) fn namespace_delivery_ids(&mut self, node_id: u64) {
+        let floor = (node_id << 48).saturating_add(1);
+        self.next_delivery_id = self.next_delivery_id.max(floor);
+    }
+
     pub fn open(
         dir: impl AsRef<Path>,
         fsync_interval: Duration,

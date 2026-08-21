@@ -494,13 +494,25 @@ async fn fake_cluster_runtime_drives_broker_flow_across_100_nodes() {
     publisher.publish(&ack_subject(&delivery), b"").await;
     publisher.ping_roundtrip().await;
 
-    let durable = scenario.fake_cluster().durable_state();
-    let consumer = durable.consumers.get("durable-client1-sid1").unwrap();
+    let inner = scenario.broker().inner.lock().await;
+    let consumer = inner.consumers.get("durable-client1-sid1").unwrap();
     assert!(consumer.pending.is_empty());
     assert!(consumer.in_flight.is_empty());
     assert_eq!(consumer.cursors.committed_offset("orders", 0), Some(1));
-    assert_eq!(durable.messages[&1].stream.as_deref(), Some("orders"));
-    assert_eq!(scenario.fake_cluster().write_count(), 4);
+    assert_eq!(inner.messages[&1].stream.as_deref(), Some("orders"));
+    drop(inner);
+    assert_eq!(scenario.fake_cluster().write_count(), 2);
+    assert_eq!(scenario.fake_cluster().data_write_count(), 1);
+    assert!(
+        scenario
+            .fake_cluster()
+            .inner
+            .lock()
+            .unwrap()
+            .state
+            .messages
+            .is_empty()
+    );
 }
 #[tokio::test]
 async fn http_cluster_endpoint_reports_standalone_node() {

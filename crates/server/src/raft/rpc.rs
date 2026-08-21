@@ -9,6 +9,8 @@ pub(super) enum RaftRequest {
         meta: SnapshotMeta<u64, BasicNode>,
         data: Vec<u8>,
     },
+    DataAppend(DataAppendRequest),
+    DataProgress(DataProgressRequest),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -22,13 +24,17 @@ pub(super) enum RaftResponse {
     AppendEntries(AppendEntriesResponse<u64>),
     Vote(VoteResponse<u64>),
     FullSnapshot(SnapshotResponse<u64>),
+    DataAppend(DataAppendResponse),
+    DataProgress(Option<u64>),
     Error(String),
 }
 
 pub(super) async fn serve_raft(
     raft: BrokerRaft,
+    state_machine: StateMachineStore,
     listen: SocketAddr,
     auth_token: String,
+    partition_data: SharedReplicaData,
 ) -> Result<()> {
     let listener = TcpListener::bind(listen)
         .await
@@ -36,9 +42,13 @@ pub(super) async fn serve_raft(
     loop {
         let (stream, _) = listener.accept().await.context("accepting Raft RPC")?;
         let raft = raft.clone();
+        let state_machine = state_machine.clone();
         let auth_token = auth_token.clone();
+        let partition_data = partition_data.clone();
         tokio::spawn(async move {
-            if let Err(err) = handle_raft_stream(raft, stream, &auth_token).await {
+            if let Err(err) =
+                handle_raft_stream(raft, state_machine, stream, &auth_token, partition_data).await
+            {
                 error!(error = ?err, "raft RPC error");
             }
         });
@@ -47,8 +57,10 @@ pub(super) async fn serve_raft(
 
 pub(super) async fn handle_raft_stream(
     raft: BrokerRaft,
+    state_machine: StateMachineStore,
     mut stream: TcpStream,
     auth_token: &str,
+    partition_data: SharedReplicaData,
 ) -> Result<()> {
     let request = read_authenticated_request(&mut stream, auth_token).await?;
     let response = match request {
@@ -69,6 +81,32 @@ pub(super) async fn handle_raft_stream(
                 Ok(response) => RaftResponse::FullSnapshot(response),
                 Err(err) => RaftResponse::Error(err.to_string()),
             }
+        }
+        RaftRequest::DataAppend(mut request) => {
+            let metadata = state_machine.durable_state();
+            let key = partition_key(
+                request.envelope.stream.as_str(),
+                request.envelope.partition.0,
+            );
+            let committed = metadata.partition_commits.get(&key);
+            let assignment = metadata.partition_assignments.get(&key);
+            if raft.current_leader().await != Some(request.leader_id)
+                || assignment.is_none_or(|assignment| {
+                    assignment.leader_id != request.leader_id
+                        || assignment.leader_epoch != request.leader_epoch
+                })
+            {
+                RaftResponse::Error("fenced partition leader epoch".to_string())
+            } else {
+                request.committed_high_watermark = committed.map(|commit| commit.high_watermark);
+                match partition_data.lock().unwrap().append(&request) {
+                    Ok(response) => RaftResponse::DataAppend(response),
+                    Err(err) => RaftResponse::Error(err.to_string()),
+                }
+            }
+        }
+        RaftRequest::DataProgress(request) => {
+            RaftResponse::DataProgress(partition_data.lock().unwrap().progress(&request))
         }
     };
     write_frame(&mut stream, &response).await?;

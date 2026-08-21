@@ -28,7 +28,8 @@ use crate::{
     config::Config,
     error::{BrokerError, Result, ResultExt},
     partition_log::{
-        AppendRequest, DEFAULT_NAMESPACE, MessageHeader, PartitionLogSet, select_partition,
+        AppendRequest, DEFAULT_NAMESPACE, MessageEnvelope, MessageHeader, PartitionLogSet,
+        select_partition,
     },
     raft::{BrokerCommand, BrokerResponse, DurableState, RaftRuntime, proxy_stream_to_leader},
     wal::{
@@ -49,7 +50,6 @@ mod broker;
 mod broker_client;
 mod broker_lifecycle;
 mod broker_publish;
-mod cluster_delivery;
 mod cluster_operations;
 mod cluster_runtime;
 mod consumer;
@@ -70,9 +70,14 @@ mod subject_helpers;
 pub use self::broker::Broker;
 #[allow(unused_imports)]
 use self::{
-    cluster_delivery::*, cluster_runtime::*, consumer::*, fake_cluster::*, fake_cluster_types::*,
-    hooks::*, http::*, inner_admin::*, inner_delivery::*, manual_clock::*, pull_consumer::*,
-    route_mesh::*, route_state::*, state::*, subject_helpers::*,
+    cluster_runtime::*, consumer::*, fake_cluster::*, fake_cluster_types::*, hooks::*, http::*,
+    inner_admin::*, inner_delivery::*, manual_clock::*, pull_consumer::*, route_mesh::*,
+    route_state::*, state::*, subject_helpers::*,
+};
+
+#[cfg(test)]
+use crate::partition_replication::{
+    Durability as PartitionDurability, PartitionAssignment, PartitionReplication,
 };
 
 #[cfg(test)]

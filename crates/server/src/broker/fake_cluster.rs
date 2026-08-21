@@ -24,6 +24,9 @@ impl FakeClusterRuntime {
                 available_nodes: nodes.keys().copied().collect(),
                 nodes,
                 state: DurableState::new(raft_nodes),
+                partition_replication: PartitionReplication::new(1..=node_count),
+                data_messages: HashMap::new(),
+                data_writes: 0,
                 writes: 0,
                 delay_writes: false,
                 queued_writes: VecDeque::new(),
@@ -62,7 +65,92 @@ impl FakeClusterRuntime {
     }
 
     pub(super) fn durable_state(&self) -> DurableState {
-        self.inner.lock().unwrap().state.clone()
+        let inner = self.inner.lock().unwrap();
+        let mut state = inner.state.clone();
+        state.messages.extend(inner.data_messages.clone());
+        state
+    }
+
+    pub(super) async fn replicate_partition(
+        &self,
+        mut envelope: MessageEnvelope,
+        fsync: bool,
+    ) -> Result<MessageEnvelope> {
+        let (command, leader_epoch) = {
+            let mut inner = self.inner.lock().unwrap();
+            inner.ensure_writable()?;
+            let leader = inner.leader.unwrap();
+            let replicas = inner.nodes.keys().copied().collect::<BTreeSet<_>>();
+            let previous = inner
+                .partition_replication
+                .high_watermark(envelope.stream.as_str(), envelope.partition)
+                .ok()
+                .flatten();
+            let key = crate::raft::partition_key(envelope.stream.as_str(), envelope.partition.0);
+            let leader_epoch = inner.state.partition_commits.get(&key).map_or(1, |commit| {
+                if commit.leader_id == leader {
+                    commit.leader_epoch
+                } else {
+                    commit.leader_epoch.saturating_add(1)
+                }
+            });
+            inner.state.partition_assignments.insert(
+                key,
+                crate::raft::PartitionAssignmentMetadata {
+                    replicas: replicas.clone(),
+                    leader_id: leader,
+                    leader_epoch,
+                },
+            );
+            inner.partition_replication.assign(PartitionAssignment {
+                stream: envelope.stream.as_str().to_string(),
+                partition: envelope.partition,
+                replicas,
+                leader,
+                leader_epoch,
+            })?;
+            let available = inner.available_nodes.iter().copied().collect::<Vec<_>>();
+            inner.partition_replication.set_available(available);
+            envelope.offset = previous.map_or(0, |offset| offset.saturating_add(1));
+            envelope.leader_epoch = leader_epoch;
+            inner.partition_replication.append(
+                leader,
+                leader_epoch,
+                envelope.clone(),
+                if fsync {
+                    PartitionDurability::QuorumFsync
+                } else {
+                    PartitionDurability::Quorum
+                },
+            )?;
+            inner
+                .data_messages
+                .insert(envelope.legacy_seq, PublishRecord::from(envelope.clone()));
+            inner.data_writes += 1;
+            (
+                BrokerCommand::PartitionCommit {
+                    stream: envelope.stream.as_str().to_string(),
+                    partition: envelope.partition.0,
+                    offset: envelope.offset,
+                    checksum: crate::partition_log::committed_envelope_checksum(&envelope)?,
+                    leader_id: leader,
+                    leader_epoch,
+                },
+                leader_epoch,
+            )
+        };
+        let response = self.client_write(command).await?;
+        crate::broker_ensure!(
+            matches!(
+                response,
+                BrokerResponse::PartitionCommit {
+                    high_watermark,
+                    leader_epoch: committed_epoch,
+                } if high_watermark == envelope.offset && committed_epoch == leader_epoch
+            ),
+            "partition metadata commit rejected"
+        );
+        Ok(envelope)
     }
 
     pub(super) async fn is_leader(&self) -> bool {
@@ -86,6 +174,10 @@ impl FakeClusterRuntime {
 
     pub(super) fn write_count(&self) -> usize {
         self.inner.lock().unwrap().writes
+    }
+
+    pub(super) fn data_write_count(&self) -> usize {
+        self.inner.lock().unwrap().data_writes
     }
 
     pub(super) fn node_count(&self) -> usize {
@@ -176,6 +268,14 @@ impl FakeClusterState {
 
     pub(super) fn apply_command(&mut self, command: BrokerCommand) -> BrokerResponse {
         self.writes += 1;
-        self.state.apply_command(command)
+        self.state.messages.extend(self.data_messages.clone());
+        let response = self.state.apply_command(command);
+        let partitioned = self
+            .state
+            .messages
+            .extract_if(|_, record| record.stream.is_some())
+            .collect::<HashMap<_, _>>();
+        self.data_messages = partitioned;
+        response
     }
 }

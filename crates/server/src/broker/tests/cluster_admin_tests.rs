@@ -244,8 +244,8 @@ async fn fake_cluster_local_leader_accepts_durable_flow_through_accepted_path() 
     publisher.publish(&ack_subject(&delivery), b"").await;
     publisher.ping_roundtrip().await;
 
-    let durable = scenario.fake_cluster().durable_state();
-    let consumer = durable.consumers.get("durable-client1-sid1").unwrap();
+    let inner = scenario.broker().inner.lock().await;
+    let consumer = inner.consumers.get("durable-client1-sid1").unwrap();
     assert!(consumer.in_flight.is_empty());
     assert_eq!(consumer.cursors.committed_offset("orders", 0), Some(1));
 }
@@ -284,11 +284,8 @@ async fn route_enabled_follower_rejects_durable_writes() {
         .broker()
         .cluster_write(
             &cluster,
-            BrokerCommand::Publish {
-                stream: Some("orders".into()),
-                subject: "orders.created".into(),
-                reply_to: None,
-                payload: b"hello".to_vec(),
+            BrokerCommand::ConsumerDelete {
+                consumer_id: "durable-client-sid".into(),
             },
         )
         .await
@@ -381,17 +378,13 @@ async fn fake_cluster_delays_publish_delivery_until_drained() {
     subscriber.expect_no_frame_short().await;
     assert_eq!(scenario.queued_write_count(), 1);
     assert!(scenario.drain_one().is_some());
-    tokio::task::yield_now().await;
-    subscriber.expect_no_frame_short().await;
-    assert_eq!(scenario.queued_write_count(), 1);
-    assert!(scenario.drain_one().is_some());
 
     let delivery = subscriber.expect_msg().await;
     assert!(delivery.ends_with("5\r\nhello\r\n"));
     publisher.expect_pong().await;
 }
 #[tokio::test]
-async fn fake_cluster_delays_ack_until_drained() {
+async fn fake_cluster_delivery_ack_does_not_enter_metadata_queue() {
     let scenario = Scenario::new_fake_cluster(5);
     let mut subscriber = scenario.connect_durable("client1", 25).await;
     let mut publisher = scenario.connect_durable("publisher1", 25).await;
@@ -403,23 +396,17 @@ async fn fake_cluster_delays_ack_until_drained() {
     scenario.set_delay_writes(true);
     publisher.publish(&ack_subject(&delivery), b"").await;
     publisher.write_line("PING").await;
-    publisher.expect_no_frame_short().await;
-    assert_eq!(scenario.queued_write_count(), 1);
-    {
-        let durable = scenario.fake_cluster().durable_state();
-        assert!(
-            durable.consumers["durable-client1-sid1"]
-                .in_flight
-                .contains_key(&1)
-        );
-    }
-
-    assert!(scenario.drain_one().is_some());
     publisher.expect_pong().await;
+    assert_eq!(scenario.queued_write_count(), 0);
+    {
+        let inner = scenario.broker().inner.lock().await;
+        let consumer = &inner.consumers["durable-client1-sid1"];
+        assert!(consumer.in_flight.is_empty());
+        assert_eq!(consumer.cursors.committed_offset("orders", 0), Some(1));
+    }
     let durable = scenario.fake_cluster().durable_state();
     let consumer = durable.consumers.get("durable-client1-sid1").unwrap();
-    assert!(consumer.in_flight.is_empty());
-    assert_eq!(consumer.cursors.committed_offset("orders", 0), Some(1));
+    assert_eq!(consumer.cursors.committed_offset("orders", 0), Some(0));
 }
 
 #[tokio::test]
@@ -435,8 +422,8 @@ async fn fake_cluster_leader_change_preserves_cursor_lease_and_attempt() {
     assert!(first.starts_with("MSG orders.created sid1 _BROKER.ACK.durable-client1-sid1.1.1"));
     scenario.set_leader(Some(2));
     {
-        let durable = scenario.fake_cluster().durable_state();
-        let consumer = &durable.consumers["durable-client1-sid1"];
+        let inner = scenario.broker().inner.lock().await;
+        let consumer = &inner.consumers["durable-client1-sid1"];
         assert_eq!(consumer.cursors.committed_offset("orders", 0), Some(0));
         assert_eq!(consumer.in_flight[&1].attempt, 1);
     }
@@ -446,8 +433,8 @@ async fn fake_cluster_leader_change_preserves_cursor_lease_and_attempt() {
     scenario.tick_redelivery().await;
     let redelivery = subscriber.expect_msg().await;
     assert!(redelivery.starts_with("MSG orders.created sid1 _BROKER.ACK.durable-client1-sid1.1.2"));
-    let durable = scenario.fake_cluster().durable_state();
-    let consumer = &durable.consumers["durable-client1-sid1"];
+    let inner = scenario.broker().inner.lock().await;
+    let consumer = &inner.consumers["durable-client1-sid1"];
     assert_eq!(consumer.in_flight[&1].attempt, 2);
     assert_eq!(consumer.cursors.committed_offset("orders", 0), Some(0));
 }
