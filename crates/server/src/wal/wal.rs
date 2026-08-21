@@ -119,6 +119,15 @@ impl Wal {
         self.append_record(KIND_CONSUMER_CURSOR, &consumer_cursor_body(record)?)
     }
 
+    pub fn append_consumer_delete(&mut self, consumer_id: &str) -> Result<()> {
+        self.append_record(
+            KIND_CONSUMER_DELETE,
+            &consumer_delete_body(&ConsumerDeleteRecord {
+                consumer_id: consumer_id.to_string(),
+            })?,
+        )
+    }
+
     pub fn append_delivery_attempt(
         &mut self,
         seq: u64,
@@ -137,6 +146,10 @@ impl Wal {
         };
         self.write_delivery_attempt(&record)?;
         Ok(record)
+    }
+
+    pub fn append_delivery_lease(&mut self, record: &DeliveryAttemptRecord) -> Result<()> {
+        self.write_delivery_attempt(record)
     }
 
     pub fn append_ack(
@@ -347,6 +360,17 @@ pub(super) fn write_compact_state(
                 delivery_id: 0,
                 deadline_ms: 0,
                 attempt: 0,
+            })?;
+            write_record_to(file, KIND_DELIVERY_ATTEMPT, &body)?;
+            bytes += record_size(&body)?;
+        }
+        for (seq, next_attempt) in consumer.pending_attempts {
+            let body = delivery_attempt_body(&DeliveryAttemptRecord {
+                seq,
+                consumer_id: consumer_id.clone(),
+                delivery_id: 0,
+                deadline_ms: 0,
+                attempt: next_attempt.saturating_sub(1),
             })?;
             write_record_to(file, KIND_DELIVERY_ATTEMPT, &body)?;
             bytes += record_size(&body)?;

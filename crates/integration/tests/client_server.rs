@@ -7,3 +7,6 @@ mod client_server_tests;
 
 #[path = "client_server/qos_tests.rs"]
 mod qos_tests;
+
+#[path = "client_server/pull_tests.rs"]
+mod pull_tests;

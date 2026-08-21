@@ -19,6 +19,7 @@ async fn http_connections_endpoint_reports_live_client_metadata() {
     assert!(response.contains("\"connected_at_ms\":1000"));
     assert!(response.contains("\"ack_timeout_ms\":25"));
     assert!(response.contains("\"max_in_flight\":1024"));
+    assert!(response.contains("\"protocol_version\":1"));
     assert!(response.contains("\"subscriptions\":1"));
     assert!(response.contains("\"transient_subscriptions\":1"));
 }

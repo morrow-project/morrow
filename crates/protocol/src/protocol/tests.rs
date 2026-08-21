@@ -1,6 +1,10 @@
 use tokio::io::BufReader;
 
 use super::*;
+use crate::{
+    batch, consumer_ok, control_ok, durable_message, hmsg, msg, parse_ack_subject, producer_ack,
+    producer_ack_with_position,
+};
 
 #[tokio::test]
 async fn parses_pub_with_payload() {
@@ -174,7 +178,7 @@ fn hpub(
 #[tokio::test]
 async fn parses_connect_durable_metadata() {
     let mut reader = BufReader::new(
-        &b"CONNECT {\"verbose\":true,\"durable_id\":\"client1\",\"ack_timeout_ms\":25,\"max_in_flight\":7}\r\n"[..],
+        &b"CONNECT {\"verbose\":true,\"durable_id\":\"client1\",\"ack_timeout_ms\":25,\"max_in_flight\":7,\"protocol_version\":2}\r\n"[..],
     );
     let command = read_command(&mut reader, 1024, 8192)
         .await
@@ -187,6 +191,7 @@ async fn parses_connect_durable_metadata() {
             durable_id: Some("client1".into()),
             ack_timeout_ms: Some(25),
             max_in_flight: Some(7),
+            protocol_version: Some(2),
             auth: None,
         }
     );
@@ -207,6 +212,7 @@ async fn parses_connect_client_auth() {
             durable_id: None,
             ack_timeout_ms: None,
             max_in_flight: None,
+            protocol_version: None,
             auth: Some(ConnectAuth {
                 client_id: "client1".into(),
                 signature: "1234".into(),
@@ -222,6 +228,7 @@ async fn rejects_malformed_connect_field_types() {
         (r#"{"durable_id":7}"#, "durable_id"),
         (r#"{"ack_timeout_ms":"25"}"#, "ack_timeout_ms"),
         (r#"{"max_in_flight":"7"}"#, "max_in_flight"),
+        (r#"{"protocol_version":"2"}"#, "protocol_version"),
         (r#"{"client_id":7,"signature":"1234"}"#, "client_id"),
         (r#"{"client_id":"client1","signature":1234}"#, "signature"),
     ] {
@@ -233,6 +240,106 @@ async fn rejects_malformed_connect_field_types() {
             "expected {expected:?} in error {err:?}"
         );
     }
+}
+
+#[tokio::test]
+async fn parses_pull_consumer_commands() {
+    let cases = [
+        (
+            "CONSUMER CREATE worker orders.* @earliest\r\n",
+            Command::ConsumerCreate {
+                name: "worker".into(),
+                filter_subject: "orders.*".into(),
+                start: StartPosition::Earliest,
+            },
+        ),
+        (
+            "CONSUMER DELETE worker\r\n",
+            Command::ConsumerDelete {
+                name: "worker".into(),
+            },
+        ),
+        (
+            "FETCH worker 10 4096 25\r\n",
+            Command::Fetch {
+                name: "worker".into(),
+                max_messages: 10,
+                max_bytes: 4096,
+                max_wait_ms: 25,
+            },
+        ),
+        (
+            "ACK worker 7 9\r\n",
+            Command::Ack {
+                name: "worker".into(),
+                seq: 7,
+                delivery_id: 9,
+            },
+        ),
+        (
+            "NACK worker 7 9 50\r\n",
+            Command::Nack {
+                name: "worker".into(),
+                seq: 7,
+                delivery_id: 9,
+                delay_ms: 50,
+            },
+        ),
+        (
+            "EXTEND worker 7 9 100\r\n",
+            Command::Extend {
+                name: "worker".into(),
+                seq: 7,
+                delivery_id: 9,
+                extension_ms: 100,
+            },
+        ),
+        (
+            "CREDIT sid1 5 8192\r\n",
+            Command::Credit {
+                sid: "sid1".into(),
+                messages: 5,
+                bytes: 8192,
+            },
+        ),
+    ];
+    for (wire, expected) in cases {
+        let mut reader = BufReader::new(wire.as_bytes());
+        assert_eq!(
+            read_command(&mut reader, 1024, 8192)
+                .await
+                .unwrap()
+                .unwrap(),
+            expected
+        );
+    }
+}
+
+#[test]
+fn encodes_pull_delivery_frames() {
+    assert_eq!(consumer_ok("CREATE", "worker"), b"C-OK CREATE worker\r\n");
+    assert_eq!(
+        control_ok("ACK", "worker", 7, 9),
+        b"D-OK ACK worker 7 9\r\n"
+    );
+    assert_eq!(batch("worker", 1, 5), b"BATCH worker 1 5\r\n");
+    assert_eq!(
+        durable_message(
+            "worker",
+            "orders.created",
+            None,
+            &[],
+            "orders",
+            2,
+            41,
+            3,
+            900,
+            7,
+            9,
+            b"hello"
+        ),
+        b"DMSG worker orders.created - orders 2 41 3 900 7 9 12 17\r\nNATS/1.0\r\n\r\nhello\r\n"
+    );
 }
 
 #[tokio::test]

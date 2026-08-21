@@ -202,6 +202,7 @@ fn checkpoint_removes_covered_segments() {
         record: consumer,
         cursors: None,
         pending: [first.seq, second.seq].into_iter().collect(),
+        pending_attempts: HashMap::new(),
         in_flight: HashMap::new(),
         acked: HashSet::new(),
     };

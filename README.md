@@ -283,6 +283,20 @@ CONNECT {"durable_id":"client1","verbose":true,"ack_timeout_ms":30000,"max_in_fl
 SUB orders.* sid1
 ```
 
+Protocol version 2 makes bounded pull the primary durable API:
+
+```text
+CONNECT {"durable_id":"client1","protocol_version":2,"ack_timeout_ms":30000,"max_in_flight":1024}
+CONSUMER CREATE worker orders.* @earliest
+FETCH worker 10 65536 1000
+```
+
+Pull batches carry stream/partition offsets, attempts, lease deadlines, and a
+fenced ACK identity. `ACK`, delayed `NACK`, and `EXTEND` operate on that identity.
+Version 2 durable `SUB` remains available as a push facade but delivers only
+against explicit `CREDIT <sid> <messages> <bytes>` grants. Clients that omit
+`protocol_version` remain on version 1 compatibility behavior.
+
 Durable subscriptions default to `@latest`. A caller can select retained
 history explicitly, for example `SUB orders.* sid1 @earliest`,
 `SUB orders.* sid1 @committed`, `SUB orders.* sid1 @offset:42`, or

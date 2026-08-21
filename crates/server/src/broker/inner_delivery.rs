@@ -47,12 +47,19 @@ impl Inner {
                     })?;
                 }
                 if let Some(client) = self.clients.get(&connection_id) {
-                    let frame = durable_message_frame(&message, &sid, &ack_subject);
+                    let frame = durable_message_frame(
+                        &message,
+                        &sid,
+                        &ack_subject,
+                        delivery.attempt,
+                        delivery.deadline_ms,
+                        client.protocol_version,
+                    );
                     deliveries.push(Delivery {
                         sender: client.sender.clone(),
                         frame,
                     });
-                    self.decrement_durable_member(&consumer_id, connection_id);
+                    self.consume_durable_member(&consumer_id, connection_id, message.payload.len());
                 }
             }
         }
@@ -81,10 +88,15 @@ impl Inner {
                     .find(|seq| !leased.contains(seq))
                     .copied()
             })?;
+        let payload_len = self.messages.get(&seq)?.payload.len();
         let (connection_id, member) = consumer
             .members
             .iter()
-            .filter(|(connection_id, _)| self.clients.contains_key(connection_id))
+            .filter(|(connection_id, member)| {
+                self.clients.contains_key(connection_id)
+                    && member.credit_messages > 0
+                    && member.credit_bytes >= payload_len
+            })
             .min_by_key(|(connection_id, _)| **connection_id)?;
         let attempt = consumer.pending_attempts.get(&seq).copied().unwrap_or(1);
         let deadline_ms = now.saturating_add(consumer.record.ack_timeout_ms);
@@ -128,10 +140,15 @@ impl Inner {
                             .copied()
                     })?
             };
+            let payload_len = self.messages.get(&seq)?.payload.len();
             let (connection_id, member) = consumer
                 .members
                 .iter()
-                .filter(|(connection_id, _)| self.clients.contains_key(connection_id))
+                .filter(|(connection_id, member)| {
+                    self.clients.contains_key(connection_id)
+                        && member.credit_messages > 0
+                        && member.credit_bytes >= payload_len
+                })
                 .min_by_key(|(connection_id, _)| **connection_id)?;
             let attempt = consumer
                 .in_flight
@@ -165,12 +182,19 @@ impl Inner {
         }
         let ack_subject =
             protocol::ack_subject(&record.consumer_id, record.seq, record.delivery_id);
-        let frame = durable_message_frame(&message, sid, &ack_subject);
+        let frame = durable_message_frame(
+            &message,
+            sid,
+            &ack_subject,
+            record.attempt,
+            record.deadline_ms,
+            client.protocol_version,
+        );
         let delivery = Delivery {
             sender: client.sender.clone(),
             frame,
         };
-        self.decrement_durable_member(&record.consumer_id, connection_id);
+        self.consume_durable_member(&record.consumer_id, connection_id, message.payload.len());
         Some(delivery)
     }
 
@@ -310,12 +334,21 @@ impl Inner {
         }
     }
 
-    pub(super) fn decrement_durable_member(&mut self, consumer_id: &str, connection_id: u64) {
+    pub(super) fn consume_durable_member(
+        &mut self,
+        consumer_id: &str,
+        connection_id: u64,
+        payload_bytes: usize,
+    ) {
         let should_remove = self
             .consumers
             .get_mut(consumer_id)
             .and_then(|consumer| consumer.members.get_mut(&connection_id))
-            .and_then(|member| decrement_remaining(&mut member.remaining_deliveries))
+            .map(|member| {
+                member.credit_messages = member.credit_messages.saturating_sub(1);
+                member.credit_bytes = member.credit_bytes.saturating_sub(payload_bytes);
+                decrement_remaining(&mut member.remaining_deliveries).unwrap_or(false)
+            })
             .unwrap_or(false);
         if should_remove {
             if let Some(consumer) = self.consumers.get_mut(consumer_id) {
@@ -325,7 +358,42 @@ impl Inner {
     }
 }
 
-fn durable_message_frame(message: &PublishRecord, sid: &str, ack_subject: &str) -> Vec<u8> {
+fn durable_message_frame(
+    message: &PublishRecord,
+    sid: &str,
+    ack_subject: &str,
+    attempt: u32,
+    deadline_ms: u64,
+    protocol_version: u32,
+) -> Vec<u8> {
+    if protocol_version >= 2 {
+        let mut headers = message
+            .headers
+            .iter()
+            .map(|header| (header.name.clone(), header.value.clone()))
+            .collect::<Vec<_>>();
+        headers.push(("Broker-Ack".into(), ack_subject.into()));
+        if let (Some(stream), Some(partition), Some(offset)) =
+            (&message.stream, message.partition, message.offset)
+        {
+            headers.push(("Broker-Stream".into(), stream.clone()));
+            headers.push(("Broker-Partition".into(), partition.to_string()));
+            headers.push(("Broker-Offset".into(), offset.to_string()));
+        }
+        headers.push(("Broker-Attempt".into(), attempt.to_string()));
+        headers.push(("Broker-Lease-Deadline".into(), deadline_ms.to_string()));
+        let borrowed = headers
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .collect::<Vec<_>>();
+        return protocol::hmsg(
+            &message.subject,
+            sid,
+            message.reply_to.as_deref(),
+            &borrowed,
+            &message.payload,
+        );
+    }
     if message.headers.is_empty() && message.reply_to.is_none() {
         return protocol::msg(&message.subject, sid, Some(ack_subject), &message.payload);
     }

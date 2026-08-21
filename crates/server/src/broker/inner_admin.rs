@@ -25,6 +25,7 @@ impl Inner {
                     connected_at_ms: client.connected_at_ms,
                     ack_timeout_ms: client.ack_timeout_ms,
                     max_in_flight: client.max_in_flight,
+                    protocol_version: client.protocol_version,
                     subscriptions,
                     transient_subscriptions,
                 }
@@ -49,6 +50,8 @@ impl Inner {
                         connection_id: *connection_id,
                         sid: member.sid.clone(),
                         remaining_deliveries: member.remaining_deliveries,
+                        credit_messages: member.credit_messages,
+                        credit_bytes: member.credit_bytes,
                     })
                     .collect::<Vec<_>>();
                 members.sort_by_key(|member| (member.connection_id, member.sid.clone()));
@@ -119,6 +122,7 @@ impl Inner {
                 record: consumer.record.clone(),
                 cursors: Some(consumer.cursors.clone()),
                 pending: consumer.pending.clone(),
+                pending_attempts: consumer.pending_attempts.clone(),
                 in_flight: consumer
                     .in_flight
                     .iter()

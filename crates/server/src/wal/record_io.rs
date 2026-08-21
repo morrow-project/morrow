@@ -62,6 +62,11 @@ pub(super) fn consumer_cursor_body(record: &ConsumerCursorRecord) -> Result<Vec<
     )?;
     Ok(body)
 }
+pub(super) fn consumer_delete_body(record: &ConsumerDeleteRecord) -> Result<Vec<u8>> {
+    let mut body = Vec::new();
+    put_string(&mut body, &record.consumer_id)?;
+    Ok(body)
+}
 pub(super) fn record_size(body: &[u8]) -> Result<u64> {
     let len = body.len() + 1;
     let len: u32 = len.try_into().context("WAL record too large")?;
@@ -167,6 +172,15 @@ pub(super) fn decode_consumer_cursor(body: &[u8]) -> Result<ConsumerCursorRecord
         consumer_id,
         cursors,
     })
+}
+pub(super) fn decode_consumer_delete(body: &[u8]) -> Result<ConsumerDeleteRecord> {
+    let mut cursor = Cursor {
+        bytes: body,
+        pos: 0,
+    };
+    let consumer_id = cursor.string()?;
+    cursor.finish()?;
+    Ok(ConsumerDeleteRecord { consumer_id })
 }
 pub(super) fn decode_consumer_upsert(body: &[u8]) -> Result<ConsumerRecord> {
     let mut cursor = Cursor {

@@ -20,6 +20,7 @@ pub(super) struct Client {
     pub(super) auth_nonce: Option<String>,
     pub(super) ack_timeout_ms: u64,
     pub(super) max_in_flight: usize,
+    pub(super) protocol_version: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -38,6 +39,8 @@ pub(super) struct Consumer {
 pub(super) struct SubscriptionMember {
     pub(super) sid: String,
     pub(super) remaining_deliveries: Option<usize>,
+    pub(super) credit_messages: usize,
+    pub(super) credit_bytes: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,6 +98,7 @@ pub(super) struct ConnectionResponse {
     pub(super) connected_at_ms: u64,
     pub(super) ack_timeout_ms: u64,
     pub(super) max_in_flight: usize,
+    pub(super) protocol_version: u32,
     pub(super) subscriptions: usize,
     pub(super) transient_subscriptions: usize,
 }
@@ -140,6 +144,8 @@ pub(super) struct ConsumerMemberResponse {
     pub(super) connection_id: u64,
     pub(super) sid: String,
     pub(super) remaining_deliveries: Option<usize>,
+    pub(super) credit_messages: usize,
+    pub(super) credit_bytes: usize,
 }
 
 #[derive(Debug, serde::Serialize)]

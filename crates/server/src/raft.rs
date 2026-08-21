@@ -77,6 +77,9 @@ pub enum BrokerCommand {
         record: ConsumerRecord,
         cursors: crate::consumer_cursor::ConsumerCursorSet,
     },
+    ConsumerDelete {
+        consumer_id: String,
+    },
     DeliveryAttempt {
         seq: u64,
         consumer_id: String,
@@ -88,6 +91,12 @@ pub enum BrokerCommand {
         consumer_id: String,
         delivery_id: u64,
     },
+    DeliveryLeaseUpdate {
+        seq: u64,
+        consumer_id: String,
+        delivery_id: u64,
+        deadline_ms: u64,
+    },
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BrokerResponse {
@@ -96,10 +105,14 @@ pub enum BrokerResponse {
         retained: bool,
     },
     ConsumerUpsert,
+    ConsumerDelete,
     DeliveryAttempt {
         record: Option<DeliveryAttemptRecord>,
     },
     Ack {
+        accepted: bool,
+    },
+    DeliveryLeaseUpdate {
         accepted: bool,
     },
     Noop,
@@ -246,6 +259,10 @@ impl DurableState {
                     });
                 BrokerResponse::ConsumerUpsert
             }
+            BrokerCommand::ConsumerDelete { consumer_id } => {
+                self.consumers.remove(&consumer_id);
+                BrokerResponse::ConsumerDelete
+            }
             BrokerCommand::DeliveryAttempt {
                 seq,
                 consumer_id,
@@ -333,6 +350,21 @@ impl DurableState {
                     self.cleanup_acked_messages();
                 }
                 BrokerResponse::Ack { accepted }
+            }
+            BrokerCommand::DeliveryLeaseUpdate {
+                seq,
+                consumer_id,
+                delivery_id,
+                deadline_ms,
+            } => {
+                let accepted = self
+                    .consumers
+                    .get_mut(&consumer_id)
+                    .and_then(|consumer| consumer.in_flight.get_mut(&seq))
+                    .filter(|lease| lease.delivery_id == delivery_id)
+                    .map(|lease| lease.deadline_ms = deadline_ms)
+                    .is_some();
+                BrokerResponse::DeliveryLeaseUpdate { accepted }
             }
         }
     }

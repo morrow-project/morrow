@@ -30,6 +30,20 @@ async fn client_can_subscribe_publish_receive_and_ack_against_server() {
     assert_eq!(message.subject, "orders.created");
     assert_eq!(message.sid, "sid1");
     assert_eq!(message.payload, b"hello");
+    for (name, expected) in [
+        ("Broker-Stream", "orders"),
+        ("Broker-Partition", "0"),
+        ("Broker-Offset", "0"),
+        ("Broker-Attempt", "1"),
+    ] {
+        assert!(
+            message
+                .headers
+                .iter()
+                .any(|(header, value)| header == name && value == expected),
+            "missing {name} delivery metadata"
+        );
+    }
     let ack_subject = message
         .ack_subject
         .expect("durable messages carry ack subject");

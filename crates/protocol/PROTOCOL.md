@@ -18,7 +18,10 @@ payload bodies.
 2. If the listener is TLS-enabled, the TLS handshake happens first.
 3. The server immediately sends one `INFO` frame.
 4. The client sends `CONNECT <json>`.
-5. The client may then send `PING`, `PONG`, `SUB`, `UNSUB`, and `PUB`.
+5. The client may then use the commands supported by its negotiated protocol
+   version. Version 1 supports the original push/pub-sub surface. Version 2
+   additionally supports `CONSUMER`, `FETCH`, `ACK`, `NACK`, `EXTEND`, and
+   `CREDIT`.
 
 Command names are case-insensitive on input. Subjects, sids, queue names, JSON
 field names, and header names are case-sensitive unless noted otherwise.
@@ -37,6 +40,7 @@ The following values are identifiers:
 - authenticated `client_id`
 - subscription `sid`
 - queue group name
+- pull consumer name
 
 Identifiers must be non-empty, must not contain `.`, must not contain
 whitespace, and must not start with `_`.
@@ -101,13 +105,13 @@ INFO <json>\r\n
 Example without auth:
 
 ```text
-INFO {"server_id":"broker","server_name":"broker","version":"0.1.0","proto":1,"max_payload":1048576,"auth_required":false,"tls_required":false}
+INFO {"server_id":"broker","server_name":"broker","version":"0.1.0","proto":2,"protocol_versions":[1,2],"max_payload":1048576,"auth_required":false,"tls_required":false}
 ```
 
 Example with auth:
 
 ```text
-INFO {"server_id":"broker","server_name":"broker","version":"0.1.0","proto":1,"max_payload":1048576,"nonce":"64-hex-character-nonce","auth_required":true,"tls_required":false}
+INFO {"server_id":"broker","server_name":"broker","version":"0.1.0","proto":2,"protocol_versions":[1,2],"max_payload":1048576,"nonce":"64-hex-character-nonce","auth_required":true,"tls_required":false}
 ```
 
 Fields:
@@ -116,7 +120,8 @@ Fields:
   `"broker"`.
 - `server_name`: server display name, currently `"broker"`.
 - `version`: broker crate version.
-- `proto`: protocol version, currently `1`.
+- `proto`: highest protocol version, currently `2`.
+- `protocol_versions`: versions accepted in `CONNECT`, currently `[1,2]`.
 - `max_payload`: maximum accepted `PUB` payload bytes for this connection.
 - `auth_required`: boolean.
 - `nonce`: present when `auth_required` is true.
@@ -161,6 +166,36 @@ acknowledgement that does not wait for append. A committed stream publication
 also includes its stream-owned position and the partitioning and leader epochs
 under which it was appended. `seq` remains a transitional consumer-ACK identity;
 stream offsets are authoritative within each partition.
+
+### C-OK, D-OK, BATCH, and DMSG
+
+Version 2 consumer lifecycle operations return:
+
+```text
+C-OK <CREATE|DELETE> <consumer-name>\r\n
+```
+
+Successful fenced delivery controls return:
+
+```text
+D-OK <ACK|NACK|EXTEND> <consumer-name> <seq> <delivery-id>\r\n
+```
+
+Every fetch returns one batch header followed by exactly `messages` durable
+message frames. `bytes` is the sum of payload bytes and never exceeds the
+requested fetch byte limit.
+
+```text
+BATCH <consumer-name> <messages> <bytes>\r\n
+DMSG <consumer-name> <subject> <reply-to-or-> <stream> <partition> <offset> <attempt> <lease-deadline-ms> <seq> <delivery-id> <headers-len> <total-len>\r\n
+<headers><payload>\r\n
+```
+
+The `(consumer-name, seq, delivery-id)` tuple is the ACK identity. The stream,
+partition, and offset identify the immutable stored record. `reply-to-or-` is
+the application reply subject or `-`; the header block uses the same NATS/1.0
+format as `HMSG`. Clients must reject invalid lengths or a `total-len` above
+their configured payload limit before allocating or reading the body.
 
 ### -ERR
 
@@ -250,6 +285,10 @@ The complete `<headers><payload>` section is followed by `\r\n`.
 Durable deliveries with an application reply subject use `HMSG` so the reply
 subject can remain available while the durable ACK subject is carried in the
 `Broker-Ack` header.
+Version 2 push deliveries always use `HMSG` and additionally carry
+`Broker-Stream`, `Broker-Partition`, `Broker-Offset`, `Broker-Attempt`, and
+`Broker-Lease-Deadline`. Compatibility push therefore exposes the same durable
+position, attempt, deadline, and fenced ACK identity as `DMSG`.
 
 Example:
 
@@ -306,6 +345,8 @@ Field types are strict:
 - `signature`: string.
 - `ack_timeout_ms`: unsigned integer.
 - `max_in_flight`: unsigned integer that fits in the server platform `usize`.
+- `protocol_version`: unsigned integer. Omission selects compatibility version
+  `1`; pull consumers and explicit delivery controls require version `2`.
 
 Unknown fields are ignored for forward compatibility.
 
@@ -346,6 +387,12 @@ Durable client without auth:
 
 ```text
 CONNECT {"durable_id":"client1","verbose":true,"ack_timeout_ms":30000,"max_in_flight":1024}\r\n
+```
+
+Version 2 durable client:
+
+```text
+CONNECT {"durable_id":"client1","protocol_version":2,"ack_timeout_ms":30000,"max_in_flight":1024}\r\n
 ```
 
 Authenticated durable client:
@@ -480,6 +527,60 @@ UNSUB sid1\r\n
 UNSUB sid1 1\r\n
 ```
 
+### CONSUMER
+
+Version 2 creates and deletes named pull consumers explicitly:
+
+```text
+CONSUMER CREATE <name> <filter-subject> [<start>]\r\n
+CONSUMER DELETE <name>\r\n
+```
+
+`start` uses `@latest` (default), `@earliest`, `@committed`,
+`@offset:<offset>`, or `@time:<unix-timestamp-ms>`. Names are scoped to the
+connection's durable identity. Creation requires a configured durable stream
+binding and returns `C-OK`; deletion removes cursor and lease state and returns
+`C-OK`.
+
+### FETCH
+
+```text
+FETCH <consumer-name> <max-messages> <max-bytes> <max-wait-ms>\r\n
+```
+
+Both limits must be positive. `max-messages` cannot exceed the consumer's
+`max_in_flight`; the broker also caps the requested byte capacity. The response
+is a `BATCH`, including `BATCH ... 0 0` when the maximum wait expires. An empty
+fetch creates no delivery lease and does not move a consumer cursor.
+
+### ACK, NACK, and EXTEND
+
+```text
+ACK <consumer-name> <seq> <delivery-id>\r\n
+NACK <consumer-name> <seq> <delivery-id> <delay-ms>\r\n
+EXTEND <consumer-name> <seq> <delivery-id> <extension-ms>\r\n
+```
+
+All three operations are fenced by the currently active delivery identity.
+`ACK` advances the partition cursor. `NACK` makes the record redelivery-eligible
+after its delay. `EXTEND` moves the lease deadline forward by a positive
+duration. Stale identities receive `-ERR` and do not alter lease or cursor
+state.
+
+### CREDIT
+
+Version 2 durable `SUB` is a compatibility push facade and starts with zero
+credit. Grant bounded message and payload-byte credit explicitly:
+
+```text
+CREDIT <sid> <messages> <bytes>\r\n
+```
+
+Credits are capped by `max_in_flight` and the broker payload limit, consumed on
+delivery, and held only with the live subscription member. Version 1 retains
+its legacy implicit bounded push credit. Transient and `_INBOX.*` subscriptions
+remain live-only and do not use `CREDIT`.
+
 ### PUB
 
 Publishes a payload.
@@ -575,8 +676,10 @@ failures receive `-ERR`.
 
 ## Durable ACKs
 
-Durable deliveries must be acknowledged by publishing an empty or non-empty
-payload to the ACK subject supplied by the broker.
+Version 2 pull deliveries use the explicit `ACK`, `NACK`, and `EXTEND` commands
+above. Compatibility push deliveries may be acknowledged by publishing an
+empty or non-empty payload to the ACK subject supplied by the broker; empty ACK
+payloads remain valid.
 
 ACK subject format:
 
@@ -678,6 +781,9 @@ Durable subscriptions:
 - Deliveries include an ACK subject either as the `MSG` reply slot or as the
   `Broker-Ack` header in `HMSG`.
 - Unacked messages are redelivered after `ack_timeout_ms`.
+- Version 2 pull fetches are the primary durable API. Version 2 push delivery
+  requires explicit message and byte credit; version 1 keeps the bounded legacy
+  facade.
 
 Stream retention:
 
@@ -734,7 +840,7 @@ server frames always use `\r\n`.
 ## Minimal Durable Client Flow
 
 ```text
-S: INFO {"server_id":"broker","server_name":"broker","version":"0.1.0","proto":1,"max_payload":1048576,"auth_required":false,"tls_required":false}\r\n
+S: INFO {"server_id":"broker","server_name":"broker","version":"0.1.0","proto":2,"protocol_versions":[1,2],"max_payload":1048576,"auth_required":false,"tls_required":false}\r\n
 C: CONNECT {"durable_id":"client1","ack_timeout_ms":30000,"max_in_flight":1024}\r\n
 C: SUB orders.* sid1\r\n
 C: PING\r\n
@@ -753,7 +859,7 @@ C: \r\n
 ## Minimal Transient Client Flow
 
 ```text
-S: INFO {"server_id":"broker","server_name":"broker","version":"0.1.0","proto":1,"max_payload":1048576,"auth_required":false,"tls_required":false}\r\n
+S: INFO {"server_id":"broker","server_name":"broker","version":"0.1.0","proto":2,"protocol_versions":[1,2],"max_payload":1048576,"auth_required":false,"tls_required":false}\r\n
 C: CONNECT {}\r\n
 C: SUB orders.* sid1\r\n
 C: PING\r\n

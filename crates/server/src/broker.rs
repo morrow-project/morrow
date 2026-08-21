@@ -61,6 +61,7 @@ mod inner_admin;
 mod inner_delivery;
 mod manual_clock;
 mod producer_ack;
+mod pull_consumer;
 mod route_mesh;
 mod route_state;
 mod state;
@@ -70,8 +71,8 @@ pub use self::broker::Broker;
 #[allow(unused_imports)]
 use self::{
     cluster_delivery::*, cluster_runtime::*, consumer::*, fake_cluster::*, fake_cluster_types::*,
-    hooks::*, http::*, inner_admin::*, inner_delivery::*, manual_clock::*, route_mesh::*,
-    route_state::*, state::*, subject_helpers::*,
+    hooks::*, http::*, inner_admin::*, inner_delivery::*, manual_clock::*, pull_consumer::*,
+    route_mesh::*, route_state::*, state::*, subject_helpers::*,
 };
 
 #[cfg(test)]

@@ -10,6 +10,8 @@ impl Client {
             max_payload,
             inbox_prefix: default_inbox_prefix(),
             inbox_counter: 0,
+            durable: false,
+            push_credit_messages: 0,
         })
     }
 
@@ -34,6 +36,8 @@ impl Client {
             max_payload,
             inbox_prefix: default_inbox_prefix(),
             inbox_counter: 0,
+            durable: false,
+            push_credit_messages: 0,
         })
     }
 
@@ -98,15 +102,19 @@ impl Client {
             "verbose": verbose,
             "ack_timeout_ms": ack_timeout_ms,
             "max_in_flight": max_in_flight,
+            "protocol_version": 2,
         });
         self.write_line(&format!("CONNECT {payload}")).await?;
         self.inbox_prefix = inbox_prefix(durable_id);
+        self.durable = true;
+        self.push_credit_messages = max_in_flight;
         Ok(())
     }
 
     pub async fn connect_transient(&mut self, verbose: bool) -> Result<()> {
         let payload = serde_json::json!({
             "verbose": verbose,
+            "protocol_version": 2,
         });
         self.write_line(&format!("CONNECT {payload}")).await
     }
@@ -129,19 +137,37 @@ impl Client {
             "verbose": verbose,
             "ack_timeout_ms": ack_timeout_ms,
             "max_in_flight": max_in_flight,
+            "protocol_version": 2,
         });
         self.write_line(&format!("CONNECT {payload}")).await?;
         self.inbox_prefix = inbox_prefix(&auth.client_id);
+        self.durable = true;
+        self.push_credit_messages = max_in_flight;
         Ok(())
     }
 
     pub async fn subscribe(&mut self, subject: &str, sid: &str) -> Result<()> {
-        self.write_line(&format!("SUB {subject} {sid}")).await
+        self.write_line(&format!("SUB {subject} {sid}")).await?;
+        if self.durable && !subject.starts_with("_INBOX.") {
+            self.grant_push_credit(
+                sid,
+                self.push_credit_messages,
+                self.max_payload.saturating_mul(self.push_credit_messages),
+            )
+            .await?;
+        }
+        Ok(())
     }
 
     pub async fn subscribe_queue(&mut self, subject: &str, queue: &str, sid: &str) -> Result<()> {
         self.write_line(&format!("SUB {subject} {queue} {sid}"))
-            .await
+            .await?;
+        self.grant_push_credit(
+            sid,
+            self.push_credit_messages,
+            self.max_payload.saturating_mul(self.push_credit_messages),
+        )
+        .await
     }
 
     pub async fn unsubscribe(&mut self, sid: &str) -> Result<()> {

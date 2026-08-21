@@ -218,6 +218,19 @@ impl TestClient {
         client
     }
 
+    async fn connect_pull(broker: &Broker, durable_id: &str, ack_timeout_ms: u64) -> Self {
+        let mut client = Self::connect(broker).await;
+        let payload = serde_json::json!({
+            "durable_id": durable_id,
+            "verbose": false,
+            "ack_timeout_ms": ack_timeout_ms,
+            "max_in_flight": 2,
+            "protocol_version": 2,
+        });
+        client.write_line(&format!("CONNECT {payload}")).await;
+        client
+    }
+
     async fn send_durable_connect(&mut self, durable_id: &str, ack_timeout_ms: u64) {
         let payload = serde_json::json!({
             "durable_id": durable_id,
@@ -385,7 +398,7 @@ impl TestClient {
         let line = std::str::from_utf8(&frame).unwrap().to_string();
         let mut parts = line.split_whitespace();
         match parts.next() {
-            Some("MSG") => {
+            Some("MSG") | Some("DMSG") => {
                 let tokens = line.split_whitespace().collect::<Vec<_>>();
                 let size = tokens.last().unwrap().parse::<usize>().unwrap();
                 let mut body = vec![0; size + 2];
@@ -515,6 +528,7 @@ async fn http_request_with_auth(broker: &Broker, path: &str, token: Option<&str>
 mod auth_tests;
 mod cluster_admin_tests;
 mod cursor_tests;
+mod pull_tests;
 mod qos_tests;
 mod semantic_tests;
 mod stream_retention_tests;

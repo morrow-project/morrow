@@ -14,7 +14,7 @@ impl Broker {
         if let Some(consumer_ack) = protocol::parse_ack_subject(&subject_name) {
             self.authorize_ack_publish(publisher_id, &consumer_ack)
                 .await?;
-            self.ack(consumer_ack).await?;
+            let _ = self.ack(consumer_ack).await?;
             if let Some(producer_ack) = &producer_ack {
                 self.send_producer_ack(publisher_id, producer_ack, false, None)
                     .await?;
@@ -314,19 +314,23 @@ impl Broker {
         Ok(())
     }
 
-    pub(super) async fn ack(&self, ack: AckSubject) -> Result<()> {
+    pub(super) async fn ack(&self, ack: AckSubject) -> Result<bool> {
         if let Some(cluster) = self.cluster_runtime().await {
-            self.cluster_write(
-                &cluster,
-                BrokerCommand::Ack {
-                    seq: ack.seq,
-                    consumer_id: ack.consumer_id,
-                    delivery_id: ack.delivery_id,
-                },
-            )
-            .await?;
+            let response = self
+                .cluster_write(
+                    &cluster,
+                    BrokerCommand::Ack {
+                        seq: ack.seq,
+                        consumer_id: ack.consumer_id,
+                        delivery_id: ack.delivery_id,
+                    },
+                )
+                .await?;
             self.sync_from_cluster(&cluster).await?;
-            return Ok(());
+            let BrokerResponse::Ack { accepted } = response else {
+                crate::broker_bail!("unexpected cluster ACK response")
+            };
+            return Ok(accepted);
         }
         let mut inner = self.inner.lock().await;
         let mut should_cleanup = false;
@@ -375,7 +379,7 @@ impl Broker {
         if should_cleanup {
             inner.cleanup_acked_messages();
         }
-        Ok(())
+        Ok(valid)
     }
 
     pub(super) async fn send_verbose_ok(&self, publisher_id: u64) -> Result<()> {

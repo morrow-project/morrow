@@ -15,6 +15,12 @@ pub(super) async fn parse_frame(
         "+OK" => Ok(Some(ServerFrame::Ok)),
         "-ERR" => Ok(Some(ServerFrame::Err(line.to_string()))),
         "P-ACK" => parse_producer_ack(parts).map(Some),
+        "C-OK" => parse_consumer_ok(parts).map(Some),
+        "D-OK" => parse_delivery_control_ok(parts).map(Some),
+        "BATCH" => parse_batch(parts).map(Some),
+        "DMSG" => parse_durable_message(stream, parts, max_payload)
+            .await
+            .map(Some),
         "MSG" => parse_msg(stream, parts, max_payload).await.map(Some),
         "HMSG" => parse_hmsg(stream, parts, max_payload).await.map(Some),
         _ => Err(ClientError::msg(format!("unsupported server frame {op}"))),
@@ -30,6 +36,22 @@ pub(super) fn parse_info(line: &str) -> Result<Info> {
         .map_err(|err| ClientError::with_source("parsing INFO JSON", err))?;
     Ok(Info {
         raw: payload.to_string(),
+        proto: value
+            .get("proto")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| value.try_into().ok())
+            .unwrap_or(1),
+        protocol_versions: value
+            .get("protocol_versions")
+            .and_then(serde_json::Value::as_array)
+            .map(|versions| {
+                versions
+                    .iter()
+                    .filter_map(serde_json::Value::as_u64)
+                    .filter_map(|value| value.try_into().ok())
+                    .collect()
+            })
+            .unwrap_or_else(|| vec![1]),
         auth_required: value
             .get("auth_required")
             .and_then(serde_json::Value::as_bool)
@@ -39,6 +61,151 @@ pub(super) fn parse_info(line: &str) -> Result<Info> {
             .and_then(serde_json::Value::as_str)
             .map(str::to_string),
     })
+}
+
+pub(super) fn parse_consumer_ok<'a>(
+    mut parts: impl Iterator<Item = &'a str>,
+) -> Result<ServerFrame> {
+    let operation = next_part(&mut parts, "C-OK missing operation")?.to_string();
+    let name = next_part(&mut parts, "C-OK missing consumer name")?.to_string();
+    reject_extra(&mut parts, "C-OK")?;
+    Ok(ServerFrame::ConsumerOk { operation, name })
+}
+
+pub(super) fn parse_delivery_control_ok<'a>(
+    mut parts: impl Iterator<Item = &'a str>,
+) -> Result<ServerFrame> {
+    let operation = next_part(&mut parts, "D-OK missing operation")?.to_string();
+    let name = next_part(&mut parts, "D-OK missing consumer name")?.to_string();
+    let seq = parse_number(
+        next_part(&mut parts, "D-OK missing sequence")?,
+        "D-OK sequence",
+    )?;
+    let delivery_id = parse_number(
+        next_part(&mut parts, "D-OK missing delivery id")?,
+        "D-OK delivery id",
+    )?;
+    reject_extra(&mut parts, "D-OK")?;
+    Ok(ServerFrame::DeliveryControlOk {
+        operation,
+        name,
+        seq,
+        delivery_id,
+    })
+}
+
+pub(super) fn parse_batch<'a>(mut parts: impl Iterator<Item = &'a str>) -> Result<ServerFrame> {
+    let name = next_part(&mut parts, "BATCH missing consumer name")?.to_string();
+    let messages = parse_number(
+        next_part(&mut parts, "BATCH missing message count")?,
+        "BATCH message count",
+    )?;
+    let bytes = parse_number(
+        next_part(&mut parts, "BATCH missing byte count")?,
+        "BATCH byte count",
+    )?;
+    reject_extra(&mut parts, "BATCH")?;
+    Ok(ServerFrame::Batch {
+        name,
+        messages,
+        bytes,
+    })
+}
+
+pub(super) async fn parse_durable_message<'a>(
+    stream: &mut BufReader<Box<dyn ClientStream>>,
+    mut parts: impl Iterator<Item = &'a str>,
+    max_payload: usize,
+) -> Result<ServerFrame> {
+    let consumer = next_part(&mut parts, "DMSG missing consumer name")?.to_string();
+    let subject = next_part(&mut parts, "DMSG missing subject")?.to_string();
+    let reply_to = match next_part(&mut parts, "DMSG missing reply subject")? {
+        "-" => None,
+        reply_to => Some(reply_to.to_string()),
+    };
+    let durable_stream = next_part(&mut parts, "DMSG missing stream")?.to_string();
+    let partition = parse_number(
+        next_part(&mut parts, "DMSG missing partition")?,
+        "DMSG partition",
+    )?;
+    let offset = parse_number(next_part(&mut parts, "DMSG missing offset")?, "DMSG offset")?;
+    let attempt = parse_number(
+        next_part(&mut parts, "DMSG missing attempt")?,
+        "DMSG attempt",
+    )?;
+    let lease_deadline_ms = parse_number(
+        next_part(&mut parts, "DMSG missing lease deadline")?,
+        "DMSG lease deadline",
+    )?;
+    let seq = parse_number(
+        next_part(&mut parts, "DMSG missing sequence")?,
+        "DMSG sequence",
+    )?;
+    let delivery_id = parse_number(
+        next_part(&mut parts, "DMSG missing delivery id")?,
+        "DMSG delivery id",
+    )?;
+    let headers_len = parse_frame_len(
+        next_part(&mut parts, "DMSG missing headers length")?,
+        "DMSG headers length",
+    )?;
+    let total_len = parse_frame_len(
+        next_part(&mut parts, "DMSG missing total length")?,
+        "DMSG total length",
+    )?;
+    reject_extra(&mut parts, "DMSG")?;
+    if headers_len > total_len {
+        return Err(ClientError::msg(
+            "DMSG headers length exceeds total frame length",
+        ));
+    }
+    if total_len > max_payload {
+        return Err(ClientError::msg(format!(
+            "DMSG total length {total_len} exceeds max payload {max_payload}"
+        )));
+    }
+    let mut body = vec![0; total_len + 2];
+    stream
+        .read_exact(&mut body)
+        .await
+        .map_err(|err| ClientError::with_source("reading DMSG payload", err))?;
+    if &body[total_len..] != b"\r\n" {
+        return Err(ClientError::msg("DMSG payload must be followed by CRLF"));
+    }
+    body.truncate(total_len);
+    let payload = body.split_off(headers_len);
+    let headers = parse_headers(&body)?;
+    Ok(ServerFrame::DurableMessage(DurableMessage {
+        consumer,
+        subject,
+        reply_to,
+        headers,
+        stream: durable_stream,
+        partition,
+        offset,
+        attempt,
+        lease_deadline_ms,
+        seq,
+        delivery_id,
+        payload,
+    }))
+}
+
+fn next_part<'a>(parts: &mut impl Iterator<Item = &'a str>, message: &str) -> Result<&'a str> {
+    parts.next().ok_or_else(|| ClientError::msg(message))
+}
+
+fn reject_extra<'a>(parts: &mut impl Iterator<Item = &'a str>, frame: &str) -> Result<()> {
+    if parts.next().is_some() {
+        return Err(ClientError::msg(format!("{frame} has too many arguments")));
+    }
+    Ok(())
+}
+
+fn parse_number<T: std::str::FromStr>(value: &str, field: &str) -> Result<T> {
+    value
+        .parse()
+        .map_err(|_| ClientError::msg(format!("{field} must be an integer")))
 }
 
 pub(super) fn parse_producer_ack<'a>(

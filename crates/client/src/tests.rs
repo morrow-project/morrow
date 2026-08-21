@@ -122,3 +122,88 @@ async fn rejects_malformed_hmsg_lengths() {
         .unwrap_err();
     assert!(err.to_string().contains("exceeds max payload"));
 }
+
+#[tokio::test]
+async fn parses_pull_batch_and_durable_message_frames() {
+    let (_writer, reader) = tokio::io::duplex(64);
+    let mut reader = BufReader::new(Box::new(reader) as Box<dyn ClientStream>);
+    assert_eq!(
+        parse_frame(&mut reader, "C-OK CREATE worker", 1024)
+            .await
+            .unwrap()
+            .unwrap(),
+        ServerFrame::ConsumerOk {
+            operation: "CREATE".into(),
+            name: "worker".into(),
+        }
+    );
+    assert_eq!(
+        parse_frame(&mut reader, "D-OK ACK worker 7 9", 1024)
+            .await
+            .unwrap()
+            .unwrap(),
+        ServerFrame::DeliveryControlOk {
+            operation: "ACK".into(),
+            name: "worker".into(),
+            seq: 7,
+            delivery_id: 9,
+        }
+    );
+    assert_eq!(
+        parse_frame(&mut reader, "BATCH worker 1 5", 1024)
+            .await
+            .unwrap()
+            .unwrap(),
+        ServerFrame::Batch {
+            name: "worker".into(),
+            messages: 1,
+            bytes: 5,
+        }
+    );
+
+    let (mut writer, reader) = tokio::io::duplex(64);
+    writer
+        .write_all(b"NATS/1.0\r\nTrace-Id: abc\r\n\r\nhello\r\n")
+        .await
+        .unwrap();
+    let mut reader = BufReader::new(Box::new(reader) as Box<dyn ClientStream>);
+    let frame = parse_frame(
+        &mut reader,
+        "DMSG worker orders.created _INBOX.reply orders 2 41 3 900 7 9 27 32",
+        1024,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        frame,
+        ServerFrame::DurableMessage(DurableMessage {
+            consumer: "worker".into(),
+            subject: "orders.created".into(),
+            reply_to: Some("_INBOX.reply".into()),
+            headers: vec![("Trace-Id".into(), "abc".into())],
+            stream: "orders".into(),
+            partition: 2,
+            offset: 41,
+            attempt: 3,
+            lease_deadline_ms: 900,
+            seq: 7,
+            delivery_id: 9,
+            payload: b"hello".to_vec(),
+        })
+    );
+}
+
+#[tokio::test]
+async fn rejects_oversized_pull_delivery_before_allocating_body() {
+    let (_writer, reader) = tokio::io::duplex(64);
+    let mut reader = BufReader::new(Box::new(reader) as Box<dyn ClientStream>);
+    let error = parse_frame(
+        &mut reader,
+        "DMSG worker orders.created - orders 0 0 1 900 7 9 12 2048",
+        1024,
+    )
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("exceeds max payload"));
+}

@@ -18,6 +18,8 @@ pub struct Client {
     max_payload: usize,
     inbox_prefix: String,
     inbox_counter: u64,
+    durable: bool,
+    push_credit_messages: usize,
 }
 #[derive(Debug, Clone)]
 pub struct ClientOptions {
@@ -40,6 +42,8 @@ impl<T> ClientStream for T where T: AsyncRead + AsyncWrite + Unpin + Send {}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Info {
     pub raw: String,
+    pub proto: u32,
+    pub protocol_versions: Vec<u32>,
     pub auth_required: bool,
     pub nonce: Option<String>,
 }
@@ -64,6 +68,21 @@ pub struct ProducerAck {
     pub partitioning_epoch: Option<u64>,
     pub leader_epoch: Option<u64>,
 }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DurableMessage {
+    pub consumer: String,
+    pub subject: String,
+    pub reply_to: Option<String>,
+    pub headers: Vec<(String, String)>,
+    pub stream: String,
+    pub partition: u32,
+    pub offset: u64,
+    pub attempt: u32,
+    pub lease_deadline_ms: u64,
+    pub seq: u64,
+    pub delivery_id: u64,
+    pub payload: Vec<u8>,
+}
 #[derive(Debug, Clone)]
 pub struct ClientAuth {
     client_id: String,
@@ -74,6 +93,22 @@ pub enum ServerFrame {
     Info(Info),
     Message(Message),
     ProducerAck(ProducerAck),
+    ConsumerOk {
+        operation: String,
+        name: String,
+    },
+    DeliveryControlOk {
+        operation: String,
+        name: String,
+        seq: u64,
+        delivery_id: u64,
+    },
+    Batch {
+        name: String,
+        messages: usize,
+        bytes: usize,
+    },
+    DurableMessage(DurableMessage),
     Pong,
     Ok,
     Err(String),
@@ -91,6 +126,8 @@ mod client;
 mod frame_parser;
 #[path = "client/helpers.rs"]
 mod helpers;
+#[path = "client/pull.rs"]
+mod pull;
 use self::{frame_parser::*, helpers::*};
 
 #[cfg(test)]

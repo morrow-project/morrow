@@ -150,6 +150,7 @@ fn apply_record(kind: u8, body: &[u8], state: &mut ReplayState) -> Result<()> {
                     record,
                     cursors: None,
                     pending: BTreeSet::new(),
+                    pending_attempts: HashMap::new(),
                     in_flight: HashMap::new(),
                     acked: HashSet::new(),
                 });
@@ -191,6 +192,10 @@ fn apply_record(kind: u8, body: &[u8], state: &mut ReplayState) -> Result<()> {
             if let Some(consumer) = state.consumers.get_mut(&record.consumer_id) {
                 consumer.cursors = Some(record.cursors);
             }
+        }
+        KIND_CONSUMER_DELETE => {
+            let record = decode_consumer_delete(body)?;
+            state.consumers.remove(&record.consumer_id);
         }
         _ => crate::broker_bail!("unknown WAL record kind {kind}"),
     }
@@ -262,7 +267,12 @@ fn expire_in_flight(state: &mut ReplayState) {
     for consumer in state.consumers.values_mut() {
         let expired: Vec<_> = consumer.in_flight.keys().copied().collect();
         for seq in expired {
-            consumer.in_flight.remove(&seq);
+            let attempt = consumer.in_flight.remove(&seq);
+            if let Some(attempt) = attempt {
+                consumer
+                    .pending_attempts
+                    .insert(seq, attempt.attempt.saturating_add(1));
+            }
             if consumer.cursors.is_none()
                 && !consumer.acked.contains(&seq)
                 && (state.messages.contains_key(&seq) || state.partition_appends.contains_key(&seq))

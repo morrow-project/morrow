@@ -1,5 +1,6 @@
 use std::str;
 
+use crate::consumer_commands::*;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -9,6 +10,7 @@ pub enum Command {
         durable_id: Option<String>,
         ack_timeout_ms: Option<u64>,
         max_in_flight: Option<usize>,
+        protocol_version: Option<u32>,
         auth: Option<ConnectAuth>,
     },
     Ping,
@@ -30,6 +32,42 @@ pub enum Command {
     Unsub {
         sid: String,
         max_messages: Option<usize>,
+    },
+    ConsumerCreate {
+        name: String,
+        filter_subject: String,
+        start: StartPosition,
+    },
+    ConsumerDelete {
+        name: String,
+    },
+    Fetch {
+        name: String,
+        max_messages: usize,
+        max_bytes: usize,
+        max_wait_ms: u64,
+    },
+    Ack {
+        name: String,
+        seq: u64,
+        delivery_id: u64,
+    },
+    Nack {
+        name: String,
+        seq: u64,
+        delivery_id: u64,
+        delay_ms: u64,
+    },
+    Extend {
+        name: String,
+        seq: u64,
+        delivery_id: u64,
+        extension_ms: u64,
+    },
+    Credit {
+        sid: String,
+        messages: usize,
+        bytes: usize,
     },
 }
 
@@ -125,6 +163,12 @@ pub async fn read_command<R: AsyncBufRead + Unpin>(
         "PONG" => Ok(Some(Command::Pong)),
         "SUB" => parse_sub(parts).map(Some),
         "UNSUB" => parse_unsub(parts).map(Some),
+        "CONSUMER" => parse_consumer(parts).map(Some),
+        "FETCH" => parse_fetch(parts).map(Some),
+        "ACK" => parse_delivery_control(parts, "ACK").map(Some),
+        "NACK" => parse_delivery_control(parts, "NACK").map(Some),
+        "EXTEND" => parse_delivery_control(parts, "EXTEND").map(Some),
+        "CREDIT" => parse_credit(parts).map(Some),
         "PUB" => read_pub(reader, parts, max_payload).await.map(Some),
         "HPUB" => read_hpub(reader, parts, max_payload).await.map(Some),
         _ => Err(ProtocolError(format!("unsupported command {op}"))),
@@ -182,12 +226,20 @@ fn parse_connect(payload: &str) -> Result<Command, ProtocolError> {
                 .map_err(|_| ProtocolError("max_in_flight is too large".into()))
         })
         .transpose()?;
+    let protocol_version = get_u64(&value, "protocol_version")?
+        .map(|value| {
+            value
+                .try_into()
+                .map_err(|_| ProtocolError("protocol_version is too large".into()))
+        })
+        .transpose()?;
     let auth = parse_connect_auth(&value)?;
     Ok(Command::Connect {
         verbose,
         durable_id,
         ack_timeout_ms,
         max_in_flight,
+        protocol_version,
         auth,
     })
 }
@@ -299,23 +351,6 @@ fn parse_sub<'a>(mut parts: impl Iterator<Item = &'a str>) -> Result<Command, Pr
         sid,
         start,
     })
-}
-
-fn parse_start_position(value: &str) -> Result<StartPosition, ProtocolError> {
-    match value {
-        "@earliest" => Ok(StartPosition::Earliest),
-        "@latest" => Ok(StartPosition::Latest),
-        "@committed" => Ok(StartPosition::Committed),
-        _ if value.starts_with("@offset:") => value[8..]
-            .parse()
-            .map(StartPosition::Offset)
-            .map_err(|_| ProtocolError("SUB offset must be an integer".into())),
-        _ if value.starts_with("@time:") => value[6..]
-            .parse()
-            .map(StartPosition::Timestamp)
-            .map_err(|_| ProtocolError("SUB timestamp must be an integer".into())),
-        _ => Err(ProtocolError("invalid SUB start position".into())),
-    }
 }
 
 fn parse_unsub<'a>(mut parts: impl Iterator<Item = &'a str>) -> Result<Command, ProtocolError> {
@@ -531,118 +566,6 @@ fn trim_crlf(line: &mut Vec<u8>) -> Result<(), ProtocolError> {
     } else {
         Err(ProtocolError("protocol line missing newline".into()))
     }
-}
-
-pub fn info_line(max_payload: usize, nonce: Option<&str>) -> Vec<u8> {
-    let nonce = nonce
-        .map(|nonce| format!(",\"nonce\":\"{nonce}\",\"auth_required\":true"))
-        .unwrap_or_else(|| ",\"auth_required\":false".to_string());
-    format!(
-        "INFO {{\"server_id\":\"broker\",\"server_name\":\"broker\",\"version\":\"{}\",\"proto\":1,\"max_payload\":{max_payload}{nonce},\"tls_required\":false}}\r\n",
-        env!("CARGO_PKG_VERSION"),
-    )
-    .into_bytes()
-}
-
-pub fn pong() -> &'static [u8] {
-    b"PONG\r\n"
-}
-
-pub fn ok() -> &'static [u8] {
-    b"+OK\r\n"
-}
-
-pub fn producer_ack(msg_id: &str, level: AckLevel, retained: bool, seq: Option<u64>) -> Vec<u8> {
-    let seq = seq
-        .map(|seq| seq.to_string())
-        .unwrap_or_else(|| "-".to_string());
-    format!("P-ACK {msg_id} {} OK {retained} {seq}\r\n", level as u8).into_bytes()
-}
-
-pub fn producer_ack_with_position(
-    msg_id: &str,
-    level: AckLevel,
-    retained: bool,
-    seq: Option<u64>,
-    position: Option<(&str, u32, u64, u64, u64)>,
-) -> Vec<u8> {
-    let mut frame = String::from_utf8(producer_ack(msg_id, level, retained, seq))
-        .expect("producer ack is UTF-8");
-    if let Some((stream, partition, offset, partitioning_epoch, leader_epoch)) = position {
-        frame.truncate(frame.len() - 2);
-        frame.push_str(&format!(
-            " {stream} {partition} {offset} {partitioning_epoch} {leader_epoch}\r\n"
-        ));
-    }
-    frame.into_bytes()
-}
-
-pub fn err(message: &str) -> Vec<u8> {
-    format!("-ERR '{}'\r\n", message.replace('\'', "")).into_bytes()
-}
-
-pub fn msg(subject: &str, sid: &str, reply_to: Option<&str>, payload: &[u8]) -> Vec<u8> {
-    let header = match reply_to {
-        Some(reply_to) => format!("MSG {subject} {sid} {reply_to} {}\r\n", payload.len()),
-        None => format!("MSG {subject} {sid} {}\r\n", payload.len()),
-    };
-    let mut frame = Vec::with_capacity(header.len() + payload.len() + 2);
-    frame.extend_from_slice(header.as_bytes());
-    frame.extend_from_slice(payload);
-    frame.extend_from_slice(b"\r\n");
-    frame
-}
-
-pub fn hmsg(
-    subject: &str,
-    sid: &str,
-    reply_to: Option<&str>,
-    headers: &[(&str, &str)],
-    payload: &[u8],
-) -> Vec<u8> {
-    let mut header_block = String::from("NATS/1.0\r\n");
-    for (name, value) in headers {
-        header_block.push_str(name);
-        header_block.push_str(": ");
-        header_block.push_str(value);
-        header_block.push_str("\r\n");
-    }
-    header_block.push_str("\r\n");
-
-    let headers_len = header_block.len();
-    let total_len = headers_len + payload.len();
-    let protocol_header = match reply_to {
-        Some(reply_to) => format!("HMSG {subject} {sid} {reply_to} {headers_len} {total_len}\r\n"),
-        None => format!("HMSG {subject} {sid} {headers_len} {total_len}\r\n"),
-    };
-    let mut frame = Vec::with_capacity(protocol_header.len() + total_len + 2);
-    frame.extend_from_slice(protocol_header.as_bytes());
-    frame.extend_from_slice(header_block.as_bytes());
-    frame.extend_from_slice(payload);
-    frame.extend_from_slice(b"\r\n");
-    frame
-}
-
-pub fn ack_subject(consumer_id: &str, seq: u64, delivery_id: u64) -> String {
-    format!("_BROKER.ACK.{consumer_id}.{seq}.{delivery_id}")
-}
-
-pub fn parse_ack_subject(subject: &str) -> Option<AckSubject> {
-    let mut parts = subject.split('.');
-    if parts.next()? != "_BROKER" || parts.next()? != "ACK" {
-        return None;
-    }
-    let consumer_id = parts.next()?.to_string();
-    let seq = parts.next()?.parse().ok()?;
-    let delivery_id = parts.next()?.parse().ok()?;
-    if parts.next().is_some() {
-        return None;
-    }
-    Some(AckSubject {
-        consumer_id,
-        seq,
-        delivery_id,
-    })
 }
 
 #[cfg(test)]

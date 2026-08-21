@@ -20,7 +20,7 @@ impl Consumer {
             cursors,
             members: HashMap::new(),
             pending: replay.pending,
-            pending_attempts: HashMap::new(),
+            pending_attempts: replay.pending_attempts,
             in_flight: replay
                 .in_flight
                 .into_iter()
