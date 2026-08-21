@@ -296,7 +296,7 @@ impl Harness {
             tls,
             auth,
             cluster: None,
-            streams: Default::default(),
+            streams: test_streams(),
         };
         let broker = Broker::open(config).unwrap();
         let server = broker.clone();
@@ -355,6 +355,23 @@ fn tls_config() -> TlsConfig {
         key_file: tls_key_file(),
         handshake_timeout_ms: 100,
     }
+}
+
+fn test_streams() -> server::stream::StreamCatalog {
+    server::stream::StreamCatalog::new(
+        [("orders", "orders.>"), ("service", "service.>")]
+            .into_iter()
+            .map(|(name, subject)| server::stream::StreamDefinition {
+                name: server::stream::StreamId::new(name).unwrap(),
+                subjects: vec![subject.to_string()],
+                partitions: 1,
+                partitioning: Default::default(),
+                storage: Default::default(),
+                retention: Default::default(),
+            })
+            .collect(),
+    )
+    .unwrap()
 }
 
 fn tls_cert_file() -> PathBuf {

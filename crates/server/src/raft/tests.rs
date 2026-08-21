@@ -46,6 +46,7 @@ fn applies_publish_attempt_and_ack() {
     );
     assert_eq!(
         state.apply_command(BrokerCommand::Publish {
+            stream: Some("orders".into()),
             subject: "orders.created".into(),
             reply_to: None,
             payload: b"ok".to_vec(),
@@ -84,7 +85,7 @@ fn applies_publish_attempt_and_ack() {
         }),
         BrokerResponse::Ack { accepted: true }
     );
-    assert!(state.messages.is_empty());
+    assert_eq!(state.messages[&1].stream.as_deref(), Some("orders"));
 }
 
 #[test]
@@ -92,6 +93,7 @@ fn publish_without_matching_consumer_is_not_retained() {
     let mut state = DurableState::new(nodes());
     assert_eq!(
         state.apply_command(BrokerCommand::Publish {
+            stream: None,
             subject: "orders.created".into(),
             reply_to: None,
             payload: b"ok".to_vec(),
@@ -117,11 +119,13 @@ fn delivery_attempts_allocate_monotonic_delivery_ids() {
         },
     });
     state.apply_command(BrokerCommand::Publish {
+        stream: Some("orders".into()),
         subject: "orders.created".into(),
         reply_to: None,
         payload: b"one".to_vec(),
     });
     state.apply_command(BrokerCommand::Publish {
+        stream: Some("orders".into()),
         subject: "orders.updated".into(),
         reply_to: None,
         payload: b"two".to_vec(),
@@ -167,6 +171,7 @@ fn ack_rejects_stale_delivery_id() {
         },
     });
     state.apply_command(BrokerCommand::Publish {
+        stream: Some("orders".into()),
         subject: "orders.created".into(),
         reply_to: None,
         payload: b"one".to_vec(),
@@ -209,6 +214,7 @@ fn cleanup_waits_for_all_interested_consumers_to_ack() {
         });
     }
     state.apply_command(BrokerCommand::Publish {
+        stream: None,
         subject: "orders.created".into(),
         reply_to: None,
         payload: b"one".to_vec(),

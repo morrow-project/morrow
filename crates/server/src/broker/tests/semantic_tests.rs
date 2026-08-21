@@ -64,7 +64,7 @@ async fn durable_subscribe_publish_delivery_and_ack_are_deterministic() {
     assert!(consumer.pending.is_empty());
     assert!(consumer.in_flight.is_empty());
     assert!(consumer.acked.contains(&1));
-    assert!(inner.messages.is_empty());
+    assert_eq!(inner.messages[&1].stream.as_deref(), Some("orders"));
 }
 #[tokio::test]
 async fn redelivery_waits_for_manual_clock_deadline() {
@@ -111,7 +111,7 @@ async fn acked_message_does_not_redeliver_after_manual_ticks() {
     scenario.tick_redelivery().await;
     subscriber.expect_no_frame_short().await;
     let inner = scenario.broker().inner.lock().await;
-    assert!(inner.messages.is_empty());
+    assert_eq!(inner.messages[&1].stream.as_deref(), Some("orders"));
     let consumer = inner.consumers.get("durable-client1-sid1").unwrap();
     assert!(consumer.pending.is_empty());
     assert!(consumer.in_flight.is_empty());
@@ -200,7 +200,7 @@ async fn wal_rotation_and_shutdown_checkpoint_preserve_durable_state() {
     let redelivery = subscriber.expect_msg().await;
     assert!(redelivery.starts_with("MSG orders.two sid1 _BROKER.ACK.durable-client1-sid1.2.3"));
     let inner = scenario.broker().inner.lock().await;
-    assert!(!inner.messages.contains_key(&1));
+    assert_eq!(inner.messages[&1].stream.as_deref(), Some("orders"));
     assert!(inner.messages.contains_key(&2));
     assert!(inner.consumers["durable-client1-sid1"].acked.contains(&1));
 }
@@ -232,11 +232,11 @@ async fn request_reply_inbox_delivery_is_transient() {
     assert_eq!(inner.consumers.len(), 1);
 }
 #[tokio::test]
-async fn publish_without_matching_durable_consumer_is_not_retained() {
+async fn publish_without_stream_binding_is_not_retained() {
     let scenario = Scenario::new();
     let mut publisher = scenario.connect_durable("publisher1", 25).await;
 
-    publisher.publish("orders.created", b"hello").await;
+    publisher.publish("unbound.created", b"hello").await;
     publisher.ping_roundtrip().await;
     assert!(scenario.broker().inner.lock().await.messages.is_empty());
 }
@@ -483,7 +483,7 @@ async fn fake_cluster_runtime_drives_broker_flow_across_100_nodes() {
     assert!(consumer.pending.is_empty());
     assert!(consumer.in_flight.is_empty());
     assert!(consumer.acked.contains(&1));
-    assert!(durable.messages.is_empty());
+    assert_eq!(durable.messages[&1].stream.as_deref(), Some("orders"));
     assert_eq!(scenario.fake_cluster().write_count(), 4);
 }
 #[tokio::test]

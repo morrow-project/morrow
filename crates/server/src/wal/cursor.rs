@@ -47,4 +47,8 @@ impl Cursor<'_> {
         crate::broker_ensure!(self.pos == self.bytes.len(), "trailing bytes in WAL record");
         Ok(())
     }
+
+    pub(super) fn is_finished(&self) -> bool {
+        self.pos == self.bytes.len()
+    }
 }

@@ -203,6 +203,13 @@ impl Inner {
             .messages
             .iter()
             .filter(|(seq, _)| {
+                if self
+                    .messages
+                    .get(seq)
+                    .is_some_and(|message| message.stream.is_some())
+                {
+                    return false;
+                }
                 let mut interested = false;
                 for consumer in self.consumers.values() {
                     if consumer.pending.contains(seq)

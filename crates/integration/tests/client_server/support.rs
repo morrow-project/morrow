@@ -8,7 +8,7 @@ pub(super) use server::{
 pub(super) use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
+    sync::atomic::{AtomicU64, Ordering},
 };
 pub(super) use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -38,14 +38,16 @@ pub(super) fn auth_config_with_permissions(
 }
 
 pub(super) struct TestDir(PathBuf);
+static NEXT_TEST_DIR: AtomicU64 = AtomicU64::new(0);
+
 impl TestDir {
     pub(super) fn new() -> Self {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!("client-server-harness-{unique}"));
-        std::fs::create_dir_all(&path).unwrap();
+        let unique = NEXT_TEST_DIR.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "client-server-harness-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&path).unwrap();
         Self(path)
     }
 
@@ -146,7 +148,7 @@ impl ClusterHarness {
                     heartbeat_interval_ms: 50,
                     snapshot_threshold: 100,
                 }),
-                streams: Default::default(),
+                streams: test_streams(),
             };
             let broker = Broker::open(config).unwrap();
             let server = broker.clone();
@@ -338,7 +340,7 @@ impl Harness {
             tls,
             auth,
             cluster: None,
-            streams: Default::default(),
+            streams: test_streams(),
         };
         let broker = Broker::open(config).unwrap();
         let server = broker.clone();
@@ -367,6 +369,23 @@ pub(super) fn tls_config() -> TlsConfig {
         key_file: tls_key_file(),
         handshake_timeout_ms: 100,
     }
+}
+
+fn test_streams() -> server::stream::StreamCatalog {
+    server::stream::StreamCatalog::new(
+        [("orders", "orders.>"), ("service", "service.>")]
+            .into_iter()
+            .map(|(name, subject)| server::stream::StreamDefinition {
+                name: server::stream::StreamId::new(name).unwrap(),
+                subjects: vec![subject.to_string()],
+                partitions: 1,
+                partitioning: Default::default(),
+                storage: Default::default(),
+                retention: Default::default(),
+            })
+            .collect(),
+    )
+    .unwrap()
 }
 pub(super) fn tls_cert_file() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/server-cert.pem")

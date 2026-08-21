@@ -6,6 +6,7 @@ pub(super) fn publish_body(record: &PublishRecord) -> Result<Vec<u8>> {
     put_string(&mut body, &record.subject)?;
     put_option_string(&mut body, record.reply_to.as_deref())?;
     put_bytes(&mut body, &record.payload)?;
+    put_option_string(&mut body, record.stream.as_deref())?;
     Ok(body)
 }
 pub(super) fn consumer_upsert_body(record: &ConsumerRecord) -> Result<Vec<u8>> {
@@ -90,11 +91,21 @@ pub(super) fn decode_publish(body: &[u8]) -> Result<PublishRecord> {
         bytes: body,
         pos: 0,
     };
+    let seq = cursor.u64()?;
+    let subject = cursor.string()?;
+    let reply_to = cursor.option_string()?;
+    let payload = cursor.bytes()?;
+    let stream = if cursor.is_finished() {
+        None
+    } else {
+        cursor.option_string()?
+    };
     let record = PublishRecord {
-        seq: cursor.u64()?,
-        subject: cursor.string()?,
-        reply_to: cursor.option_string()?,
-        payload: cursor.bytes()?,
+        seq,
+        stream,
+        subject,
+        reply_to,
+        payload,
     };
     cursor.finish()?;
     Ok(record)

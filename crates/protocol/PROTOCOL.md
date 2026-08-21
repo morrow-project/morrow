@@ -154,9 +154,10 @@ Producer acknowledgement for a publish that requested per-message QoS.
 P-ACK <msg-id> <level> OK <retained> <seq>\r\n
 ```
 
-`level` is the requested QoS value. `retained` is `true` when the publish was
-stored for at least one durable consumer. `seq` is the durable sequence number
-when retained, or `-` when not retained.
+`level` is the requested QoS value. `retained` is `true` when the subject is
+bound to a configured stream and the publication is owned by that stream.
+`seq` is the durable sequence number after append, or `-` for an accepted-only
+acknowledgement that does not wait for append.
 
 ### -ERR
 
@@ -541,7 +542,10 @@ QoS headers are producer metadata and are not forwarded to subscribers.
   at most 128 bytes, and contain no whitespace.
 
 Successful QoS publishes receive `P-ACK` and do not also receive verbose `+OK`.
-Failures receive `-ERR`.
+QoS levels 1 through 3 require a configured stream binding for the publish
+subject; an unbound subject receives `-ERR 'NO_DURABLE_BINDING ...'`. Level 0
+may succeed without a stream binding and reports `retained=false`. Other
+failures receive `-ERR`.
 
 ## Durable ACKs
 
@@ -631,12 +635,22 @@ Transient subscriptions:
 Durable subscriptions:
 
 - Persist consumer state in the WAL or Raft state, depending on server mode.
-- Retain messages only when a matching durable consumer already exists at
-  publish time.
-- Do not retain messages published before the durable consumer exists.
+- Read retained messages owned by configured streams that match their subject.
+- Do not control whether new publications are retained; adding or removing a
+  consumer does not change a stream's append behavior.
 - Deliveries include an ACK subject either as the `MSG` reply slot or as the
   `Broker-Ack` header in `HMSG`.
 - Unacked messages are redelivered after `ack_timeout_ms`.
+
+Stream retention:
+
+- A non-inbox publication whose subject matches a configured stream is appended
+  once to its primary stream, whether or not a durable consumer exists.
+- A publication without a stream binding remains live-only unless durable QoS
+  was requested, in which case it is rejected as described above.
+- `_INBOX.*` publications always remain transient.
+- Live transient delivery is attempted before the durable append or cluster
+  commit. A later durability failure can therefore follow a live delivery.
 
 Queue durable subscriptions:
 

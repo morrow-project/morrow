@@ -164,6 +164,7 @@ fn migrates_legacy_wal_to_segmented_layout() {
     .unwrap();
     let record = PublishRecord {
         seq: 1,
+        stream: None,
         subject: "orders.created".into(),
         reply_to: None,
         payload: b"one".to_vec(),

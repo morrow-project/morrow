@@ -125,12 +125,6 @@ impl Inner {
             .collect()
     }
 
-    pub(super) fn has_matching_durable_consumer(&self, subject_name: &str) -> bool {
-        self.consumers
-            .values()
-            .any(|consumer| subject::matches(&consumer.record.filter_subject, subject_name))
-    }
-
     pub(super) fn matching_durable_consumers(&self, subject_name: &str) -> Vec<String> {
         self.consumers
             .iter()

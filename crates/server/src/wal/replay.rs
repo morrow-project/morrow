@@ -255,6 +255,12 @@ pub(super) fn cleanup_acked_messages(
         .keys()
         .copied()
         .filter(|seq| {
+            if messages
+                .get(seq)
+                .is_some_and(|message| message.stream.is_some())
+            {
+                return false;
+            }
             let mut interested = false;
             for consumer in consumers.values() {
                 if consumer.pending.contains(seq)

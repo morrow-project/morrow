@@ -51,11 +51,32 @@ impl Wal {
         reply_to: Option<&str>,
         payload: &[u8],
     ) -> Result<PublishRecord> {
+        self.append_publish_with_stream(None, subject, reply_to, payload)
+    }
+
+    pub fn append_stream_publish(
+        &mut self,
+        stream: &str,
+        subject: &str,
+        reply_to: Option<&str>,
+        payload: &[u8],
+    ) -> Result<PublishRecord> {
+        self.append_publish_with_stream(Some(stream), subject, reply_to, payload)
+    }
+
+    fn append_publish_with_stream(
+        &mut self,
+        stream: Option<&str>,
+        subject: &str,
+        reply_to: Option<&str>,
+        payload: &[u8],
+    ) -> Result<PublishRecord> {
         let seq = self.next_seq;
         self.next_seq += 1;
 
         let record = PublishRecord {
             seq,
+            stream: stream.map(str::to_string),
             subject: subject.to_string(),
             reply_to: reply_to.map(str::to_string),
             payload: payload.to_vec(),

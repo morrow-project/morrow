@@ -122,7 +122,7 @@ async fn http_wal_endpoint_requires_auth_and_reports_metrics() {
     assert!(ok.contains("\"active_segment_bytes\""));
     assert!(ok.contains("\"sealed_segment_count\""));
     assert!(ok.contains("\"total_wal_bytes\""));
-    assert!(ok.contains("\"retained_message_count\":0"));
+    assert!(ok.contains("\"retained_message_count\":1"));
     assert!(ok.contains("\"consumer_count\":1"));
     assert!(ok.contains("\"next_seq\":2"));
     assert!(ok.contains("\"next_delivery_id\":2"));
@@ -281,6 +281,7 @@ async fn route_enabled_follower_rejects_durable_writes() {
         .cluster_write(
             &cluster,
             BrokerCommand::Publish {
+                stream: Some("orders".into()),
                 subject: "orders.created".into(),
                 reply_to: None,
                 payload: b"hello".to_vec(),
@@ -293,21 +294,21 @@ async fn route_enabled_follower_rejects_durable_writes() {
     assert_eq!(scenario.fake_cluster().write_count(), 0);
 }
 #[tokio::test]
-async fn clustered_transient_publish_without_durable_match_does_not_propose_raft() {
+async fn clustered_transient_publish_without_stream_binding_does_not_propose_raft() {
     let scenario = Scenario::new_fake_cluster_local_node(3, 2, Some(1));
     let mut subscriber = scenario.connect().await;
     let mut publisher = scenario.connect().await;
 
     subscriber.write_line("CONNECT {}").await;
     publisher.write_line("CONNECT {}").await;
-    subscriber.subscribe("topic", "sid1").await;
+    subscriber.subscribe("live.*", "sid1").await;
     subscriber.ping_roundtrip().await;
 
-    publisher.publish("topic", b"hello").await;
+    publisher.publish("live.topic", b"hello").await;
     publisher.ping_roundtrip().await;
 
     let delivery = subscriber.expect_msg().await;
-    assert_eq!(delivery, "MSG topic sid1 5\r\nhello\r\n");
+    assert_eq!(delivery, "MSG live.topic sid1 5\r\nhello\r\n");
     assert_eq!(scenario.fake_cluster().write_count(), 0);
 }
 #[tokio::test]

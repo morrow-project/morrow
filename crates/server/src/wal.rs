@@ -21,6 +21,7 @@ pub const DEFAULT_WAL_SEGMENT_BYTES: u64 = 64 * 1024 * 1024;
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct PublishRecord {
     pub seq: u64,
+    pub stream: Option<String>,
     pub subject: String,
     pub reply_to: Option<String>,
     pub payload: Vec<u8>,

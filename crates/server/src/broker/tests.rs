@@ -393,8 +393,28 @@ fn test_config(dir: &Path) -> Config {
         tls: None,
         auth: Default::default(),
         cluster: None,
-        streams: Default::default(),
+        streams: test_streams(),
     }
+}
+fn test_streams() -> crate::stream::StreamCatalog {
+    crate::stream::StreamCatalog::new(
+        [
+            ("orders", "orders.>"),
+            ("service", "service.>"),
+            ("topic", "topic"),
+        ]
+        .into_iter()
+        .map(|(name, subject)| crate::stream::StreamDefinition {
+            name: crate::stream::StreamId::new(name).unwrap(),
+            subjects: vec![subject.to_string()],
+            partitions: 1,
+            partitioning: Default::default(),
+            storage: Default::default(),
+            retention: Default::default(),
+        })
+        .collect(),
+    )
+    .unwrap()
 }
 fn deterministic_broker(
     config: Config,
@@ -471,3 +491,4 @@ mod auth_tests;
 mod cluster_admin_tests;
 mod qos_tests;
 mod semantic_tests;
+mod stream_retention_tests;

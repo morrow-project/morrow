@@ -1,7 +1,7 @@
 use super::*;
 
 #[tokio::test]
-async fn accepted_qos_acks_without_wal_retention() {
+async fn accepted_qos_acks_before_stream_retention() {
     let scenario = Scenario::new();
     let mut subscriber = scenario.connect_durable("client1", 25).await;
     let mut publisher = scenario.connect_durable("publisher1", 25).await;
@@ -18,12 +18,12 @@ async fn accepted_qos_acks_without_wal_retention() {
         .await;
 
     publisher
-        .expect_producer_ack("msg-accepted", 0, false, "-")
+        .expect_producer_ack("msg-accepted", 0, true, "-")
         .await;
-    subscriber.expect_no_frame_short().await;
+    subscriber.expect_msg().await;
     let inner = scenario.broker().inner.lock().await;
-    assert!(inner.messages.is_empty());
-    assert!(inner.consumers["durable-client1-sid1"].pending.is_empty());
+    assert_eq!(inner.messages[&1].stream.as_deref(), Some("orders"));
+    assert_eq!(inner.consumers["durable-client1-sid1"].in_flight.len(), 1);
 }
 
 #[tokio::test]
@@ -75,22 +75,20 @@ async fn high_durability_qos_acks_after_local_flush() {
 }
 
 #[tokio::test]
-async fn qos_no_durable_match_acks_not_retained() {
+async fn durable_qos_without_stream_binding_returns_error() {
     let scenario = Scenario::new();
     let mut publisher = scenario.connect_durable("publisher1", 25).await;
 
     publisher
         .publish_qos(
-            "orders.created",
+            "unbound.created",
             b"hello",
             protocol::AckLevel::Durable,
             "msg-none",
         )
         .await;
 
-    publisher
-        .expect_producer_ack("msg-none", 1, false, "-")
-        .await;
+    publisher.expect_err_contains("NO_DURABLE_BINDING").await;
 }
 
 #[tokio::test]
@@ -162,7 +160,7 @@ async fn qos_publish_does_not_also_emit_verbose_ok() {
         .await;
 
     publisher
-        .expect_producer_ack("msg-verbose", 1, false, "-")
+        .expect_producer_ack("msg-verbose", 1, true, "1")
         .await;
     publisher.expect_no_frame_short().await;
 }

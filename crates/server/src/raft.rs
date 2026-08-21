@@ -50,6 +50,8 @@ pub type BrokerRaft = openraft::Raft<BrokerRaftConfig>;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BrokerCommand {
     Publish {
+        #[serde(default)]
+        stream: Option<String>,
         subject: String,
         reply_to: Option<String>,
         payload: Vec<u8>,
@@ -118,6 +120,7 @@ impl DurableState {
     pub fn apply_command(&mut self, command: BrokerCommand) -> BrokerResponse {
         match command {
             BrokerCommand::Publish {
+                stream,
                 subject,
                 reply_to,
                 payload,
@@ -130,7 +133,7 @@ impl DurableState {
                     })
                     .map(|(consumer_id, _)| consumer_id.clone())
                     .collect::<Vec<_>>();
-                if matching_consumers.is_empty() {
+                if stream.is_none() && matching_consumers.is_empty() {
                     return BrokerResponse::Publish {
                         seq: None,
                         retained: false,
@@ -141,6 +144,7 @@ impl DurableState {
                 self.next_seq += 1;
                 let record = PublishRecord {
                     seq,
+                    stream,
                     subject,
                     reply_to,
                     payload,
@@ -233,6 +237,13 @@ impl DurableState {
             .keys()
             .copied()
             .filter(|seq| {
+                if self
+                    .messages
+                    .get(seq)
+                    .is_some_and(|message| message.stream.is_some())
+                {
+                    return false;
+                }
                 let mut interested = false;
                 for consumer in self.consumers.values() {
                     if consumer.pending.contains(seq)

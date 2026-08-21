@@ -63,14 +63,6 @@ impl Broker {
                 .await;
         }
 
-        if let Some(ack) = ack {
-            if ack.level == protocol::AckLevel::Accepted {
-                self.send_producer_ack(publisher_id, ack, false, None)
-                    .await?;
-                return Ok(());
-            }
-        }
-
         if is_inbox_publish(&subject_name) {
             if let Some(ack) = ack {
                 self.send_producer_ack(publisher_id, ack, false, None)
@@ -81,24 +73,33 @@ impl Broker {
             return Ok(());
         }
 
-        if let Some(cluster) = self.cluster_runtime().await {
-            let has_durable = {
-                let inner = self.inner.lock().await;
-                inner.has_matching_durable_consumer(&subject_name)
-            };
-            if !has_durable {
-                if let Some(ack) = ack {
-                    self.send_producer_ack(publisher_id, ack, false, None)
-                        .await?;
-                } else if verbose {
-                    self.send_to(publisher_id, protocol::ok().to_vec()).await?;
-                }
-                return Ok(());
+        let stream_name = self
+            .config
+            .streams
+            .resolve_primary(&subject_name)
+            .map(|stream| stream.name.as_str().to_string());
+        let accepted_ack = ack.is_some_and(|ack| ack.level == protocol::AckLevel::Accepted);
+        if accepted_ack {
+            self.send_producer_ack(publisher_id, ack.unwrap(), stream_name.is_some(), None)
+                .await?;
+        }
+        if stream_name.is_none() {
+            if ack.is_some() && !accepted_ack {
+                crate::broker_bail!("NO_DURABLE_BINDING for subject {subject_name}");
             }
+            if ack.is_none() && verbose {
+                self.send_to(publisher_id, protocol::ok().to_vec()).await?;
+            }
+            return Ok(());
+        }
+        let stream_name = stream_name.unwrap();
+
+        if let Some(cluster) = self.cluster_runtime().await {
             let response = self
                 .cluster_write(
                     &cluster,
                     BrokerCommand::Publish {
+                        stream: Some(stream_name),
                         subject: subject_name,
                         reply_to,
                         payload,
@@ -110,7 +111,7 @@ impl Broker {
                 BrokerResponse::Publish { seq, retained } => (retained, seq),
                 _ => (false, None),
             };
-            if let Some(ack) = ack {
+            if let Some(ack) = ack.filter(|_| !accepted_ack) {
                 self.send_producer_ack(publisher_id, ack, retained, seq)
                     .await?;
             }
@@ -121,31 +122,26 @@ impl Broker {
             return Ok(());
         }
 
-        let (has_durable, seq) = {
+        let seq = {
             let mut inner = self.inner.lock().await;
             let matching_consumers = inner.matching_durable_consumers(&subject_name);
-            let has_durable = !matching_consumers.is_empty();
-            let mut seq = None;
-            if has_durable {
-                let record =
-                    inner
-                        .wal
-                        .append_publish(&subject_name, reply_to.as_deref(), &payload)?;
-                seq = Some(record.seq);
-                for consumer_id in matching_consumers {
-                    if let Some(consumer) = inner.consumers.get_mut(&consumer_id) {
-                        consumer.pending.insert(record.seq);
-                    }
+            let record = inner.wal.append_stream_publish(
+                &stream_name,
+                &subject_name,
+                reply_to.as_deref(),
+                &payload,
+            )?;
+            for consumer_id in matching_consumers {
+                if let Some(consumer) = inner.consumers.get_mut(&consumer_id) {
+                    consumer.pending.insert(record.seq);
                 }
-                inner.messages.insert(record.seq, record);
-            } else {
-                inner.wal.flush_due()?;
             }
-
-            (has_durable, seq)
+            let seq = record.seq;
+            inner.messages.insert(record.seq, record);
+            seq
         };
 
-        if has_durable && ack.is_none_or(|ack| ack.level == protocol::AckLevel::HighDurability) {
+        if ack.is_none_or(|ack| ack.level == protocol::AckLevel::HighDurability) {
             match self.hooks.durable_publish_flush_mode {
                 DurablePublishFlushMode::SleepThenFlush => {
                     tokio::time::sleep(self.config.fsync_interval()).await;
@@ -160,8 +156,8 @@ impl Broker {
             }
         }
 
-        if let Some(ack) = ack {
-            self.send_producer_ack(publisher_id, ack, has_durable, seq)
+        if let Some(ack) = ack.filter(|_| !accepted_ack) {
+            self.send_producer_ack(publisher_id, ack, true, Some(seq))
                 .await?;
         }
 
