@@ -528,6 +528,7 @@ async fn http_request_with_auth(broker: &Broker, path: &str, token: Option<&str>
 
 mod auth_tests;
 mod cluster_admin_tests;
+mod compaction_tests;
 mod cursor_tests;
 mod middleware_tests;
 mod pull_tests;

@@ -58,6 +58,50 @@ impl HostState {
 pub(super) fn add_host_functions(linker: &mut Linker<HostState>) -> wasmtime::Result<()> {
     linker.func_wrap(
         "broker",
+        "get-field",
+        |mut caller: Caller<'_, HostState>, field: i32, ptr: i32, capacity: i32| -> i32 {
+            if !caller.data_mut().require(Capability::ReadMessage) {
+                return -1;
+            }
+            let bytes = match field {
+                0 => caller.data().message.subject.as_bytes().to_vec(),
+                1 => caller.data().message.key.clone().unwrap_or_default(),
+                2 => match serde_json::to_vec(&caller.data().message.headers) {
+                    Ok(headers) => headers,
+                    Err(_) => return -1,
+                },
+                3 => caller.data().message.payload.clone(),
+                4 => caller
+                    .data()
+                    .message
+                    .reply_to
+                    .as_deref()
+                    .unwrap_or_default()
+                    .as_bytes()
+                    .to_vec(),
+                _ => {
+                    caller.data_mut().denied = Some("unknown message field".to_string());
+                    return -1;
+                }
+            };
+            if !caller.data_mut().allocate(bytes.len()) {
+                return -1;
+            }
+            let Ok(capacity) = usize::try_from(capacity) else {
+                caller.data_mut().denied = Some("negative guest output capacity".to_string());
+                return -1;
+            };
+            if bytes.len() > capacity || write_guest(&mut caller, ptr, &bytes).is_none() {
+                if caller.data().denied.is_none() {
+                    caller.data_mut().denied = Some("guest output buffer is too small".to_string());
+                }
+                return -1;
+            }
+            i32::try_from(bytes.len()).unwrap_or(-1)
+        },
+    )?;
+    linker.func_wrap(
+        "broker",
         "set-field",
         |mut caller: Caller<'_, HostState>, field: i32, ptr: i32, len: i32| -> i32 {
             let Some(bytes) = read_guest(&mut caller, ptr, len) else {
@@ -77,18 +121,18 @@ pub(super) fn add_host_functions(linker: &mut Linker<HostState>) -> wasmtime::Re
                     state.message.key = Some(bytes);
                     Some(())
                 }
-                2 if state.require(Capability::WritePayload)
-                    && state.stage.may_mutate_persisted_fields() =>
-                {
-                    state.message.payload = bytes;
-                    Some(())
-                }
-                3 if state.require(Capability::WriteHeaders)
+                2 if state.require(Capability::WriteHeaders)
                     && state.stage.may_mutate_persisted_fields() =>
                 {
                     serde_json::from_slice(&bytes)
                         .ok()
                         .map(|headers| state.message.headers = headers)
+                }
+                3 if state.require(Capability::WritePayload)
+                    && state.stage.may_mutate_persisted_fields() =>
+                {
+                    state.message.payload = bytes;
+                    Some(())
                 }
                 _ => None,
             };
@@ -186,6 +230,19 @@ pub(super) fn add_host_functions(linker: &mut Linker<HostState>) -> wasmtime::Re
         },
     )?;
     Ok(())
+}
+
+fn write_guest(caller: &mut Caller<'_, HostState>, ptr: i32, bytes: &[u8]) -> Option<()> {
+    let ptr = usize::try_from(ptr).ok()?;
+    let Extern::Memory(memory) = caller.get_export("memory")? else {
+        caller.data_mut().denied = Some("middleware has no exported memory".to_string());
+        return None;
+    };
+    if memory.write(&mut *caller, ptr, bytes).is_err() {
+        caller.data_mut().denied = Some("middleware memory access is out of bounds".to_string());
+        return None;
+    }
+    Some(())
 }
 
 fn read_guest(caller: &mut Caller<'_, HostState>, ptr: i32, len: i32) -> Option<Vec<u8>> {

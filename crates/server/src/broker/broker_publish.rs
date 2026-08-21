@@ -267,6 +267,7 @@ impl Broker {
                     .insert((stream, partition, offset), record.seq);
             }
             inner.messages.insert(record.seq, record.clone());
+            inner.apply_stream_compaction(&self.config.streams);
             record
         };
 

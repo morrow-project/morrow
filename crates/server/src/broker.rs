@@ -53,6 +53,7 @@ mod broker_lifecycle;
 mod broker_publish;
 mod cluster_operations;
 mod cluster_runtime;
+mod compaction;
 mod consumer;
 mod fake_cluster;
 mod fake_cluster_types;
@@ -72,9 +73,9 @@ mod subject_helpers;
 pub use self::broker::Broker;
 #[allow(unused_imports)]
 use self::{
-    cluster_runtime::*, consumer::*, fake_cluster::*, fake_cluster_types::*, hooks::*, http::*,
-    inner_admin::*, inner_delivery::*, manual_clock::*, pull_consumer::*, route_mesh::*,
-    route_state::*, state::*, subject_helpers::*,
+    cluster_runtime::*, compaction::*, consumer::*, fake_cluster::*, fake_cluster_types::*,
+    hooks::*, http::*, inner_admin::*, inner_delivery::*, manual_clock::*, pull_consumer::*,
+    route_mesh::*, route_state::*, state::*, subject_helpers::*,
 };
 
 #[cfg(test)]

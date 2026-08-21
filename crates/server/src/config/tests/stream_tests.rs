@@ -1,5 +1,5 @@
 use super::*;
-use crate::stream::{PartitionFallback, PartitioningStrategy, StorageMode};
+use crate::stream::{CompactionPolicy, PartitionFallback, PartitioningStrategy, StorageMode};
 
 #[test]
 fn parses_stream_configuration() {
@@ -42,6 +42,36 @@ fn parses_stream_configuration() {
     assert_eq!(stream.storage.min_ack_replicas, 3);
     assert_eq!(stream.retention.max_age_ms, Some(60_000));
     assert_eq!(stream.retention.max_bytes, Some(1_048_576));
+    assert_eq!(stream.retention.compaction, CompactionPolicy::None);
+}
+
+#[test]
+fn enables_four_key_compacted_connector_control_streams() {
+    let config = Config::from_json(&serde_json::json!({
+        "wal_dir": "./target/test-connector-control-stream-config",
+        "connector_control_plane": {
+            "storage": {
+                "mode": "quorum_fsync",
+                "replicas": 3,
+                "min_ack_replicas": 2
+            }
+        }
+    }))
+    .unwrap();
+
+    assert_eq!(config.streams.definitions().len(), 4);
+    for stream in config.streams.definitions() {
+        assert_eq!(stream.retention.compaction, CompactionPolicy::Key);
+        assert_eq!(stream.storage.mode, StorageMode::QuorumFsync);
+        assert_eq!(stream.partitions, 1);
+        assert_eq!(stream.subjects.len(), 1);
+    }
+    for (_, subject) in protocol::connector_control::CONTROL_SUBJECTS {
+        assert_eq!(
+            config.streams.resolve_primary(subject).unwrap().subjects,
+            vec![subject.to_string()]
+        );
+    }
 }
 
 #[test]

@@ -70,7 +70,7 @@ async fn before_deliver_mutation_is_a_projection_not_a_stored_record_change() {
                     (memory (export \"memory\") 1)
                     (data (i32.const 0) \"changed\")
                     (func (export \"process\") (param i32) (result i32)
-                      i32.const 2 i32.const 0 i32.const 7 call $set drop i32.const 0))",
+                      i32.const 3 i32.const 0 i32.const 7 call $set drop i32.const 0))",
             )
             .unwrap(),
         )])

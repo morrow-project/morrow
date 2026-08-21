@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod connector_control;
 mod consumer_commands;
 mod frames;
 pub mod protocol;

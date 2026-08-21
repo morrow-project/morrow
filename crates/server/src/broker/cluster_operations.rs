@@ -100,7 +100,7 @@ impl Broker {
     pub(super) async fn sync_from_cluster(&self, cluster: &ClusterRuntime) -> Result<()> {
         let state = cluster.durable_state();
         let mut inner = self.inner.lock().await;
-        inner.sync_durable_state(state)
+        inner.sync_durable_state(state, &self.config.streams)
     }
 
     pub(super) async fn sync_route_interests(&self) {

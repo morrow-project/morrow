@@ -91,6 +91,7 @@ impl Broker {
                 .into_iter()
                 .map(|(seq, envelope)| (seq, PublishRecord::from(envelope))),
         );
+        compact_stream_records(&mut replay.messages, &config.streams);
         let tls_acceptor = config
             .tls
             .as_ref()

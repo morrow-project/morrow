@@ -1,24 +1,34 @@
 use super::*;
 use crate::stream::{
-    PartitionFallback, PartitioningPolicy, PartitioningStrategy, RetentionPolicy, StorageMode,
-    StoragePolicy, StreamCatalog, StreamDefinition, StreamId,
+    CompactionPolicy, PartitionFallback, PartitioningPolicy, PartitioningStrategy, RetentionPolicy,
+    StorageMode, StoragePolicy, StreamCatalog, StreamDefinition, StreamId,
+    connector_control_streams,
 };
 
 pub(super) fn get_streams_config(value: &serde_json::Value) -> Result<StreamCatalog> {
-    let Some(streams) = value.get("streams") else {
-        return Ok(StreamCatalog::default());
+    let mut definitions = match value.get("streams") {
+        None | Some(serde_json::Value::Null) => Vec::new(),
+        Some(serde_json::Value::Array(streams)) => streams
+            .iter()
+            .map(parse_stream)
+            .collect::<Result<Vec<_>>>()?,
+        Some(_) => return Err(BrokerError::msg("config field streams must be an array")),
     };
-    if streams.is_null() {
-        return Ok(StreamCatalog::default());
+    if let Some(storage) = connector_control_storage(value)? {
+        definitions.extend(connector_control_streams(storage));
     }
-    let serde_json::Value::Array(streams) = streams else {
-        return Err(BrokerError::msg("config field streams must be an array"));
-    };
-    let definitions = streams
-        .iter()
-        .map(parse_stream)
-        .collect::<Result<Vec<_>>>()?;
     StreamCatalog::new(definitions)
+}
+
+fn connector_control_storage(value: &serde_json::Value) -> Result<Option<StoragePolicy>> {
+    match value.get("connector_control_plane") {
+        None | Some(serde_json::Value::Null) | Some(serde_json::Value::Bool(false)) => Ok(None),
+        Some(serde_json::Value::Bool(true)) => Ok(Some(StoragePolicy::default())),
+        Some(control @ serde_json::Value::Object(_)) => parse_storage(control).map(Some),
+        Some(_) => Err(BrokerError::msg(
+            "config field connector_control_plane must be a boolean or object",
+        )),
+    }
 }
 
 fn parse_stream(value: &serde_json::Value) -> Result<StreamDefinition> {
@@ -155,5 +165,14 @@ fn parse_retention(value: &serde_json::Value) -> Result<RetentionPolicy> {
     Ok(RetentionPolicy {
         max_age_ms: get_u64(retention, "max_age_ms")?,
         max_bytes: get_u64(retention, "max_bytes")?,
+        compaction: match get_string(retention, "compaction")?.unwrap_or("none") {
+            "none" => CompactionPolicy::None,
+            "key" => CompactionPolicy::Key,
+            other => {
+                return Err(BrokerError::msg(format!(
+                    "config field streams[].retention.compaction has unsupported value {other}"
+                )));
+            }
+        },
     })
 }

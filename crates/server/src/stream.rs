@@ -87,6 +87,16 @@ impl Default for StoragePolicy {
 pub struct RetentionPolicy {
     pub max_age_ms: Option<u64>,
     pub max_bytes: Option<u64>,
+    #[serde(default)]
+    pub compaction: CompactionPolicy,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactionPolicy {
+    #[default]
+    None,
+    Key,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -97,6 +107,28 @@ pub struct StreamDefinition {
     pub partitioning: PartitioningPolicy,
     pub storage: StoragePolicy,
     pub retention: RetentionPolicy,
+}
+
+pub fn connector_control_streams(storage: StoragePolicy) -> Vec<StreamDefinition> {
+    protocol::connector_control::CONTROL_SUBJECTS
+        .into_iter()
+        .map(|(name, subject)| StreamDefinition {
+            name: StreamId::new(name).expect("built-in connector stream name is valid"),
+            subjects: vec![subject.to_string()],
+            partitions: 1,
+            partitioning: PartitioningPolicy {
+                strategy: PartitioningStrategy::Key,
+                fallback: PartitionFallback::SubjectHash,
+                epoch: 1,
+            },
+            storage: storage.clone(),
+            retention: RetentionPolicy {
+                max_age_ms: None,
+                max_bytes: None,
+                compaction: CompactionPolicy::Key,
+            },
+        })
+        .collect()
 }
 
 impl StreamDefinition {

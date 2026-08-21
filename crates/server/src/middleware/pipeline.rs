@@ -2,7 +2,7 @@ use super::{host::*, types::*};
 use protocol::subject::SubjectTrie;
 use std::{
     sync::{Arc, RwLock},
-    time::Instant,
+    time::{Duration, Instant},
 };
 use wasmtime::{Config, Engine, Linker, Module, Store};
 
@@ -27,13 +27,27 @@ struct Registry {
 pub struct MiddlewareRuntime {
     engine: Engine,
     registry: Arc<RwLock<Registry>>,
+    _ticker_lifetime: Arc<()>,
 }
 
 impl MiddlewareRuntime {
     pub fn new() -> Result<Self, MiddlewareError> {
         let mut config = Config::new();
         config.consume_fuel(true);
+        config.epoch_interruption(true);
         let engine = Engine::new(&config).map_err(runtime_error)?;
+        let ticker_lifetime = Arc::new(());
+        let ticker_guard = Arc::downgrade(&ticker_lifetime);
+        let ticker_engine = engine.clone();
+        std::thread::Builder::new()
+            .name("broker-wasm-deadline".to_string())
+            .spawn(move || {
+                while ticker_guard.upgrade().is_some() {
+                    std::thread::sleep(Duration::from_millis(1));
+                    ticker_engine.increment_epoch();
+                }
+            })
+            .map_err(runtime_error)?;
         let empty = Arc::new(PipelineGeneration {
             id: 0,
             modules: Vec::new(),
@@ -45,6 +59,7 @@ impl MiddlewareRuntime {
                 current: empty,
                 previous: None,
             })),
+            _ticker_lifetime: ticker_lifetime,
         })
     }
 
@@ -162,6 +177,17 @@ impl MiddlewareRuntime {
         store
             .set_fuel(middleware.manifest.budget.max_fuel)
             .map_err(runtime_error)?;
+        let deadline_ticks = middleware
+            .manifest
+            .budget
+            .deadline
+            .as_nanos()
+            .div_ceil(1_000_000)
+            .max(1)
+            .min(u128::from(u64::MAX)) as u64;
+        store.set_epoch_deadline(deadline_ticks);
+        store.epoch_deadline_trap();
+        let started = Instant::now();
         let mut linker = Linker::new(&self.engine);
         add_host_functions(&mut linker).map_err(runtime_error)?;
         let instance = linker
@@ -170,7 +196,6 @@ impl MiddlewareRuntime {
         let process = instance
             .get_typed_func::<i32, i32>(&mut store, "process")
             .map_err(runtime_error)?;
-        let started = Instant::now();
         let code = process
             .call(&mut store, stage.code())
             .map_err(runtime_error)?;

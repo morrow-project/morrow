@@ -27,7 +27,7 @@ pub struct SinkCompletion {
 pub struct SourceRecord {
     pub source_offset: String,
     pub subject: String,
-    pub key: Option<Vec<u8>>,
+    pub key: Option<String>,
     pub payload: Vec<u8>,
 }
 

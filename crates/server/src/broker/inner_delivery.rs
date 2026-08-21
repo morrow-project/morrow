@@ -200,7 +200,11 @@ impl Inner {
         ))
     }
 
-    pub(super) fn sync_durable_state(&mut self, state: DurableState) -> Result<()> {
+    pub(super) fn sync_durable_state(
+        &mut self,
+        state: DurableState,
+        catalog: &crate::stream::StreamCatalog,
+    ) -> Result<()> {
         let mut partition_records = state
             .messages
             .values()
@@ -253,6 +257,7 @@ impl Inner {
             }
         }
         self.messages = state.messages;
+        self.apply_stream_compaction(catalog);
         self.partition_sequences = self
             .messages
             .values()

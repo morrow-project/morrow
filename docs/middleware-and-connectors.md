@@ -6,9 +6,10 @@ The versioned component contract is
 [`wit/broker-middleware-v1.wit`](../wit/broker-middleware-v1.wit). It exposes an
 opaque host `message` resource rather than guest memory containing a broker
 record. The current core-Wasm adapter exports `process(stage: i32) -> i32` and
-links only four `broker` imports: `set-field`, `emit`, `host-call`, and
-`named-host-call`. WASI is not linked, so modules receive no filesystem,
-environment, or socket access.
+links only five `broker` imports: `get-field`, `set-field`, `emit`, `host-call`,
+and `named-host-call`. WASI is not linked, so modules receive no filesystem,
+environment, or socket access. `get-field` requires the explicit `ReadMessage`
+capability and copies through a budgeted guest buffer.
 
 The six stages are ingress, route, before-append, after-commit,
 before-deliver, and after-ack. Subject and key mutation is restricted to ingress
@@ -28,7 +29,7 @@ names, and HTTP allow-list identifiers are enforced against manifest sets by
 Each invocation enforces:
 
 - Wasmtime linear-memory limits with no WASI imports;
-- deterministic fuel exhaustion plus a wall-time deadline check;
+- deterministic fuel exhaustion plus a 1 ms epoch-ticked wall deadline trap;
 - host-allocation and output-growth byte limits;
 - emitted-message and recursive-emission limits;
 - a stage-specific fail-open, fail-closed, or drop policy.
@@ -46,9 +47,10 @@ cargo test -p server --release benchmark_noop_middleware_overhead \
   -- --ignored --nocapture
 ```
 
-The 2026-08-21 release run completed 10,000 calls in 42.327 ms, approximately
-236,258 calls/second, with p50 4.084 microseconds and p99 4.583 microseconds.
-Re-run the command on deployment hardware before setting production budgets.
+The 2026-08-22 release run with epoch interruption enabled completed 10,000
+calls in 59.884 ms, approximately 166,990 calls/second, with p50 5.792
+microseconds and p99 8.958 microseconds. Re-run the command on deployment
+hardware before setting production budgets.
 
 ## External connector SPI
 
@@ -68,11 +70,37 @@ for the adapter completion boundary, atomically checkpoints partition offsets,
 and only then ACKs broker deliveries. Target errors leave deliveries unacked for
 redelivery and leave the bounded worker queue intact.
 
-The control-plane subject convention is versioned by the connector crate:
-`$BROKER.CONNECT.config`, `.status`, `.offset`, and `.schema`. Production
-deployments should bind these keyed subjects to a compacted internal stream;
-configurations without that stream retain local atomic checkpoint files but do
-not gain cluster-wide connector control-state recovery.
+The source runner rejects adapters that exceed the requested record or byte
+limits. It publishes each source record at high durability and invokes
+`commit_source_offset` only after the positioned producer acknowledgement proves
+that the broker committed the record. A failed or unbound publish leaves the
+source offset uncommitted for retry.
+
+The control-plane subject convention is version 1 (`CONTROL_PLANE_VERSION`) in
+the protocol crate and is re-exported by the connector crate:
+`$BROKER.CONNECT.config`, `.status`,
+`.offset`, and `.schema`. Enable the four built-in key-compacted streams with:
+
+```json
+{
+  "connector_control_plane": {
+    "storage": {
+      "mode": "quorum_fsync",
+      "replicas": 3,
+      "min_ack_replicas": 2
+    }
+  }
+}
+```
+
+For a single-node broker, `"connector_control_plane": true` selects local
+storage. The connector executable durably writes its configuration and status
+at startup and its checkpoint after each completed sink batch. Adapters use
+`store_control_record` for schema versions, with a distinct key per version so
+history is retained. Key compaction preserves monotonically increasing immutable
+log offsets while excluding superseded keyed values from replay and delivery.
+Configuration without the built-in streams is rejected by the control-record
+publisher rather than silently falling back to local-only state.
 
 Two deterministic adapters establish the boundary without adding SDKs to the
 broker:

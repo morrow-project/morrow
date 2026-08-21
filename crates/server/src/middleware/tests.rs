@@ -44,11 +44,11 @@ fn traps_and_instruction_deadlines_are_interrupted() {
             .is_err()
     );
 
-    let mut deadline = manifest([]);
-    deadline.budget.max_fuel = 100;
+    let mut fuel = manifest([]);
+    fuel.budget.max_fuel = 100;
     runtime
         .install(vec![(
-            deadline,
+            fuel,
             wasm("(module (func (export \"process\") (param i32) (result i32) (loop br 0) i32.const 0))"),
         )])
         .unwrap();
@@ -57,6 +57,23 @@ fn traps_and_instruction_deadlines_are_interrupted() {
             .process(MiddlewareStage::Ingress, message(), 0)
             .is_err()
     );
+
+    let mut deadline = manifest([]);
+    deadline.budget.max_fuel = u64::MAX;
+    deadline.budget.deadline = std::time::Duration::from_millis(2);
+    runtime
+        .install(vec![(
+            deadline,
+            wasm("(module (func (export \"process\") (param i32) (result i32) (loop br 0) i32.const 0))"),
+        )])
+        .unwrap();
+    let started = std::time::Instant::now();
+    assert!(
+        runtime
+            .process(MiddlewareStage::Ingress, message(), 0)
+            .is_err()
+    );
+    assert!(started.elapsed() < std::time::Duration::from_secs(1));
 }
 
 #[test]
@@ -105,6 +122,26 @@ fn denied_host_calls_and_stage_mutations_fail_closed() {
             .unwrap_err()
             .to_string()
             .contains("undeclared capability")
+    );
+
+    runtime
+        .install(vec![(
+            manifest([]),
+            wasm(
+                "(module
+                    (import \"broker\" \"get-field\" (func $get (param i32 i32 i32) (result i32)))
+                    (memory (export \"memory\") 1)
+                    (func (export \"process\") (param i32) (result i32)
+                      i32.const 0 i32.const 0 i32.const 32 call $get drop i32.const 0))",
+            ),
+        )])
+        .unwrap();
+    assert!(
+        runtime
+            .process(MiddlewareStage::Ingress, message(), 0)
+            .unwrap_err()
+            .to_string()
+            .contains("ReadMessage")
     );
 
     let mut after_commit = manifest([Capability::WriteSubject]);
@@ -187,7 +224,7 @@ fn emission_recursion_and_output_growth_are_bounded() {
                     (memory (export \"memory\") 1)
                     (data (i32.const 0) \"0123456789\")
                     (func (export \"process\") (param i32) (result i32)
-                      i32.const 2 i32.const 0 i32.const 10 call $set drop i32.const 0))",
+                      i32.const 3 i32.const 0 i32.const 10 call $set drop i32.const 0))",
             ),
         )])
         .unwrap();
@@ -210,7 +247,7 @@ fn emission_recursion_and_output_growth_are_bounded() {
                     (memory (export \"memory\") 1)
                     (data (i32.const 0) \"0123456789\")
                     (func (export \"process\") (param i32) (result i32)
-                      i32.const 2 i32.const 0 i32.const 10 call $set drop i32.const 0))",
+                      i32.const 3 i32.const 0 i32.const 10 call $set drop i32.const 0))",
             ),
         )])
         .unwrap();

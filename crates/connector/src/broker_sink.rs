@@ -2,11 +2,6 @@ use crate::{CheckpointStore, ConnectorBatch, ConnectorRecord, SinkTask};
 use client::Client;
 use std::time::Duration;
 
-pub const CONFIG_SUBJECT: &str = "$BROKER.CONNECT.config";
-pub const STATUS_SUBJECT: &str = "$BROKER.CONNECT.status";
-pub const OFFSET_SUBJECT: &str = "$BROKER.CONNECT.offset";
-pub const SCHEMA_SUBJECT: &str = "$BROKER.CONNECT.schema";
-
 #[derive(Debug, Clone)]
 pub struct BrokerSinkConfig {
     pub consumer: String,
@@ -40,7 +35,7 @@ pub async fn run_sink_batch<T: SinkTask + ?Sized>(
             partition: delivery.partition,
             offset: delivery.offset,
             subject: delivery.subject.clone(),
-            key: None,
+            key: delivery.key.clone(),
             payload: delivery.payload.clone(),
             schema_id: delivery
                 .headers
