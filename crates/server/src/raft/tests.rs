@@ -39,6 +39,7 @@ fn applies_publish_attempt_and_ack() {
         queue_group: None,
         ack_timeout_ms: 30_000,
         max_in_flight: 1024,
+        start_position: protocol::StartPosition::Latest,
     };
     assert_eq!(
         state.apply_command(BrokerCommand::ConsumerUpsert { record }),
@@ -153,6 +154,7 @@ fn delivery_attempts_allocate_monotonic_delivery_ids() {
             queue_group: None,
             ack_timeout_ms: 30_000,
             max_in_flight: 1024,
+            start_position: protocol::StartPosition::Latest,
         },
     });
     state.apply_command(BrokerCommand::Publish {
@@ -205,6 +207,7 @@ fn ack_rejects_stale_delivery_id() {
             queue_group: None,
             ack_timeout_ms: 30_000,
             max_in_flight: 1024,
+            start_position: protocol::StartPosition::Latest,
         },
     });
     state.apply_command(BrokerCommand::Publish {
@@ -247,6 +250,7 @@ fn cleanup_waits_for_all_interested_consumers_to_ack() {
                 queue_group: None,
                 ack_timeout_ms: 30_000,
                 max_in_flight: 1024,
+                start_position: protocol::StartPosition::Latest,
             },
         });
     }

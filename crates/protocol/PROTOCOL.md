@@ -390,11 +390,21 @@ SUB <subject> <sid>\r\n
 SUB <subject> <queue> <sid>\r\n
 ```
 
+Durable subscriptions may append an explicit start position to either form:
+
+```text
+SUB <subject> <sid> <start>\r\n
+SUB <subject> <queue> <sid> <start>\r\n
+```
+
 Fields:
 
 - `subject`: subscription subject, including optional `*` or `>`.
 - `queue`: optional queue group identifier.
 - `sid`: subscription identifier scoped to this connection.
+- `start`: optional durable starting position: `@latest` (the default),
+  `@earliest`, `@committed`, `@offset:<offset>`, or
+  `@time:<unix-timestamp-ms>`.
 
 Behavior:
 
@@ -404,6 +414,8 @@ Behavior:
 - `_INBOX.*` subscriptions are always transient, even on durable connections.
 - Queue groups are supported for durable non-inbox subscriptions.
 - Transient subscriptions, including `_INBOX.*`, do not support queue groups.
+- A start position initializes a new durable consumer. Attaching to an existing
+  durable consumer resumes its persisted committed cursor instead.
 
 Durable consumer identity:
 
@@ -420,6 +432,10 @@ SUB orders.* sid1\r\n
 
 ```text
 SUB orders.* workers worker1\r\n
+```
+
+```text
+SUB orders.* sid1 @earliest\r\n
 ```
 
 ```text
@@ -646,6 +662,17 @@ Durable subscriptions:
 
 - Persist consumer state in the WAL or Raft state, depending on server mode.
 - Read retained messages owned by configured streams that match their subject.
+- Track independent delivered and committed offsets for each matching stream
+  partition. Queue-group members attach to the same durable consumer and share
+  those cursors and delivery leases.
+- Keep out-of-order acknowledgements in a bounded window. Acknowledging a later
+  offset does not advance the committed cursor across an unacknowledged matching
+  offset; closing the gap advances it through the acknowledged run.
+- Preserve delivery leases and attempt numbers across restart and replicated
+  failover. Redelivery updates lease state without modifying the stored record.
+- Advance deterministically to the earliest retained offset when retention has
+  removed unread history, and expose that event as a retention gap in the admin
+  subscription response.
 - Do not control whether new publications are retained; adding or removing a
   consumer does not change a stream's append behavior.
 - Deliveries include an ACK subject either as the `MSG` reply slot or as the

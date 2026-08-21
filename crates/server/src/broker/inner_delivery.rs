@@ -21,7 +21,10 @@ impl Inner {
                     self.wal
                         .append_delivery_attempt(seq, &consumer_id, deadline_ms, attempt)?;
                 let ack_subject = protocol::ack_subject(&consumer_id, seq, delivery.delivery_id);
-                if let Some(consumer) = self.consumers.get_mut(&consumer_id) {
+                let cursor_snapshot = if let Some(consumer) = self.consumers.get_mut(&consumer_id) {
+                    if message.offset.is_some() {
+                        consumer.cursors.mark_delivered(&message);
+                    }
                     consumer.pending.remove(&seq);
                     consumer.pending_attempts.remove(&seq);
                     consumer.in_flight.insert(
@@ -33,6 +36,15 @@ impl Inner {
                         },
                     );
                     consumer.delivered += 1;
+                    Some(consumer.cursors.clone())
+                } else {
+                    None
+                };
+                if let Some(cursors) = cursor_snapshot {
+                    self.wal.append_consumer_cursor(&ConsumerCursorRecord {
+                        consumer_id: consumer_id.clone(),
+                        cursors,
+                    })?;
                 }
                 if let Some(client) = self.clients.get(&connection_id) {
                     let frame = durable_message_frame(&message, &sid, &ack_subject);
@@ -49,16 +61,26 @@ impl Inner {
     }
 
     pub(super) fn next_delivery_for(
-        &self,
+        &mut self,
         consumer_id: &str,
         now: u64,
     ) -> Option<(u64, u64, String, u32, u64)> {
-        let consumer = self.consumers.get(consumer_id)?;
+        let consumer = self.consumers.get_mut(consumer_id)?;
         if consumer.in_flight.len() >= consumer.record.max_in_flight || consumer.members.is_empty()
         {
             return None;
         }
-        let seq = *consumer.pending.iter().next()?;
+        let leased = consumer.in_flight.keys().copied().collect::<HashSet<_>>();
+        let seq = consumer
+            .cursors
+            .next_candidate(&consumer.record.filter_subject, &self.messages, &leased)
+            .or_else(|| {
+                consumer
+                    .pending
+                    .iter()
+                    .find(|seq| !leased.contains(seq))
+                    .copied()
+            })?;
         let (connection_id, member) = consumer
             .members
             .iter()
@@ -75,22 +97,37 @@ impl Inner {
         ))
     }
 
-    pub(super) fn next_cluster_delivery(&self, now: u64) -> Option<ClusterDeliveryCandidate> {
-        for consumer_id in self.consumers.keys() {
-            let consumer = self.consumers.get(consumer_id)?;
-            if consumer.in_flight.len() >= consumer.record.max_in_flight
-                || consumer.members.is_empty()
-            {
+    pub(super) fn next_cluster_delivery(&mut self, now: u64) -> Option<ClusterDeliveryCandidate> {
+        let consumer_ids = self.consumers.keys().cloned().collect::<Vec<_>>();
+        for consumer_id in consumer_ids {
+            let consumer = self.consumers.get_mut(&consumer_id)?;
+            if consumer.members.is_empty() {
                 continue;
             }
-            let seq = consumer.pending.iter().next().copied().or_else(|| {
+            let expired = consumer
+                .in_flight
+                .iter()
+                .filter(|(_, in_flight)| in_flight.deadline_ms <= now)
+                .map(|(seq, _)| *seq)
+                .min();
+            let seq = if let Some(expired) = expired {
+                expired
+            } else {
+                if consumer.in_flight.len() >= consumer.record.max_in_flight {
+                    continue;
+                }
+                let leased = consumer.in_flight.keys().copied().collect::<HashSet<_>>();
                 consumer
-                    .in_flight
-                    .iter()
-                    .filter(|(_, in_flight)| in_flight.deadline_ms <= now)
-                    .map(|(seq, _)| *seq)
-                    .min()
-            })?;
+                    .cursors
+                    .next_candidate(&consumer.record.filter_subject, &self.messages, &leased)
+                    .or_else(|| {
+                        consumer
+                            .pending
+                            .iter()
+                            .find(|seq| !leased.contains(seq))
+                            .copied()
+                    })?
+            };
             let (connection_id, member) = consumer
                 .members
                 .iter()
@@ -104,7 +141,7 @@ impl Inner {
                 .unwrap_or(1);
             let deadline_ms = now.saturating_add(consumer.record.ack_timeout_ms);
             return Some(ClusterDeliveryCandidate {
-                consumer_id: consumer_id.clone(),
+                consumer_id,
                 seq,
                 connection_id: *connection_id,
                 sid: member.sid.clone(),
@@ -201,6 +238,7 @@ impl Inner {
                 consumer_id,
                 Consumer {
                     record: durable.record,
+                    cursors: durable.cursors,
                     members,
                     pending: durable.pending,
                     pending_attempts: durable.pending_attempts,

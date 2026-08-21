@@ -25,6 +25,7 @@ pub(super) struct Client {
 #[derive(Debug, Clone)]
 pub(super) struct Consumer {
     pub(super) record: ConsumerRecord,
+    pub(super) cursors: crate::consumer_cursor::ConsumerCursorSet,
     pub(super) members: HashMap<u64, SubscriptionMember>,
     pub(super) pending: BTreeSet<u64>,
     pub(super) pending_attempts: HashMap<u64, u32>,
@@ -118,9 +119,20 @@ pub(super) struct DurableConsumerResponse {
     pub(super) pending: usize,
     pub(super) in_flight: usize,
     pub(super) acked: usize,
+    pub(super) cursors: Vec<PartitionCursorResponse>,
     pub(super) delivered: usize,
     pub(super) ack_timeout_ms: u64,
     pub(super) max_in_flight: usize,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub(super) struct PartitionCursorResponse {
+    pub(super) stream: String,
+    pub(super) partition: u32,
+    pub(super) committed_offset: u64,
+    pub(super) delivered_offset: Option<u64>,
+    pub(super) acknowledged_out_of_order: usize,
+    pub(super) retention_gaps: u64,
 }
 
 #[derive(Debug, serde::Serialize)]

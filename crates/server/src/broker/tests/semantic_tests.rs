@@ -63,7 +63,7 @@ async fn durable_subscribe_publish_delivery_and_ack_are_deterministic() {
     let consumer = inner.consumers.get("durable-client1-sid1").unwrap();
     assert!(consumer.pending.is_empty());
     assert!(consumer.in_flight.is_empty());
-    assert!(consumer.acked.contains(&1));
+    assert_eq!(consumer.cursors.committed_offset("orders", 0), Some(1));
     assert_eq!(inner.messages[&1].stream.as_deref(), Some("orders"));
 }
 #[tokio::test]
@@ -166,7 +166,12 @@ async fn acked_message_does_not_redeliver_after_restart() {
     let inner = scenario.broker().inner.lock().await;
     assert!(inner.consumers["durable-client1-sid1"].pending.is_empty());
     assert!(inner.consumers["durable-client1-sid1"].in_flight.is_empty());
-    assert!(inner.consumers["durable-client1-sid1"].acked.contains(&1));
+    assert_eq!(
+        inner.consumers["durable-client1-sid1"]
+            .cursors
+            .committed_offset("orders", 0),
+        Some(1)
+    );
 }
 
 #[tokio::test]
@@ -202,7 +207,12 @@ async fn wal_rotation_and_shutdown_checkpoint_preserve_durable_state() {
     let inner = scenario.broker().inner.lock().await;
     assert_eq!(inner.messages[&1].stream.as_deref(), Some("orders"));
     assert!(inner.messages.contains_key(&2));
-    assert!(inner.consumers["durable-client1-sid1"].acked.contains(&1));
+    assert_eq!(
+        inner.consumers["durable-client1-sid1"]
+            .cursors
+            .committed_offset("orders", 0),
+        Some(1)
+    );
 }
 
 #[tokio::test]
@@ -445,6 +455,12 @@ async fn ack_after_reconnect_survives_restart() {
     publisher.disconnect().await;
 
     scenario.restart_broker().await;
+    {
+        let inner = scenario.broker().inner.lock().await;
+        let consumer = &inner.consumers["durable-client1-sid1"];
+        assert_eq!(consumer.cursors.committed_offset("orders", 0), Some(1));
+        assert!(consumer.pending.is_empty());
+    }
     let mut subscriber = scenario.connect_durable("client1", 25).await;
     subscriber.subscribe("orders.*", "sid1").await;
     subscriber.ping_roundtrip().await;
@@ -456,7 +472,7 @@ async fn ack_after_reconnect_survives_restart() {
     let consumer = inner.consumers.get("durable-client1-sid1").unwrap();
     assert!(consumer.pending.is_empty());
     assert!(consumer.in_flight.is_empty());
-    assert!(consumer.acked.contains(&1));
+    assert_eq!(consumer.cursors.committed_offset("orders", 0), Some(1));
 }
 #[tokio::test]
 async fn fake_cluster_runtime_drives_broker_flow_across_100_nodes() {
@@ -482,7 +498,7 @@ async fn fake_cluster_runtime_drives_broker_flow_across_100_nodes() {
     let consumer = durable.consumers.get("durable-client1-sid1").unwrap();
     assert!(consumer.pending.is_empty());
     assert!(consumer.in_flight.is_empty());
-    assert!(consumer.acked.contains(&1));
+    assert_eq!(consumer.cursors.committed_offset("orders", 0), Some(1));
     assert_eq!(durable.messages[&1].stream.as_deref(), Some("orders"));
     assert_eq!(scenario.fake_cluster().write_count(), 4);
 }

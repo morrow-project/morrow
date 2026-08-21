@@ -154,7 +154,6 @@ impl Broker {
 
         let record = {
             let mut inner = self.inner.lock().await;
-            let matching_consumers = inner.matching_durable_consumers(&subject_name);
             let seq = inner.wal.reserve_publish_seq();
             let stored_headers = headers
                 .iter()
@@ -184,11 +183,6 @@ impl Broker {
             let reference = PartitionAppendRecord::from(&envelope);
             inner.wal.append_partition_append(&reference)?;
             let record = PublishRecord::from(envelope);
-            for consumer_id in matching_consumers {
-                if let Some(consumer) = inner.consumers.get_mut(&consumer_id) {
-                    consumer.pending.insert(record.seq);
-                }
-            }
             inner.messages.insert(record.seq, record.clone());
             record
         };
@@ -342,14 +336,39 @@ impl Broker {
             .and_then(|consumer| consumer.in_flight.get(&ack.seq))
             .is_some_and(|in_flight| in_flight.delivery_id == ack.delivery_id);
         if valid {
+            let message = inner.messages.get(&ack.seq).cloned();
+            let acknowledged_cursors = match message.as_ref() {
+                Some(message) if message.offset.is_some() => {
+                    let consumer = &inner.consumers[&ack.consumer_id];
+                    let mut cursors = consumer.cursors.clone();
+                    cursors.acknowledge(
+                        message,
+                        &consumer.record.filter_subject,
+                        &inner.messages,
+                    )?;
+                    Some(cursors)
+                }
+                _ => None,
+            };
             inner
                 .wal
                 .append_ack(ack.seq, &ack.consumer_id, ack.delivery_id)?;
-            let consumer = inner.consumers.get_mut(&ack.consumer_id).unwrap();
-            consumer.in_flight.remove(&ack.seq);
-            consumer.pending.remove(&ack.seq);
-            consumer.pending_attempts.remove(&ack.seq);
-            consumer.acked.insert(ack.seq);
+            let cursor_snapshot = {
+                let consumer = inner.consumers.get_mut(&ack.consumer_id).unwrap();
+                consumer.in_flight.remove(&ack.seq);
+                consumer.pending.remove(&ack.seq);
+                consumer.pending_attempts.remove(&ack.seq);
+                if let Some(cursors) = acknowledged_cursors {
+                    consumer.cursors = cursors;
+                } else if message.is_some() {
+                    consumer.acked.insert(ack.seq);
+                }
+                consumer.cursors.clone()
+            };
+            inner.wal.append_consumer_cursor(&ConsumerCursorRecord {
+                consumer_id: ack.consumer_id.clone(),
+                cursors: cursor_snapshot,
+            })?;
             should_cleanup = true;
         }
         inner.wal.flush_due()?;
@@ -407,6 +426,12 @@ impl Broker {
         {
             let mut inner = self.inner.lock().await;
             let now = self.hooks.clock.now_ms();
+            let partitioned = inner
+                .messages
+                .iter()
+                .filter(|(_, message)| message.offset.is_some())
+                .map(|(seq, _)| *seq)
+                .collect::<HashSet<_>>();
             for consumer in inner.consumers.values_mut() {
                 let expired: Vec<_> = consumer
                     .in_flight
@@ -416,7 +441,9 @@ impl Broker {
                     .collect();
                 for seq in expired {
                     if let Some(in_flight) = consumer.in_flight.remove(&seq) {
-                        consumer.pending.insert(seq);
+                        if !partitioned.contains(&seq) {
+                            consumer.pending.insert(seq);
+                        }
                         consumer
                             .pending_attempts
                             .insert(seq, in_flight.attempt.saturating_add(1));

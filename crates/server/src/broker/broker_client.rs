@@ -26,7 +26,11 @@ impl Broker {
                 subject,
                 queue,
                 sid,
-            } => self.subscribe(connection_id, subject, queue, sid).await,
+                start,
+            } => {
+                self.subscribe(connection_id, subject, queue, sid, start)
+                    .await
+            }
             Command::Unsub { sid, max_messages } => {
                 self.unsubscribe(connection_id, &sid, max_messages).await
             }
@@ -136,6 +140,7 @@ impl Broker {
         sub_subject: String,
         queue: Option<String>,
         sid: String,
+        start: protocol::StartPosition,
     ) -> Result<()> {
         crate::broker_ensure!(
             subject::validate_subscription(&sub_subject),
@@ -155,6 +160,10 @@ impl Broker {
                 .get(&connection_id)
                 .ok_or_else(|| BrokerError::msg("unknown connection"))?;
             if is_inbox_subscription(&sub_subject) || client.durable_id.is_none() {
+                crate::broker_ensure!(
+                    start == protocol::StartPosition::Latest,
+                    "transient subscriptions only support @latest"
+                );
                 crate::broker_ensure!(
                     queue.is_none(),
                     "transient subscriptions do not support queue groups"
@@ -177,6 +186,7 @@ impl Broker {
                         queue_group: queue,
                         ack_timeout_ms: client.ack_timeout_ms,
                         max_in_flight: client.max_in_flight,
+                        start_position: start,
                     };
                     Some((consumer_id, record, sid))
                 } else {
@@ -187,10 +197,21 @@ impl Broker {
 
         if let Some((_consumer_id, record, sid)) = durable_record {
             if let Some(cluster) = self.cluster_runtime().await {
+                let cursors = {
+                    let inner = self.inner.lock().await;
+                    crate::consumer_cursor::ConsumerCursorSet::new(
+                        &record.filter_subject,
+                        record.start_position,
+                        record.max_in_flight,
+                        &self.config.streams,
+                        &inner.messages,
+                    )
+                };
                 self.cluster_write(
                     &cluster,
-                    BrokerCommand::ConsumerUpsert {
+                    BrokerCommand::CursorConsumerUpsert {
                         record: record.clone(),
+                        cursors,
                     },
                 )
                 .await?;
@@ -198,11 +219,18 @@ impl Broker {
             } else {
                 let mut inner = self.inner.lock().await;
                 inner.wal.append_consumer_upsert(&record)?;
+                let cursors = inner
+                    .upsert_consumer(record.clone(), &self.config.streams)
+                    .cursors
+                    .clone();
+                inner.wal.append_consumer_cursor(&ConsumerCursorRecord {
+                    consumer_id: record.consumer_id.clone(),
+                    cursors,
+                })?;
                 inner.wal.flush_due()?;
-                inner.upsert_consumer(record.clone());
             }
             let mut inner = self.inner.lock().await;
-            let consumer = inner.upsert_consumer(record);
+            let consumer = inner.upsert_consumer(record, &self.config.streams);
             consumer.members.insert(
                 connection_id,
                 SubscriptionMember {

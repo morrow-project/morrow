@@ -117,7 +117,7 @@ impl Broker {
     pub(super) async fn deliver_pending_clustered(&self, cluster: ClusterRuntime) -> Result<()> {
         loop {
             let candidate = {
-                let inner = self.inner.lock().await;
+                let mut inner = self.inner.lock().await;
                 inner.next_cluster_delivery(self.hooks.clock.now_ms())
             };
             let Some(candidate) = candidate else {

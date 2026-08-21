@@ -25,6 +25,7 @@ pub enum Command {
         subject: String,
         queue: Option<String>,
         sid: String,
+        start: StartPosition,
     },
     Unsub {
         sid: String,
@@ -44,6 +45,17 @@ pub enum AckLevel {
 pub struct ProducerAckRequest {
     pub level: AckLevel,
     pub msg_id: String,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StartPosition {
+    Earliest,
+    #[default]
+    Latest,
+    Committed,
+    Offset(u64),
+    Timestamp(u64),
 }
 
 impl AckLevel {
@@ -258,20 +270,52 @@ fn parse_sub<'a>(mut parts: impl Iterator<Item = &'a str>) -> Result<Command, Pr
         .next()
         .ok_or_else(|| ProtocolError("SUB requires a sid".into()))?;
     let third = parts.next();
+    let fourth = parts.next();
     if parts.next().is_some() {
         return Err(ProtocolError("SUB has too many arguments".into()));
     }
 
-    let (queue, sid) = match third {
-        Some(sid) => (Some(second.to_string()), sid.to_string()),
-        None => (None, second.to_string()),
+    let (queue, sid, start) = match (third, fourth) {
+        (None, None) => (None, second.to_string(), StartPosition::Latest),
+        (Some(start), None) if start.starts_with('@') => {
+            (None, second.to_string(), parse_start_position(start)?)
+        }
+        (Some(sid), None) => (
+            Some(second.to_string()),
+            sid.to_string(),
+            StartPosition::Latest,
+        ),
+        (Some(sid), Some(start)) => (
+            Some(second.to_string()),
+            sid.to_string(),
+            parse_start_position(start)?,
+        ),
+        (None, Some(_)) => unreachable!(),
     };
 
     Ok(Command::Sub {
         subject,
         queue,
         sid,
+        start,
     })
+}
+
+fn parse_start_position(value: &str) -> Result<StartPosition, ProtocolError> {
+    match value {
+        "@earliest" => Ok(StartPosition::Earliest),
+        "@latest" => Ok(StartPosition::Latest),
+        "@committed" => Ok(StartPosition::Committed),
+        _ if value.starts_with("@offset:") => value[8..]
+            .parse()
+            .map(StartPosition::Offset)
+            .map_err(|_| ProtocolError("SUB offset must be an integer".into())),
+        _ if value.starts_with("@time:") => value[6..]
+            .parse()
+            .map(StartPosition::Timestamp)
+            .map_err(|_| ProtocolError("SUB timestamp must be an integer".into())),
+        _ => Err(ProtocolError("invalid SUB start position".into())),
+    }
 }
 
 fn parse_unsub<'a>(mut parts: impl Iterator<Item = &'a str>) -> Result<Command, ProtocolError> {

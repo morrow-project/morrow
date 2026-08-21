@@ -32,8 +32,8 @@ use crate::{
     },
     raft::{BrokerCommand, BrokerResponse, DurableState, RaftRuntime, proxy_stream_to_leader},
     wal::{
-        ConsumerRecord, DeliveryAttemptRecord, PartitionAppendRecord, PublishRecord,
-        ReplayedConsumer, Wal, WalStatus,
+        ConsumerCursorRecord, ConsumerRecord, DeliveryAttemptRecord, PartitionAppendRecord,
+        PublishRecord, ReplayedConsumer, Wal, WalStatus,
     },
 };
 

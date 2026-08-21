@@ -22,6 +22,10 @@ pub(super) fn consumer_upsert_body(record: &ConsumerRecord) -> Result<Vec<u8>> {
             .try_into()
             .context("max_in_flight too large")?,
     );
+    put_bytes(
+        &mut body,
+        &serde_json::to_vec(&record.start_position).context("encoding consumer start position")?,
+    )?;
     Ok(body)
 }
 pub(super) fn delivery_attempt_body(record: &DeliveryAttemptRecord) -> Result<Vec<u8>> {
@@ -47,6 +51,15 @@ pub(super) fn partition_append_body(record: &PartitionAppendRecord) -> Result<Ve
     put_u32(&mut body, record.partition);
     put_u64(&mut body, record.offset);
     put_string(&mut body, &record.subject)?;
+    Ok(body)
+}
+pub(super) fn consumer_cursor_body(record: &ConsumerCursorRecord) -> Result<Vec<u8>> {
+    let mut body = Vec::new();
+    put_string(&mut body, &record.consumer_id)?;
+    put_bytes(
+        &mut body,
+        &serde_json::to_vec(&record.cursors).context("encoding consumer cursors")?,
+    )?;
     Ok(body)
 }
 pub(super) fn record_size(body: &[u8]) -> Result<u64> {
@@ -142,17 +155,41 @@ pub(super) fn decode_partition_append(body: &[u8]) -> Result<PartitionAppendReco
     cursor.finish()?;
     Ok(record)
 }
+pub(super) fn decode_consumer_cursor(body: &[u8]) -> Result<ConsumerCursorRecord> {
+    let mut cursor = Cursor {
+        bytes: body,
+        pos: 0,
+    };
+    let consumer_id = cursor.string()?;
+    let cursors = serde_json::from_slice(&cursor.bytes()?).context("decoding consumer cursors")?;
+    cursor.finish()?;
+    Ok(ConsumerCursorRecord {
+        consumer_id,
+        cursors,
+    })
+}
 pub(super) fn decode_consumer_upsert(body: &[u8]) -> Result<ConsumerRecord> {
     let mut cursor = Cursor {
         bytes: body,
         pos: 0,
     };
+    let consumer_id = cursor.string()?;
+    let filter_subject = cursor.string()?;
+    let queue_group = cursor.option_string()?;
+    let ack_timeout_ms = cursor.u64()?;
+    let max_in_flight = cursor.u32()? as usize;
+    let start_position = if cursor.is_finished() {
+        protocol::StartPosition::Latest
+    } else {
+        serde_json::from_slice(&cursor.bytes()?).context("decoding consumer start position")?
+    };
     let record = ConsumerRecord {
-        consumer_id: cursor.string()?,
-        filter_subject: cursor.string()?,
-        queue_group: cursor.option_string()?,
-        ack_timeout_ms: cursor.u64()?,
-        max_in_flight: cursor.u32()? as usize,
+        consumer_id,
+        filter_subject,
+        queue_group,
+        ack_timeout_ms,
+        max_in_flight,
+        start_position,
     };
     cursor.finish()?;
     Ok(record)

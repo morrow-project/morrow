@@ -73,6 +73,10 @@ pub enum BrokerCommand {
     ConsumerUpsert {
         record: ConsumerRecord,
     },
+    CursorConsumerUpsert {
+        record: ConsumerRecord,
+        cursors: crate::consumer_cursor::ConsumerCursorSet,
+    },
     DeliveryAttempt {
         seq: u64,
         consumer_id: String,
@@ -103,6 +107,8 @@ pub enum BrokerResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DurableConsumer {
     pub record: ConsumerRecord,
+    #[serde(default)]
+    pub cursors: crate::consumer_cursor::ConsumerCursorSet,
     pub pending: BTreeSet<u64>,
     pub pending_attempts: HashMap<u64, u32>,
     pub in_flight: HashMap<u64, DeliveryAttemptRecord>,
@@ -218,6 +224,21 @@ impl DurableState {
                     .and_modify(|consumer| consumer.record = record.clone())
                     .or_insert_with(|| DurableConsumer {
                         record,
+                        cursors: Default::default(),
+                        pending: BTreeSet::new(),
+                        pending_attempts: HashMap::new(),
+                        in_flight: HashMap::new(),
+                        acked: HashSet::new(),
+                    });
+                BrokerResponse::ConsumerUpsert
+            }
+            BrokerCommand::CursorConsumerUpsert { record, cursors } => {
+                self.consumers
+                    .entry(record.consumer_id.clone())
+                    .and_modify(|consumer| consumer.record = record.clone())
+                    .or_insert_with(|| DurableConsumer {
+                        record,
+                        cursors,
                         pending: BTreeSet::new(),
                         pending_attempts: HashMap::new(),
                         in_flight: HashMap::new(),
@@ -231,16 +252,24 @@ impl DurableState {
                 deadline_ms,
                 attempt,
             } => {
+                let Some(message) = self.messages.get(&seq).cloned() else {
+                    return BrokerResponse::DeliveryAttempt { record: None };
+                };
                 let Some(consumer) = self.consumers.get_mut(&consumer_id) else {
                     return BrokerResponse::DeliveryAttempt { record: None };
                 };
-                if !self.messages.contains_key(&seq) || consumer.acked.contains(&seq) {
+                if message.offset.is_none() && consumer.acked.contains(&seq) {
                     consumer.pending.remove(&seq);
                     consumer.pending_attempts.remove(&seq);
                     consumer.in_flight.remove(&seq);
                     return BrokerResponse::DeliveryAttempt { record: None };
                 }
-                if !consumer.pending.contains(&seq) && !consumer.in_flight.contains_key(&seq) {
+                let eligible = if message.offset.is_some() {
+                    consumer.cursors.is_deliverable(&message, &self.messages)
+                } else {
+                    consumer.pending.contains(&seq)
+                };
+                if !eligible && !consumer.in_flight.contains_key(&seq) {
                     return BrokerResponse::DeliveryAttempt { record: None };
                 }
 
@@ -255,6 +284,7 @@ impl DurableState {
                 };
                 consumer.pending.remove(&seq);
                 consumer.pending_attempts.remove(&seq);
+                consumer.cursors.mark_delivered(&message);
                 consumer.in_flight.insert(seq, record.clone());
                 BrokerResponse::DeliveryAttempt {
                     record: Some(record),
@@ -270,15 +300,39 @@ impl DurableState {
                     .get(&consumer_id)
                     .and_then(|consumer| consumer.in_flight.get(&seq))
                     .is_some_and(|in_flight| in_flight.delivery_id == delivery_id);
-                if valid {
-                    let consumer = self.consumers.get_mut(&consumer_id).unwrap();
-                    consumer.in_flight.remove(&seq);
-                    consumer.pending.remove(&seq);
-                    consumer.pending_attempts.remove(&seq);
-                    consumer.acked.insert(seq);
+                let accepted = if valid {
+                    let message = self.messages.get(&seq).cloned();
+                    let DurableState {
+                        consumers,
+                        messages,
+                        ..
+                    } = self;
+                    let consumer = consumers.get_mut(&consumer_id).unwrap();
+                    let cursor_accepted = match message.as_ref() {
+                        Some(message) if message.offset.is_some() => consumer
+                            .cursors
+                            .acknowledge(&message, &consumer.record.filter_subject, messages)
+                            .is_ok(),
+                        _ => true,
+                    };
+                    if cursor_accepted {
+                        consumer.in_flight.remove(&seq);
+                        consumer.pending.remove(&seq);
+                        consumer.pending_attempts.remove(&seq);
+                        if let Some(message) = message {
+                            if message.offset.is_none() {
+                                consumer.acked.insert(seq);
+                            }
+                        }
+                    }
+                    cursor_accepted
+                } else {
+                    false
+                };
+                if accepted {
                     self.cleanup_acked_messages();
                 }
-                BrokerResponse::Ack { accepted: valid }
+                BrokerResponse::Ack { accepted }
             }
         }
     }
@@ -331,20 +385,7 @@ impl DurableState {
         let seq = self.next_seq;
         self.next_seq = self.next_seq.saturating_add(1);
         record.seq = seq;
-        let matching_consumers = self
-            .consumers
-            .iter()
-            .filter(|(_, consumer)| {
-                subject::matches(&consumer.record.filter_subject, &record.subject)
-            })
-            .map(|(consumer_id, _)| consumer_id.clone())
-            .collect::<Vec<_>>();
         self.messages.insert(seq, record);
-        for consumer_id in matching_consumers {
-            if let Some(consumer) = self.consumers.get_mut(&consumer_id) {
-                consumer.pending.insert(seq);
-            }
-        }
         BrokerResponse::Publish {
             seq: Some(seq),
             retained: true,

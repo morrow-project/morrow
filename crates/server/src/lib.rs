@@ -1,5 +1,6 @@
 pub mod broker;
 pub mod config;
+pub mod consumer_cursor;
 pub mod error;
 pub mod partition_log;
 pub mod raft;

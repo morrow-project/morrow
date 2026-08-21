@@ -115,6 +115,10 @@ impl Wal {
         self.append_record(KIND_PARTITION_APPEND, &partition_append_body(record)?)
     }
 
+    pub fn append_consumer_cursor(&mut self, record: &ConsumerCursorRecord) -> Result<()> {
+        self.append_record(KIND_CONSUMER_CURSOR, &consumer_cursor_body(record)?)
+    }
+
     pub fn append_delivery_attempt(
         &mut self,
         seq: u64,
@@ -319,6 +323,14 @@ pub(super) fn write_compact_state(
         write_record_to(file, KIND_CONSUMER_UPSERT, &body)?;
         bytes += record_size(&body)?;
         let consumer_id = consumer.record.consumer_id.clone();
+        if let Some(cursors) = consumer.cursors {
+            let body = consumer_cursor_body(&ConsumerCursorRecord {
+                consumer_id: consumer_id.clone(),
+                cursors,
+            })?;
+            write_record_to(file, KIND_CONSUMER_CURSOR, &body)?;
+            bytes += record_size(&body)?;
+        }
         for acked in consumer.acked {
             let body = ack_body(&AckRecord {
                 seq: acked,

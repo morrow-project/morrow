@@ -18,6 +18,7 @@ const KIND_CONSUMER_UPSERT: u8 = 2;
 const KIND_DELIVERY_ATTEMPT: u8 = 3;
 const KIND_ACK: u8 = 4;
 const KIND_PARTITION_APPEND: u8 = 5;
+const KIND_CONSUMER_CURSOR: u8 = 6;
 pub const DEFAULT_WAL_SEGMENT_BYTES: u64 = 64 * 1024 * 1024;
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct PublishRecord {
@@ -70,6 +71,8 @@ pub struct ConsumerRecord {
     pub queue_group: Option<String>,
     pub ack_timeout_ms: u64,
     pub max_in_flight: usize,
+    #[serde(default)]
+    pub start_position: protocol::StartPosition,
 }
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct DeliveryAttemptRecord {
@@ -93,6 +96,11 @@ pub struct PartitionAppendRecord {
     pub offset: u64,
     pub subject: String,
 }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConsumerCursorRecord {
+    pub consumer_id: String,
+    pub cursors: crate::consumer_cursor::ConsumerCursorSet,
+}
 impl From<&crate::partition_log::MessageEnvelope> for PartitionAppendRecord {
     fn from(envelope: &crate::partition_log::MessageEnvelope) -> Self {
         Self {
@@ -107,6 +115,7 @@ impl From<&crate::partition_log::MessageEnvelope> for PartitionAppendRecord {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct ReplayedConsumer {
     pub record: ConsumerRecord,
+    pub cursors: Option<crate::consumer_cursor::ConsumerCursorSet>,
     pub pending: BTreeSet<u64>,
     pub in_flight: HashMap<u64, DeliveryAttemptRecord>,
     pub acked: HashSet<u64>,

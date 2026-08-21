@@ -101,7 +101,12 @@ async fn ack_does_not_delete_stream_owned_record() {
     let inner = scenario.broker().inner.lock().await;
     assert_eq!(inner.messages.len(), 1);
     assert_eq!(inner.messages[&1].stream.as_deref(), Some("orders"));
-    assert!(inner.consumers["durable-consumer-sid"].acked.contains(&1));
+    assert_eq!(
+        inner.consumers["durable-consumer-sid"]
+            .cursors
+            .committed_offset("orders", 0),
+        Some(1)
+    );
 }
 
 #[tokio::test]

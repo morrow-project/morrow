@@ -283,6 +283,12 @@ CONNECT {"durable_id":"client1","verbose":true,"ack_timeout_ms":30000,"max_in_fl
 SUB orders.* sid1
 ```
 
+Durable subscriptions default to `@latest`. A caller can select retained
+history explicitly, for example `SUB orders.* sid1 @earliest`,
+`SUB orders.* sid1 @committed`, `SUB orders.* sid1 @offset:42`, or
+`SUB orders.* sid1 @time:1724200000000`. The position is used when the durable
+consumer is first created; reconnecting attaches to its persisted cursor.
+
 With authentication enabled, sign the `INFO` nonce with the configured private
 key and connect with the client ID plus signature:
 
@@ -381,10 +387,15 @@ published to inactive inboxes are not retained.
 - Non-queue subscriptions create consumers keyed by durable id and sid.
 - Queue subscriptions create a shared durable queue consumer keyed by queue
   group and subject.
-- Messages are retained only when they match at least one existing durable
-  consumer.
-- Messages published before a matching durable consumer exists are not replayed
-  to that later consumer.
+- Configured streams own retained partition history independently of consumers.
+- Durable consumers keep independent committed partition cursors. Queue-group
+  members share the group consumer and therefore share one cursor and delivery
+  lease per assigned record.
+- Publications made before a consumer exists can be replayed when that consumer
+  starts at `@earliest`, an exact offset, or a timestamp.
+- Out-of-order acknowledgements are retained only within the consumer's bounded
+  acknowledgement window; retention gaps are exposed by the admin subscription
+  response rather than silently treated as delivered data.
 - Ack subjects are reserved under `_BROKER.ACK.*`; publishing to other
   `_BROKER.*` subjects is rejected.
 - `_INBOX.*` subjects are reserved for transient request/reply inboxes and are

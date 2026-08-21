@@ -247,9 +247,31 @@ async fn parses_sub_variants() {
         Command::Sub {
             subject: "orders.*".into(),
             queue: Some("workers".into()),
-            sid: "7".into()
+            sid: "7".into(),
+            start: StartPosition::Latest,
         }
     );
+
+    let mut earliest = BufReader::new(&b"SUB orders.* 8 @earliest\r\n"[..]);
+    assert_eq!(
+        read_command(&mut earliest, 1024, 8192)
+            .await
+            .unwrap()
+            .unwrap(),
+        Command::Sub {
+            subject: "orders.*".into(),
+            queue: None,
+            sid: "8".into(),
+            start: StartPosition::Earliest,
+        }
+    );
+
+    let mut exact = BufReader::new(&b"SUB orders.* workers 9 @offset:42\r\n"[..]);
+    let Command::Sub { start, .. } = read_command(&mut exact, 1024, 8192).await.unwrap().unwrap()
+    else {
+        panic!("expected SUB");
+    };
+    assert_eq!(start, StartPosition::Offset(42));
 }
 
 #[tokio::test]

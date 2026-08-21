@@ -249,6 +249,11 @@ impl TestClient {
         self.write_line(&format!("SUB {subject} {sid}")).await;
     }
 
+    async fn subscribe_at(&mut self, subject: &str, sid: &str, start: &str) {
+        self.write_line(&format!("SUB {subject} {sid} {start}"))
+            .await;
+    }
+
     async fn subscribe_queue(&mut self, subject: &str, queue: &str, sid: &str) {
         self.write_line(&format!("SUB {subject} {queue} {sid}"))
             .await;
@@ -509,6 +514,7 @@ async fn http_request_with_auth(broker: &Broker, path: &str, token: Option<&str>
 
 mod auth_tests;
 mod cluster_admin_tests;
+mod cursor_tests;
 mod qos_tests;
 mod semantic_tests;
 mod stream_retention_tests;

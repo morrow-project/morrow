@@ -200,6 +200,7 @@ fn checkpoint_removes_covered_segments() {
     assert!(wal.active_segment_id > 1);
     let replayed = ReplayedConsumer {
         record: consumer,
+        cursors: None,
         pending: [first.seq, second.seq].into_iter().collect(),
         in_flight: HashMap::new(),
         acked: HashSet::new(),
@@ -285,5 +286,6 @@ fn consumer(consumer_id: &str) -> ConsumerRecord {
         queue_group: None,
         ack_timeout_ms: 30_000,
         max_in_flight: 1024,
+        start_position: protocol::StartPosition::Latest,
     }
 }

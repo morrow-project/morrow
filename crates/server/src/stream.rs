@@ -188,6 +188,21 @@ impl StreamCatalog {
                 .any(|binding| subject::matches(binding, concrete_subject))
         })
     }
+
+    pub fn streams_for_filter(&self, filter_subject: &str) -> Vec<&StreamDefinition> {
+        if !subject::validate_subscription(filter_subject) {
+            return Vec::new();
+        }
+        self.streams
+            .iter()
+            .filter(|stream| {
+                stream
+                    .subjects
+                    .iter()
+                    .any(|binding| patterns_overlap(binding, filter_subject))
+            })
+            .collect()
+    }
 }
 
 fn patterns_overlap(left: &str, right: &str) -> bool {

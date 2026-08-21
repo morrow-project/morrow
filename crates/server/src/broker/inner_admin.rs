@@ -52,6 +52,19 @@ impl Inner {
                     })
                     .collect::<Vec<_>>();
                 members.sort_by_key(|member| (member.connection_id, member.sid.clone()));
+                let cursors = consumer
+                    .cursors
+                    .partitions
+                    .values()
+                    .map(|cursor| PartitionCursorResponse {
+                        stream: cursor.stream.clone(),
+                        partition: cursor.partition,
+                        committed_offset: cursor.committed_offset,
+                        delivered_offset: cursor.delivered_offset,
+                        acknowledged_out_of_order: cursor.acknowledged_offsets.len(),
+                        retention_gaps: cursor.retention_gaps,
+                    })
+                    .collect();
                 DurableConsumerResponse {
                     consumer_id: consumer_id.clone(),
                     filter_subject: consumer.record.filter_subject.clone(),
@@ -60,6 +73,7 @@ impl Inner {
                     pending: consumer.pending.len(),
                     in_flight: consumer.in_flight.len(),
                     acked: consumer.acked.len(),
+                    cursors,
                     delivered: consumer.delivered,
                     ack_timeout_ms: consumer.record.ack_timeout_ms,
                     max_in_flight: consumer.record.max_in_flight,
@@ -103,6 +117,7 @@ impl Inner {
             .values()
             .map(|consumer| ReplayedConsumer {
                 record: consumer.record.clone(),
+                cursors: Some(consumer.cursors.clone()),
                 pending: consumer.pending.clone(),
                 in_flight: consumer
                     .in_flight
@@ -125,21 +140,25 @@ impl Inner {
             .collect()
     }
 
-    pub(super) fn matching_durable_consumers(&self, subject_name: &str) -> Vec<String> {
-        self.consumers
-            .iter()
-            .filter(|(_, consumer)| subject::matches(&consumer.record.filter_subject, subject_name))
-            .map(|(consumer_id, _)| consumer_id.clone())
-            .collect()
-    }
-
-    pub(super) fn upsert_consumer(&mut self, record: ConsumerRecord) -> &mut Consumer {
+    pub(super) fn upsert_consumer(
+        &mut self,
+        record: ConsumerRecord,
+        catalog: &crate::stream::StreamCatalog,
+    ) -> &mut Consumer {
         let consumer_id = record.consumer_id.clone();
+        let initial_cursors = crate::consumer_cursor::ConsumerCursorSet::new(
+            &record.filter_subject,
+            record.start_position,
+            record.max_in_flight,
+            catalog,
+            &self.messages,
+        );
         let consumer = self
             .consumers
             .entry(consumer_id)
             .or_insert_with(|| Consumer {
                 record: record.clone(),
+                cursors: initial_cursors,
                 members: HashMap::new(),
                 pending: BTreeSet::new(),
                 pending_attempts: HashMap::new(),

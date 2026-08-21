@@ -96,7 +96,12 @@ impl Broker {
         let consumers = replay
             .consumers
             .into_iter()
-            .map(|(id, consumer)| (id, Consumer::from_replay(consumer)))
+            .map(|(id, consumer)| {
+                (
+                    id,
+                    Consumer::from_replay(consumer, &config.streams, &replay.messages),
+                )
+            })
             .collect();
         let cluster = {
             #[cfg(test)]

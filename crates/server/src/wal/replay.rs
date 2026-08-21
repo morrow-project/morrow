@@ -131,7 +131,8 @@ fn apply_record(kind: u8, body: &[u8], state: &mut ReplayState) -> Result<()> {
             let record = decode_publish(body)?;
             state.max_seq = state.max_seq.max(record.seq);
             for consumer in state.consumers.values_mut() {
-                if subject::matches(&consumer.record.filter_subject, &record.subject)
+                if consumer.cursors.is_none()
+                    && subject::matches(&consumer.record.filter_subject, &record.subject)
                     && !consumer.acked.contains(&record.seq)
                 {
                     consumer.pending.insert(record.seq);
@@ -147,6 +148,7 @@ fn apply_record(kind: u8, body: &[u8], state: &mut ReplayState) -> Result<()> {
                 .and_modify(|consumer| consumer.record = record.clone())
                 .or_insert_with(|| ReplayedConsumer {
                     record,
+                    cursors: None,
                     pending: BTreeSet::new(),
                     in_flight: HashMap::new(),
                     acked: HashSet::new(),
@@ -175,13 +177,20 @@ fn apply_record(kind: u8, body: &[u8], state: &mut ReplayState) -> Result<()> {
             let record = decode_partition_append(body)?;
             state.max_seq = state.max_seq.max(record.seq);
             for consumer in state.consumers.values_mut() {
-                if subject::matches(&consumer.record.filter_subject, &record.subject)
+                if consumer.cursors.is_none()
+                    && subject::matches(&consumer.record.filter_subject, &record.subject)
                     && !consumer.acked.contains(&record.seq)
                 {
                     consumer.pending.insert(record.seq);
                 }
             }
             state.partition_appends.insert(record.seq, record);
+        }
+        KIND_CONSUMER_CURSOR => {
+            let record = decode_consumer_cursor(body)?;
+            if let Some(consumer) = state.consumers.get_mut(&record.consumer_id) {
+                consumer.cursors = Some(record.cursors);
+            }
         }
         _ => crate::broker_bail!("unknown WAL record kind {kind}"),
     }
@@ -254,7 +263,8 @@ fn expire_in_flight(state: &mut ReplayState) {
         let expired: Vec<_> = consumer.in_flight.keys().copied().collect();
         for seq in expired {
             consumer.in_flight.remove(&seq);
-            if !consumer.acked.contains(&seq)
+            if consumer.cursors.is_none()
+                && !consumer.acked.contains(&seq)
                 && (state.messages.contains_key(&seq) || state.partition_appends.contains_key(&seq))
             {
                 consumer.pending.insert(seq);
