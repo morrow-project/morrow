@@ -115,8 +115,8 @@ INFO {"server_id":"morrow","server_name":"Morrow","version":"0.1.0","proto":2,"p
 Fields:
 
 - `server_id`: stable string identifying this implementation, currently
-  `"broker"`.
-- `server_name`: server display name, currently `"broker"`.
+  `"morrow"`.
+- `server_name`: server display name, currently `"Morrow"`.
 - `version`: broker crate version.
 - `proto`: highest protocol version, currently `2`.
 - `protocol_versions`: versions accepted in `CONN`, currently `[1,2]`.
@@ -777,8 +777,8 @@ Durable subscriptions:
   `Morrow-Ack` header in `HDELIVER`.
 - Unacked messages are redelivered after `ack_timeout_ms`.
 - Version 2 pull fetches are the primary durable API. Version 2 push delivery
-  requires explicit message and byte credit; version 1 keeps the bounded legacy
-  facade.
+  requires explicit message and byte credit; version 1 keeps the bounded push
+  mode.
 
 Stream retention:
 
