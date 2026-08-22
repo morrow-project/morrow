@@ -12,6 +12,9 @@ build-debug:
 build-release:
     cargo build --release --locked --workspace
 
+build-release-fast:
+    cargo build --profile release-fast --locked --workspace
+
 clean-debug:
     rm -rf target/debug
 

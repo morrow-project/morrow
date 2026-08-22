@@ -48,3 +48,26 @@ opt-level = 3
 overflow-checks = true
 panic = "abort"
 strip = true
+
+# Keep the default development profile quick to compile while retaining the
+# line information needed for useful panic backtraces. Dependencies do not
+# need full debug information for normal development builds.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
+# Opt in when a full debugger experience is needed:
+# `cargo build --profile debugging`
+[profile.debugging]
+inherits = "dev"
+debug = true
+
+# Faster release-oriented builds for local iteration and benchmarks. The
+# default `--release` profile above remains tuned for production runtime
+# performance and binary size.
+[profile.release-fast]
+inherits = "release"
+codegen-units = 16
+lto = "thin"
