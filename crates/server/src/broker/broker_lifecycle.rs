@@ -166,6 +166,7 @@ impl Broker {
             transient: Arc::new(Mutex::new(TransientState {
                 subscriptions: HashMap::new(),
                 interest_index: subject::SubjectTrie::default(),
+                route_interest_counts: BTreeMap::new(),
             })),
             next_connection_id: Arc::new(AtomicU64::new(1)),
             config,

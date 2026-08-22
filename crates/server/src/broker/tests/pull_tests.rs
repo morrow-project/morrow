@@ -286,11 +286,12 @@ fn pull_waiter_registry_bounds_connections_and_consumers() {
 }
 
 async fn wait_for_waiter_count(broker: &Broker, expected: usize) {
-    for _ in 0..1_000 {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+    while tokio::time::Instant::now() < deadline {
         if broker.pull_waiters.waiter_count() == expected {
             return;
         }
-        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_millis(1)).await;
     }
     panic!(
         "expected {expected} pull waiters, got {}",

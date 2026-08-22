@@ -175,17 +175,6 @@ impl TransientState {
         subscriptions
     }
 
-    pub(super) fn route_interests(&self) -> Vec<String> {
-        let mut interests = self
-            .subscriptions
-            .values()
-            .map(|subscription| subscription.subject.clone())
-            .collect::<Vec<_>>();
-        interests.sort();
-        interests.dedup();
-        interests
-    }
-
     pub(super) fn prepare_transient_deliveries(
         &mut self,
         connections: &ConnectionState,
@@ -193,7 +182,7 @@ impl TransientState {
         reply_to: Option<&str>,
         headers: &[(String, String)],
         payload: &[u8],
-    ) -> Vec<Delivery> {
+    ) -> (Vec<Delivery>, RouteInterestChanges) {
         let matched = self
             .interest_index
             .matching(subject_name)
@@ -227,13 +216,17 @@ impl TransientState {
                 ))
             })
             .collect::<Vec<_>>();
+        let mut route_changes = RouteInterestChanges::default();
         for (connection_id, sid, _) in &matched {
-            self.decrement_subscription(*connection_id, sid);
+            route_changes.merge(self.decrement_subscription(*connection_id, sid));
         }
-        matched
-            .into_iter()
-            .map(|(_, _, delivery)| delivery)
-            .collect()
+        (
+            matched
+                .into_iter()
+                .map(|(_, _, delivery)| delivery)
+                .collect(),
+            route_changes,
+        )
     }
 }
 

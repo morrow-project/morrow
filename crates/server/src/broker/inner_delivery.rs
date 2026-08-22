@@ -406,20 +406,6 @@ impl DurableBrokerState {
     }
 }
 
-impl TransientState {
-    pub(super) fn decrement_subscription(&mut self, connection_id: u64, sid: &str) {
-        let key = (connection_id, sid.to_string());
-        let should_remove = self
-            .subscriptions
-            .get_mut(&key)
-            .and_then(|subscription| decrement_remaining(&mut subscription.remaining_deliveries))
-            .unwrap_or(false);
-        if should_remove && let Some(subscription) = self.subscriptions.remove(&key) {
-            self.interest_index.remove(&subscription.subject, &key);
-        }
-    }
-}
-
 fn durable_message_frame(
     message: &PublishRecord,
     sid: &str,

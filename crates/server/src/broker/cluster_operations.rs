@@ -124,6 +124,13 @@ impl Broker {
         route_mesh.set_local_interests(interests).await;
     }
 
+    pub(super) async fn update_route_interests(&self, changes: RouteInterestChanges) {
+        let Some(route_mesh) = &self.route_mesh else {
+            return;
+        };
+        route_mesh.update_local_interests(changes).await;
+    }
+
     pub(super) async fn cluster_write(
         &self,
         cluster: &ClusterRuntime,

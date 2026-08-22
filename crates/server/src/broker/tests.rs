@@ -582,6 +582,7 @@ mod pull_tests;
 mod qos_tests;
 mod quota_tests;
 mod retention_limit_tests;
+mod route_interest_tests;
 mod semantic_tests;
 mod state_sharding_tests;
 mod stream_retention_tests;

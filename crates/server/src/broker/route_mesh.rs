@@ -56,7 +56,8 @@ impl RouteMesh {
                 reconnect_ms: cluster.route_reconnect_ms,
                 peers: HashMap::new(),
                 known_peers: HashMap::new(),
-                local_interests: Vec::new(),
+                local_interests: BTreeSet::new(),
+                local_interest_version: 0,
             })),
             auth_token: cluster.auth_token.clone(),
             tls,
@@ -214,7 +215,8 @@ impl RouteMesh {
     pub(super) async fn interests(&self) -> RouteFrame {
         let state = self.inner.lock().await;
         RouteFrame::Interests {
-            subjects: state.local_interests.clone(),
+            version: state.local_interest_version,
+            subjects: state.local_interests.iter().cloned().collect(),
         }
     }
 
@@ -239,7 +241,8 @@ impl RouteMesh {
                 state: "connected",
                 reconnect_attempts: 0,
                 last_error: None,
-                remote_interests: Vec::new(),
+                remote_interests: BTreeSet::new(),
+                remote_interest_version: 0,
                 remote_interest_index: subject::SubjectTrie::default(),
             },
         );
@@ -271,33 +274,105 @@ impl RouteMesh {
         self.inner.lock().await.peers.len()
     }
 
-    pub(super) async fn set_remote_interests(&self, node_id: u64, subjects: Vec<String>) {
+    pub(super) async fn set_remote_interests(
+        &self,
+        node_id: u64,
+        version: u64,
+        subjects: Vec<String>,
+    ) {
         let mut state = self.inner.lock().await;
-        if let Some(peer) = state.peers.get_mut(&node_id) {
+        if let Some(peer) = state.peers.get_mut(&node_id)
+            && version >= peer.remote_interest_version
+        {
             peer.remote_interest_index = subject::SubjectTrie::default();
             for subject in &subjects {
                 peer.remote_interest_index.insert(subject, ());
             }
-            peer.remote_interests = subjects;
+            peer.remote_interests = subjects.into_iter().collect();
+            peer.remote_interest_version = version;
         }
     }
 
+    pub(super) async fn apply_remote_interest_delta(
+        &self,
+        node_id: u64,
+        version: u64,
+        added: Vec<String>,
+        removed: Vec<String>,
+    ) -> bool {
+        let mut state = self.inner.lock().await;
+        let Some(peer) = state.peers.get_mut(&node_id) else {
+            return true;
+        };
+        if version != peer.remote_interest_version.saturating_add(1) {
+            return false;
+        }
+        for subject in removed {
+            peer.remote_interests.remove(&subject);
+            peer.remote_interest_index.remove(&subject, &());
+        }
+        for subject in added {
+            peer.remote_interests.insert(subject.clone());
+            peer.remote_interest_index.insert(&subject, ());
+        }
+        peer.remote_interest_version = version;
+        true
+    }
+
     pub(super) async fn set_local_interests(&self, subjects: Vec<String>) {
-        let senders = {
+        let frame_and_senders = {
             let mut state = self.inner.lock().await;
-            state.local_interests = subjects.clone();
-            state
+            let subjects = subjects.into_iter().collect::<BTreeSet<_>>();
+            if state.local_interests == subjects {
+                return;
+            }
+            state.local_interests = subjects;
+            state.local_interest_version = state.local_interest_version.saturating_add(1);
+            let frame = RouteFrame::Interests {
+                version: state.local_interest_version,
+                subjects: state.local_interests.iter().cloned().collect(),
+            };
+            let senders = state
                 .peers
                 .values()
                 .map(|peer| peer.sender.clone())
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            (frame, senders)
         };
+        let (frame, senders) = frame_and_senders;
         for sender in senders {
-            let _ = sender
-                .send(RouteFrame::Interests {
-                    subjects: subjects.clone(),
-                })
-                .await;
+            let _ = sender.send(frame.clone()).await;
+        }
+    }
+
+    pub(super) async fn update_local_interests(&self, changes: RouteInterestChanges) {
+        if changes.is_empty() {
+            return;
+        }
+        let frame_and_senders = {
+            let mut state = self.inner.lock().await;
+            for subject in &changes.removed {
+                state.local_interests.remove(subject);
+            }
+            for subject in &changes.added {
+                state.local_interests.insert(subject.clone());
+            }
+            state.local_interest_version = state.local_interest_version.saturating_add(1);
+            let frame = RouteFrame::InterestDelta {
+                version: state.local_interest_version,
+                added: changes.added,
+                removed: changes.removed,
+            };
+            let senders = state
+                .peers
+                .values()
+                .map(|peer| peer.sender.clone())
+                .collect::<Vec<_>>();
+            (frame, senders)
+        };
+        let (frame, senders) = frame_and_senders;
+        for sender in senders {
+            let _ = sender.send(frame.clone()).await;
         }
     }
 
@@ -370,7 +445,7 @@ impl RouteMesh {
                 reconnect_attempts: peer.reconnect_attempts,
                 last_error: peer.last_error.clone(),
                 subscriptions: peer.remote_interests.len(),
-                subjects: peer.remote_interests.clone(),
+                subjects: peer.remote_interests.iter().cloned().collect(),
             })
             .collect::<Vec<_>>();
         connected.sort_by_key(|peer| peer.node_id);
@@ -381,159 +456,4 @@ impl RouteMesh {
             connected,
         }
     }
-}
-
-pub(super) async fn handle_route_stream<S>(
-    mesh: RouteMesh,
-    broker: Broker,
-    stream: S,
-    direction: RouteDirection,
-    auth_token: String,
-    tls_peer_id: Option<u64>,
-) -> Result<()>
-where
-    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-{
-    let (mut reader, mut writer) = tokio::io::split(stream);
-    let (sender, mut receiver) = mpsc::channel::<RouteFrame>(256);
-    let writer_auth_token = auth_token.clone();
-    sender
-        .send(mesh.hello().await)
-        .await
-        .map_err(|_| BrokerError::msg("route writer closed"))?;
-    sender
-        .send(mesh.peer_list().await)
-        .await
-        .map_err(|_| BrokerError::msg("route writer closed"))?;
-    sender
-        .send(mesh.interests().await)
-        .await
-        .map_err(|_| BrokerError::msg("route writer closed"))?;
-    let writer_task = tokio::spawn(async move {
-        while let Some(frame) = receiver.recv().await {
-            write_route_frame(&mut writer, &writer_auth_token, &frame).await?;
-        }
-        Ok::<(), BrokerError>(())
-    });
-
-    let mut peer_id = None;
-    loop {
-        let Some(frame) = read_route_frame(&mut reader, &auth_token).await? else {
-            break;
-        };
-        match frame {
-            RouteFrame::Hello {
-                node_id,
-                route_addr,
-                client_addr,
-            } => {
-                if let Some(peer_id) = tls_peer_id {
-                    crate::broker_ensure!(
-                        node_id == peer_id,
-                        "route hello node ID does not match peer certificate"
-                    );
-                }
-                let info = RoutePeerInfo {
-                    node_id,
-                    route_addr,
-                    client_addr,
-                };
-                let Some(added_peer) = mesh.register_peer(info, direction, sender.clone()).await
-                else {
-                    break;
-                };
-                peer_id = Some(node_id);
-                if added_peer {
-                    broker.log_cluster_event("cluster peer added").await;
-                }
-                mesh.broadcast_peer_list().await;
-            }
-            RouteFrame::PeerList { peers } => {
-                for _ in mesh.merge_peers(peers).await {
-                    broker.log_cluster_event("cluster peer added").await;
-                }
-            }
-            RouteFrame::Interests { subjects } => {
-                if let Some(node_id) = peer_id {
-                    mesh.set_remote_interests(node_id, subjects).await;
-                }
-            }
-            RouteFrame::Publish {
-                subject,
-                reply_to,
-                payload,
-            } => {
-                broker
-                    .deliver_route_publish(&subject, reply_to.as_deref(), &payload)
-                    .await?;
-            }
-            RouteFrame::Ping => {
-                let _ = sender.send(RouteFrame::Pong).await;
-            }
-            RouteFrame::Pong => {}
-        }
-    }
-    if let Some(node_id) = peer_id {
-        mesh.remove_peer(node_id).await;
-    }
-    writer_task.abort();
-    Ok(())
-}
-
-pub(super) async fn read_route_frame<R>(
-    reader: &mut R,
-    auth_token: &str,
-) -> Result<Option<RouteFrame>>
-where
-    R: AsyncRead + Unpin,
-{
-    let mut len = [0_u8; 4];
-    match tokio::time::timeout(
-        Duration::from_millis(ROUTE_FRAME_READ_TIMEOUT_MS),
-        reader.read_exact(&mut len),
-    )
-    .await
-    .map_err(|_| BrokerError::msg("route frame read timed out"))?
-    {
-        Ok(_) => {}
-        Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
-        Err(err) => return Err(err.into()),
-    }
-    let len = u32::from_be_bytes(len) as usize;
-    crate::broker_ensure!(len <= MAX_ROUTE_FRAME, "route frame too large");
-    let mut payload = vec![0; len];
-    tokio::time::timeout(
-        Duration::from_millis(ROUTE_FRAME_READ_TIMEOUT_MS),
-        reader.read_exact(&mut payload),
-    )
-    .await
-    .map_err(|_| BrokerError::msg("route frame read timed out"))??;
-    let envelope: AuthenticatedRouteFrame =
-        serde_json::from_slice(&payload).context("decoding route frame")?;
-    crate::broker_ensure!(
-        crate::security::constant_time_eq(&envelope.auth_token, auth_token),
-        "invalid route auth token"
-    );
-    Ok(Some(envelope.frame))
-}
-
-pub(super) async fn write_route_frame<W>(
-    writer: &mut W,
-    auth_token: &str,
-    frame: &RouteFrame,
-) -> Result<()>
-where
-    W: AsyncWrite + Unpin,
-{
-    let payload = serde_json::to_vec(&AuthenticatedRouteFrame {
-        auth_token: auth_token.to_string(),
-        frame: frame.clone(),
-    })
-    .context("encoding route frame")?;
-    crate::broker_ensure!(payload.len() <= u32::MAX as usize, "route frame too large");
-    writer
-        .write_all(&(payload.len() as u32).to_be_bytes())
-        .await?;
-    writer.write_all(&payload).await?;
-    Ok(())
 }

@@ -178,7 +178,7 @@ impl Broker {
             crate::broker_bail!("CLUSTER_DURABLE requires clustered mode");
         }
 
-        let (transient_deliveries, verbose, namespace) = {
+        let (transient_deliveries, route_interest_changes, verbose, namespace) = {
             let connections = self.connections.lock().await;
             let client = connections.clients.get(&publisher_id);
             let verbose = client
@@ -187,22 +187,20 @@ impl Broker {
             let namespace = client
                 .and_then(|client| client.durable_id.clone())
                 .unwrap_or_else(|| DEFAULT_NAMESPACE.to_string());
-            (
+            let (deliveries, route_interest_changes) =
                 self.transient.lock().await.prepare_transient_deliveries(
                     &connections,
                     &subject_name,
                     reply_to.as_deref(),
                     &headers,
                     &payload,
-                ),
-                verbose,
-                namespace,
-            )
+                );
+            (deliveries, route_interest_changes, verbose, namespace)
         };
         for delivery in transient_deliveries {
             let _ = delivery.sender.send(delivery.frame).await;
         }
-        self.sync_route_interests().await;
+        self.update_route_interests(route_interest_changes).await;
         if let Some(route_mesh) = &self.route_mesh {
             route_mesh
                 .forward_publish(&subject_name, reply_to.as_deref(), &payload)
@@ -399,7 +397,7 @@ impl Broker {
             payload.len() <= self.config.max_payload,
             "route payload exceeds max payload"
         );
-        let deliveries = {
+        let (deliveries, route_interest_changes) = {
             let connections = self.connections.lock().await;
             self.transient.lock().await.prepare_transient_deliveries(
                 &connections,
@@ -412,7 +410,7 @@ impl Broker {
         for delivery in deliveries {
             let _ = delivery.sender.send(delivery.frame).await;
         }
-        self.sync_route_interests().await;
+        self.update_route_interests(route_interest_changes).await;
         Ok(())
     }
 
@@ -557,24 +555,17 @@ impl Broker {
     pub(super) async fn remove_client(&self, connection_id: u64) -> Result<()> {
         self.pull_waiters.cancel_connection(connection_id);
         self.connections.lock().await.clients.remove(&connection_id);
-        let mut transient = self.transient.lock().await;
-        let removed = transient
-            .subscriptions
-            .iter()
-            .filter(|((client_id, _), _)| *client_id == connection_id)
-            .map(|(key, subscription)| (key.clone(), subscription.subject.clone()))
-            .collect::<Vec<_>>();
-        for (key, subject) in removed {
-            transient.subscriptions.remove(&key);
-            transient.interest_index.remove(&subject, &key);
-        }
-        drop(transient);
+        let route_interest_changes = self
+            .transient
+            .lock()
+            .await
+            .remove_connection_interests(connection_id);
         let mut inner = self.inner.lock().await;
         for consumer in inner.consumers.values_mut() {
             consumer.members.remove(&connection_id);
         }
         drop(inner);
-        self.sync_route_interests().await;
+        self.update_route_interests(route_interest_changes).await;
         Ok(())
     }
 }

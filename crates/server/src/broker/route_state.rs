@@ -27,7 +27,8 @@ pub(super) struct RouteMeshState {
     pub(super) reconnect_ms: u64,
     pub(super) peers: HashMap<u64, RoutePeer>,
     pub(super) known_peers: HashMap<u64, RoutePeerInfo>,
-    pub(super) local_interests: Vec<String>,
+    pub(super) local_interests: BTreeSet<String>,
+    pub(super) local_interest_version: u64,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -43,7 +44,8 @@ pub(super) struct RoutePeer {
     pub(super) state: &'static str,
     pub(super) reconnect_attempts: u64,
     pub(super) last_error: Option<String>,
-    pub(super) remote_interests: Vec<String>,
+    pub(super) remote_interests: BTreeSet<String>,
+    pub(super) remote_interest_version: u64,
     pub(super) remote_interest_index: subject::SubjectTrie<()>,
 }
 
@@ -72,8 +74,15 @@ pub(super) enum RouteFrame {
         peers: Vec<RoutePeerInfo>,
     },
     Interests {
+        version: u64,
         subjects: Vec<String>,
     },
+    InterestDelta {
+        version: u64,
+        added: Vec<String>,
+        removed: Vec<String>,
+    },
+    InterestResync,
     Publish {
         subject: String,
         reply_to: Option<String>,

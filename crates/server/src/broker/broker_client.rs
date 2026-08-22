@@ -272,7 +272,7 @@ impl Broker {
             protocol::validate_identifier("queue group", queue)?;
         }
 
-        let durable_record = {
+        let (durable_record, route_interest_changes) = {
             let connections = self.connections.lock().await;
             let client = connections
                 .clients
@@ -322,12 +322,7 @@ impl Broker {
                         crate::broker_bail!("transient subscription quota exceeded");
                     }
                 }
-                if let Some(existing) = transient.subscriptions.get(&key) {
-                    let existing_subject = existing.subject.clone();
-                    transient.interest_index.remove(&existing_subject, &key);
-                }
-                transient.interest_index.insert(&sub_subject, key.clone());
-                transient.subscriptions.insert(
+                let changes = transient.upsert_subscription(
                     key,
                     TransientSubscription {
                         subject: sub_subject,
@@ -335,7 +330,7 @@ impl Broker {
                         remaining_deliveries: None,
                     },
                 );
-                None
+                (None, changes)
             } else {
                 if let Some(durable_id) = &durable_id {
                     let inner = self.inner.lock().await;
@@ -370,7 +365,10 @@ impl Broker {
                         max_in_flight,
                         start_position: start,
                     };
-                    Some((consumer_id, record, sid, protocol_version))
+                    (
+                        Some((consumer_id, record, sid, protocol_version)),
+                        RouteInterestChanges::default(),
+                    )
                 } else {
                     crate::broker_bail!("CONNECT durable_id is required before SUB")
                 }
@@ -425,7 +423,7 @@ impl Broker {
             drop(inner);
             self.deliver_pending().await?;
         }
-        self.sync_route_interests().await;
+        self.update_route_interests(route_interest_changes).await;
         Ok(())
     }
 
@@ -489,6 +487,7 @@ impl Broker {
         }
         let mut found = false;
         let mut transient = self.transient.lock().await;
+        let mut route_interest_changes = RouteInterestChanges::default();
         if let Some(subscription) = transient
             .subscriptions
             .get_mut(&(connection_id, sid.to_string()))
@@ -498,9 +497,7 @@ impl Broker {
                 subscription.remaining_deliveries = Some(max_messages);
             } else {
                 let key = (connection_id, sid.to_string());
-                let subject = subscription.subject.clone();
-                transient.subscriptions.remove(&key);
-                transient.interest_index.remove(&subject, &key);
+                route_interest_changes = transient.remove_subscription(&key);
             }
         }
         drop(transient);
@@ -523,7 +520,7 @@ impl Broker {
         }
         crate::broker_ensure!(found, "unknown sid");
         drop(inner);
-        self.sync_route_interests().await;
+        self.update_route_interests(route_interest_changes).await;
         Ok(())
     }
 }

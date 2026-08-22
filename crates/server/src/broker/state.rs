@@ -27,6 +27,7 @@ pub(super) struct ConnectionState {
 pub(super) struct TransientState {
     pub(super) subscriptions: HashMap<(u64, String), TransientSubscription>,
     pub(super) interest_index: subject::SubjectTrie<(u64, String)>,
+    pub(super) route_interest_counts: BTreeMap<String, usize>,
 }
 
 #[derive(Clone)]
