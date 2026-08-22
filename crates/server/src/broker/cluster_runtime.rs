@@ -39,6 +39,14 @@ impl ClusterRuntime {
         }
     }
 
+    pub(super) fn enforce_retention(&self, now_ms: u64) -> Result<()> {
+        match self {
+            Self::Real(runtime) => runtime.enforce_retention(now_ms),
+            #[cfg(test)]
+            Self::Fake(_) => Ok(()),
+        }
+    }
+
     pub(super) async fn replicate_partition(
         &self,
         envelope: MessageEnvelope,

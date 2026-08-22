@@ -202,9 +202,21 @@ impl Inner {
 
     pub(super) fn sync_durable_state(
         &mut self,
-        state: DurableState,
+        mut state: DurableState,
         catalog: &crate::stream::StreamCatalog,
     ) -> Result<()> {
+        state.messages.retain(|_, record| {
+            let (Some(stream), Some(partition), Some(offset)) =
+                (record.stream.as_deref(), record.partition, record.offset)
+            else {
+                return true;
+            };
+            !self.partition_logs.is_before_retention_floor(
+                stream,
+                crate::stream::PartitionId(partition),
+                offset,
+            )
+        });
         let mut partition_records = state
             .messages
             .values()

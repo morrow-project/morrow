@@ -1,6 +1,6 @@
 use crate::{
     error::Result,
-    stream::{PartitionId, StreamCatalog, StreamDefinition, StreamId},
+    stream::{PartitionId, RetentionPolicy, StreamCatalog, StreamDefinition, StreamId},
 };
 use std::{collections::HashMap, path::Path};
 
@@ -66,6 +66,24 @@ pub struct PartitionPosition {
 pub(crate) struct SubjectIndexQuery {
     pub(crate) offsets: Vec<u64>,
     pub(crate) used_index: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RetentionChange {
+    pub(crate) stream: String,
+    pub(crate) partition: PartitionId,
+    pub(crate) earliest_offset: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct PartitionRetentionStatus {
+    pub(crate) partition: u32,
+    pub(crate) earliest_offset: u64,
+    pub(crate) next_offset: u64,
+    pub(crate) retained_messages: usize,
+    pub(crate) retained_bytes: u64,
+    pub(crate) deleted_messages: u64,
+    pub(crate) deleted_bytes: u64,
 }
 
 pub fn select_partition(

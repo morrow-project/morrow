@@ -110,7 +110,95 @@ impl PartitionLogSet {
         self.logs
             .get_mut(&(stream.to_string(), partition))
             .ok_or_else(|| crate::error::BrokerError::msg("unknown stream partition"))?
-            .rewrite(records)
+            .rewrite(records, None)
+    }
+
+    pub(crate) fn enforce_retention(
+        &mut self,
+        envelopes: &mut Vec<MessageEnvelope>,
+        catalog: &StreamCatalog,
+        now_ms: u64,
+    ) -> Result<Vec<RetentionChange>> {
+        let changes = self.retention_changes(catalog.definitions(), now_ms);
+        for change in &changes {
+            envelopes.retain(|envelope| {
+                envelope.stream.as_str() != change.stream
+                    || envelope.partition != change.partition
+                    || envelope.offset >= change.earliest_offset
+            });
+            let retained = envelopes
+                .iter()
+                .filter(|envelope| {
+                    envelope.stream.as_str() == change.stream
+                        && envelope.partition == change.partition
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            self.logs
+                .get_mut(&(change.stream.clone(), change.partition))
+                .expect("retention changes reference configured logs")
+                .rewrite(&retained, Some(change.earliest_offset))?;
+        }
+        Ok(changes)
+    }
+
+    pub(crate) fn retention_changes(
+        &mut self,
+        streams: &[StreamDefinition],
+        now_ms: u64,
+    ) -> Vec<RetentionChange> {
+        let mut changes = Vec::new();
+        for stream in streams {
+            for partition in 0..stream.partitions {
+                let partition = PartitionId(partition);
+                let log = self
+                    .logs
+                    .get_mut(&(stream.name.as_str().to_string(), partition))
+                    .expect("catalog partitions are opened together");
+                if let Some(earliest_offset) = log.enforce_retention(&stream.retention, now_ms) {
+                    changes.push(RetentionChange {
+                        stream: stream.name.as_str().to_string(),
+                        partition,
+                        earliest_offset,
+                    });
+                }
+            }
+        }
+        changes
+    }
+
+    pub(crate) fn retain_partition(
+        &mut self,
+        change: &RetentionChange,
+        records: &[MessageEnvelope],
+    ) -> Result<()> {
+        self.logs
+            .get_mut(&(change.stream.clone(), change.partition))
+            .ok_or_else(|| crate::error::BrokerError::msg("unknown stream partition"))?
+            .rewrite(records, Some(change.earliest_offset))
+    }
+
+    pub(crate) fn retention_status(
+        &self,
+        stream: &str,
+        partition: PartitionId,
+    ) -> Result<PartitionRetentionStatus> {
+        Ok(self
+            .logs
+            .get(&(stream.to_string(), partition))
+            .ok_or_else(|| crate::error::BrokerError::msg("unknown stream partition"))?
+            .retention_status(partition))
+    }
+
+    pub(crate) fn is_before_retention_floor(
+        &self,
+        stream: &str,
+        partition: PartitionId,
+        offset: u64,
+    ) -> bool {
+        self.logs
+            .get(&(stream.to_string(), partition))
+            .is_some_and(|log| offset < log.retention_status(partition).earliest_offset)
     }
 
     pub(crate) fn matching_offsets(

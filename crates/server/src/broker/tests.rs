@@ -534,5 +534,6 @@ mod cursor_tests;
 mod middleware_tests;
 mod pull_tests;
 mod qos_tests;
+mod retention_limit_tests;
 mod semantic_tests;
 mod stream_retention_tests;

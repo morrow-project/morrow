@@ -65,6 +65,7 @@ mod manual_clock;
 mod middleware_hooks;
 mod producer_ack;
 mod pull_consumer;
+mod retention;
 mod route_mesh;
 mod route_state;
 mod state;
@@ -75,7 +76,7 @@ pub use self::broker::Broker;
 use self::{
     cluster_runtime::*, compaction::*, consumer::*, fake_cluster::*, fake_cluster_types::*,
     hooks::*, http::*, inner_admin::*, inner_delivery::*, manual_clock::*, pull_consumer::*,
-    route_mesh::*, route_state::*, state::*, subject_helpers::*,
+    retention::*, route_mesh::*, route_state::*, state::*, subject_helpers::*,
 };
 
 #[cfg(test)]

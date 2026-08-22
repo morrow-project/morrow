@@ -20,6 +20,11 @@ pub(super) fn encode_batch(envelope: &MessageEnvelope) -> Result<Vec<u8>> {
     Ok(batch)
 }
 
+pub(super) fn encoded_batch_len(envelope: &MessageEnvelope) -> Result<u64> {
+    let body = serde_json::to_vec(envelope).context("encoding partition-log envelope")?;
+    Ok(BATCH_PREFIX_LEN.saturating_add(body.len() as u64))
+}
+
 pub(super) fn envelope_checksum(envelope: &MessageEnvelope) -> Result<u32> {
     Ok(crc32fast::hash(
         &serde_json::to_vec(envelope).context("encoding partition-log envelope")?,

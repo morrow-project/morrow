@@ -58,24 +58,27 @@ async fn http_subscriptions_endpoint_reports_durable_and_transient_state() {
 
 #[tokio::test]
 async fn http_streams_endpoint_reports_effective_bindings() {
-    let mut scenario = Scenario::new();
-    scenario.broker.config.streams =
-        crate::stream::StreamCatalog::new(vec![crate::stream::StreamDefinition {
-            name: crate::stream::StreamId::new("orders").unwrap(),
-            subjects: vec!["orders.>".to_string()],
-            partitions: 8,
-            partitioning: Default::default(),
-            storage: Default::default(),
-            retention: Default::default(),
-        }])
-        .unwrap();
+    let dir = TempDir::new().unwrap();
+    let clock = Arc::new(ManualClock::new(1_000));
+    let mut config = test_config(dir.path());
+    config.streams = crate::stream::StreamCatalog::new(vec![crate::stream::StreamDefinition {
+        name: crate::stream::StreamId::new("orders").unwrap(),
+        subjects: vec!["orders.>".to_string()],
+        partitions: 8,
+        partitioning: Default::default(),
+        storage: Default::default(),
+        retention: Default::default(),
+    }])
+    .unwrap();
+    let broker = deterministic_broker(config, clock, None);
 
-    let response = http_request(scenario.broker(), "/streams").await;
+    let response = http_request(&broker, "/streams").await;
 
     assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
     assert!(response.contains("\"name\":\"orders\""));
     assert!(response.contains("\"subjects\":[\"orders.>\"]"));
     assert!(response.contains("\"partitions\":8"));
+    assert!(response.contains("\"partition_status\""));
 }
 #[tokio::test]
 async fn http_status_and_unknown_paths_return_not_found() {

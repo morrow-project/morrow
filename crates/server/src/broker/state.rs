@@ -126,8 +126,17 @@ pub(super) struct SubscriptionsResponse {
 }
 
 #[derive(Debug, serde::Serialize)]
-pub(super) struct StreamsResponse<'a> {
-    pub(super) streams: &'a [crate::stream::StreamDefinition],
+pub(super) struct StreamsResponse {
+    pub(super) streams: Vec<StreamResponse>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub(super) struct StreamResponse {
+    #[serde(flatten)]
+    pub(super) definition: crate::stream::StreamDefinition,
+    pub(super) retained_messages: usize,
+    pub(super) retained_bytes: u64,
+    pub(super) partition_status: Vec<crate::partition_log::PartitionRetentionStatus>,
 }
 
 #[derive(Debug, serde::Serialize)]

@@ -278,3 +278,123 @@ fn benchmark_sealed_subject_index_exact_star_and_tail_filters() {
         );
     }
 }
+
+#[test]
+fn age_retention_rewrites_prefix_and_preserves_next_offset() {
+    let dir = TempDir::new().unwrap();
+    let mut definition = definition(1);
+    definition.retention.max_age_ms = Some(10);
+    let catalog = StreamCatalog::new(vec![definition]).unwrap();
+    let stream = &catalog.definitions()[0];
+    let (mut logs, _) = PartitionLogSet::open(dir.path(), &catalog, 256).unwrap();
+    let mut envelopes = Vec::new();
+    for timestamp_ms in [0, 10, 20] {
+        let mut request = request(stream, None, &[]);
+        request.timestamp_ms = timestamp_ms;
+        envelopes.push(logs.append(request).unwrap());
+    }
+
+    let changes = logs
+        .enforce_retention(&mut envelopes, &catalog, 21)
+        .unwrap();
+    assert_eq!(changes.len(), 1);
+    assert_eq!(changes[0].earliest_offset, 2);
+    assert_eq!(envelopes.len(), 1);
+    assert_eq!(envelopes[0].offset, 2);
+    drop(logs);
+
+    let (mut logs, replay) = PartitionLogSet::open(dir.path(), &catalog, 256).unwrap();
+    assert_eq!(replay, envelopes);
+    let appended = logs.append(request(stream, None, &[])).unwrap();
+    assert_eq!(appended.offset, 3);
+}
+
+#[test]
+fn byte_retention_keeps_newest_records_within_limit() {
+    let dir = TempDir::new().unwrap();
+    let base_catalog = catalog(1);
+    let stream = &base_catalog.definitions()[0];
+    let (mut logs, _) = PartitionLogSet::open(dir.path(), &base_catalog, 4096).unwrap();
+    let mut envelopes = Vec::new();
+    for payload in [b"first".as_slice(), b"second", b"third"] {
+        let mut request = request(stream, None, &[]);
+        request.payload = payload;
+        envelopes.push(logs.append(request).unwrap());
+    }
+    let newest_bytes = codec::encoded_batch_len(&envelopes[1]).unwrap()
+        + codec::encoded_batch_len(&envelopes[2]).unwrap();
+    let mut retained_definition = definition(1);
+    retained_definition.retention.max_bytes = Some(newest_bytes);
+    let retained_catalog = StreamCatalog::new(vec![retained_definition]).unwrap();
+
+    logs.enforce_retention(&mut envelopes, &retained_catalog, 42)
+        .unwrap();
+    assert_eq!(
+        envelopes
+            .iter()
+            .map(|record| record.offset)
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+    let status = logs.retention_status("orders", PartitionId(0)).unwrap();
+    assert_eq!(status.earliest_offset, 1);
+    assert_eq!(status.retained_messages, 2);
+    assert!(status.retained_bytes <= newest_bytes);
+}
+
+#[test]
+fn combined_retention_can_remove_every_record_without_reusing_offsets() {
+    let dir = TempDir::new().unwrap();
+    let mut definition = definition(1);
+    definition.retention.max_age_ms = Some(1_000);
+    definition.retention.max_bytes = Some(1);
+    let catalog = StreamCatalog::new(vec![definition]).unwrap();
+    let stream = &catalog.definitions()[0];
+    let (mut logs, _) = PartitionLogSet::open(dir.path(), &catalog, 4096).unwrap();
+    let first = logs.append(request(stream, None, &[])).unwrap();
+    let mut envelopes = vec![first];
+
+    logs.enforce_retention(&mut envelopes, &catalog, 42)
+        .unwrap();
+    assert!(envelopes.is_empty());
+    drop(logs);
+
+    let (mut logs, replay) = PartitionLogSet::open(dir.path(), &catalog, 4096).unwrap();
+    assert!(replay.is_empty());
+    assert_eq!(logs.append(request(stream, None, &[])).unwrap().offset, 1);
+}
+
+#[test]
+fn repeated_byte_retention_reaches_a_bounded_physical_steady_state() {
+    let dir = TempDir::new().unwrap();
+    let mut definition = definition(1);
+    definition.retention.max_bytes = Some(512);
+    let catalog = StreamCatalog::new(vec![definition]).unwrap();
+    let stream = &catalog.definitions()[0];
+    let (mut logs, _) = PartitionLogSet::open(dir.path(), &catalog, 256).unwrap();
+    let mut envelopes = Vec::new();
+    let payload = [b'x'; 128];
+    for id in 0..100_u64 {
+        let mut request = request(stream, None, &[]);
+        request.timestamp_ms = id;
+        request.payload = &payload;
+        envelopes.push(logs.append(request).unwrap());
+        logs.enforce_retention(&mut envelopes, &catalog, id)
+            .unwrap();
+        let status = logs.retention_status("orders", PartitionId(0)).unwrap();
+        assert!(status.retained_bytes <= 512);
+    }
+    logs.flush().unwrap();
+    drop(logs);
+
+    let partition = dir.path().join("streams/orders/partition-00000");
+    let physical_log_bytes = std::fs::read_dir(&partition)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().and_then(|extension| extension.to_str()) == Some("plog"))
+        .map(|path| path.metadata().unwrap().len())
+        .sum::<u64>();
+    assert!(physical_log_bytes <= codec::SEGMENT_HEADER_LEN + 512);
+    let (_, replay) = PartitionLogSet::open(dir.path(), &catalog, 256).unwrap();
+    assert_eq!(replay, envelopes);
+}

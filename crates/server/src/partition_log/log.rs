@@ -1,7 +1,7 @@
 use super::{codec::*, subject_index::*, *};
 use crate::error::{BrokerError, ResultExt};
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeSet, HashMap, VecDeque},
     fs::{File, OpenOptions},
     io::{Seek, Write},
     path::PathBuf,
@@ -10,6 +10,14 @@ use std::{
 const SEGMENT_EXTENSION: &str = "plog";
 const INDEX_EXTENSION: &str = "idx";
 const INDEX_STRIDE: u64 = 64;
+const RETENTION_OFFSET_FILE: &str = "retention-offset";
+
+#[derive(Debug)]
+struct RetentionRecord {
+    offset: u64,
+    timestamp_ms: u64,
+    bytes: u64,
+}
 
 #[derive(Debug)]
 pub(super) struct PartitionLog {
@@ -23,6 +31,10 @@ pub(super) struct PartitionLog {
     sealed_subject_segments: Vec<SubjectSegment>,
     active_subjects: Vec<(String, u64)>,
     subject_index_cache_bytes: usize,
+    retention_records: VecDeque<RetentionRecord>,
+    retained_bytes: u64,
+    deleted_messages: u64,
+    deleted_bytes: u64,
 }
 
 impl PartitionLog {
@@ -69,9 +81,10 @@ impl PartitionLog {
             }
         }
         envelopes.sort_by_key(|envelope| envelope.offset);
-        for (expected, envelope) in envelopes.iter().enumerate() {
+        let first_offset = envelopes.first().map_or(0, |envelope| envelope.offset);
+        for (index, envelope) in envelopes.iter().enumerate() {
             crate::broker_ensure!(
-                envelope.offset == expected as u64,
+                envelope.offset == first_offset.saturating_add(index as u64),
                 "non-contiguous offset {} in stream {} partition {}",
                 envelope.offset,
                 stream.as_str(),
@@ -85,11 +98,29 @@ impl PartitionLog {
             .append(true)
             .open(&active_path)
             .with_context(|| format!("opening partition-log segment {}", active_path.display()))?;
-        let next_offset = envelopes.len() as u64;
+        let persisted_next_offset = read_retention_offset(&dir)?;
+        let next_offset = envelopes.last().map_or(persisted_next_offset, |envelope| {
+            envelope.offset.saturating_add(1)
+        });
+        crate::broker_ensure!(
+            persisted_next_offset <= next_offset,
+            "partition-log retention offset exceeds the durable high watermark"
+        );
         let record_checksums = envelopes
             .iter()
             .map(|envelope| Ok((envelope.offset, envelope_checksum(envelope)?)))
             .collect::<Result<HashMap<_, _>>>()?;
+        let retention_records = envelopes
+            .iter()
+            .map(|envelope| {
+                Ok(RetentionRecord {
+                    offset: envelope.offset,
+                    timestamp_ms: envelope.timestamp_ms,
+                    bytes: encoded_batch_len(envelope)?,
+                })
+            })
+            .collect::<Result<VecDeque<_>>>()?;
+        let retained_bytes = retention_records.iter().map(|record| record.bytes).sum();
         Ok((
             Self {
                 dir,
@@ -102,6 +133,10 @@ impl PartitionLog {
                 sealed_subject_segments,
                 active_subjects,
                 subject_index_cache_bytes,
+                retention_records,
+                retained_bytes,
+                deleted_messages: 0,
+                deleted_bytes: 0,
             },
             envelopes,
             truncations,
@@ -141,6 +176,13 @@ impl PartitionLog {
         self.next_offset += 1;
         self.record_checksums
             .insert(envelope.offset, envelope_checksum(&envelope)?);
+        let bytes = encoded_batch_len(&envelope)?;
+        self.retained_bytes = self.retained_bytes.saturating_add(bytes);
+        self.retention_records.push_back(RetentionRecord {
+            offset: envelope.offset,
+            timestamp_ms: envelope.timestamp_ms,
+            bytes,
+        });
         self.active_subjects
             .push((envelope.subject.clone(), envelope.offset));
         if envelope.offset % INDEX_STRIDE == 0 {
@@ -159,7 +201,16 @@ impl PartitionLog {
         Ok(())
     }
 
-    pub(super) fn rewrite(&mut self, records: &[MessageEnvelope]) -> Result<()> {
+    pub(super) fn rewrite(
+        &mut self,
+        records: &[MessageEnvelope],
+        empty_next_offset: Option<u64>,
+    ) -> Result<()> {
+        let next_offset = records.last().map_or_else(
+            || empty_next_offset.unwrap_or_default(),
+            |record| record.offset.saturating_add(1),
+        );
+        let first_offset = records.first().map_or(next_offset, |record| record.offset);
         self.flush()?;
         for (_, path) in segment_paths(&self.dir)? {
             std::fs::remove_file(&path)?;
@@ -176,15 +227,72 @@ impl PartitionLog {
         let path = segment_path(&self.dir, self.segment_id);
         self.file = create_segment(&path)?;
         self.active_bytes = SEGMENT_HEADER_LEN;
-        self.next_offset = 0;
+        self.next_offset = first_offset;
         self.record_checksums.clear();
         self.sealed_subject_segments.clear();
         self.active_subjects.clear();
         self.subject_index_cache_bytes = 0;
+        self.retention_records.clear();
+        self.retained_bytes = 0;
         for record in records {
             self.append_committed(record.clone())?;
         }
-        self.flush()
+        crate::broker_ensure!(
+            self.next_offset == next_offset,
+            "partition rewrite offset mismatch"
+        );
+        self.flush()?;
+        persist_retention_offset(&self.dir, next_offset)
+    }
+
+    pub(super) fn enforce_retention(
+        &mut self,
+        policy: &RetentionPolicy,
+        now_ms: u64,
+    ) -> Option<u64> {
+        let before = self.earliest_offset();
+        if let Some(max_age_ms) = policy.max_age_ms {
+            while self
+                .retention_records
+                .front()
+                .is_some_and(|record| now_ms.saturating_sub(record.timestamp_ms) > max_age_ms)
+            {
+                self.remove_oldest_retention_record();
+            }
+        }
+        if let Some(max_bytes) = policy.max_bytes {
+            while self.retained_bytes > max_bytes && !self.retention_records.is_empty() {
+                self.remove_oldest_retention_record();
+            }
+        }
+        let after = self.earliest_offset();
+        (after != before).then_some(after)
+    }
+
+    pub(super) fn retention_status(&self, partition: PartitionId) -> PartitionRetentionStatus {
+        PartitionRetentionStatus {
+            partition: partition.0,
+            earliest_offset: self.earliest_offset(),
+            next_offset: self.next_offset,
+            retained_messages: self.retention_records.len(),
+            retained_bytes: self.retained_bytes,
+            deleted_messages: self.deleted_messages,
+            deleted_bytes: self.deleted_bytes,
+        }
+    }
+
+    fn earliest_offset(&self) -> u64 {
+        self.retention_records
+            .front()
+            .map_or(self.next_offset, |record| record.offset)
+    }
+
+    fn remove_oldest_retention_record(&mut self) {
+        if let Some(record) = self.retention_records.pop_front() {
+            self.retained_bytes = self.retained_bytes.saturating_sub(record.bytes);
+            self.deleted_messages = self.deleted_messages.saturating_add(1);
+            self.deleted_bytes = self.deleted_bytes.saturating_add(record.bytes);
+        }
     }
 
     fn rotate(&mut self) -> Result<()> {
@@ -218,6 +326,26 @@ impl PartitionLog {
             used_index,
         })
     }
+}
+
+fn read_retention_offset(dir: &Path) -> Result<u64> {
+    let path = dir.join(RETENTION_OFFSET_FILE);
+    if !path.exists() {
+        return Ok(0);
+    }
+    let bytes = std::fs::read(&path)?;
+    crate::broker_ensure!(bytes.len() == 8, "invalid partition retention offset");
+    Ok(u64::from_le_bytes(bytes.try_into().unwrap()))
+}
+
+fn persist_retention_offset(dir: &Path, next_offset: u64) -> Result<()> {
+    let path = dir.join(RETENTION_OFFSET_FILE);
+    let tmp = dir.join(format!("{RETENTION_OFFSET_FILE}.tmp"));
+    std::fs::write(&tmp, next_offset.to_le_bytes())?;
+    OpenOptions::new().read(true).open(&tmp)?.sync_data()?;
+    std::fs::rename(tmp, path)?;
+    File::open(dir)?.sync_data()?;
+    Ok(())
 }
 
 fn replay_segment(

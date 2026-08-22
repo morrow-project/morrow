@@ -25,6 +25,47 @@ fn stream() -> StreamDefinition {
     }
 }
 
+#[test]
+fn replica_data_retention_rewrites_physical_history() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let mut definition = stream();
+    definition.retention.max_age_ms = Some(10);
+    let catalog = crate::stream::StreamCatalog::new(vec![definition.clone()]).unwrap();
+    let mut store = ReplicaDataStore::open(dir.path(), &catalog, 256).unwrap();
+    for (offset, timestamp_ms) in [(0_u64, 0), (1_u64, 20)] {
+        store
+            .append(&DataAppendRequest {
+                leader_id: 1,
+                leader_epoch: 1,
+                fsync: false,
+                committed_high_watermark: offset.checked_sub(1),
+                envelope: crate::partition_log::MessageEnvelope {
+                    namespace: "default".into(),
+                    stream: definition.name.clone(),
+                    partition: crate::stream::PartitionId(0),
+                    offset,
+                    subject: "orders.created".into(),
+                    key: None,
+                    headers: vec![],
+                    timestamp_ms,
+                    reply_to: None,
+                    payload: vec![offset as u8],
+                    partitioning_epoch: 1,
+                    leader_epoch: 1,
+                    legacy_seq: offset + 1,
+                },
+            })
+            .unwrap();
+    }
+    store.enforce_retention(&[definition], 21).unwrap();
+    drop(store);
+
+    let (_, replay) =
+        crate::partition_log::PartitionLogSet::open(dir.path(), &catalog, 256).unwrap();
+    assert_eq!(replay.len(), 1);
+    assert_eq!(replay[0].offset, 1);
+}
+
 fn assignment() -> HashMap<String, PartitionAssignmentMetadata> {
     [(
         partition_key("orders", 0),

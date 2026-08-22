@@ -181,6 +181,26 @@ impl ConsumerCursorSet {
             .map(|cursor| cursor.committed_offset)
     }
 
+    pub fn apply_retention_floor(
+        &mut self,
+        stream: &str,
+        partition: u32,
+        earliest_offset: u64,
+    ) -> bool {
+        let Some(cursor) = self.partitions.get_mut(&cursor_key(stream, partition)) else {
+            return false;
+        };
+        if cursor.committed_offset >= earliest_offset {
+            return false;
+        }
+        cursor.committed_offset = earliest_offset;
+        cursor.retention_gaps = cursor.retention_gaps.saturating_add(1);
+        cursor
+            .acknowledged_offsets
+            .retain(|offset| *offset >= earliest_offset);
+        true
+    }
+
     fn cursor_for(&self, record: &PublishRecord) -> Option<&PartitionCursor> {
         self.partitions
             .get(&cursor_key(record.stream.as_deref()?, record.partition?))

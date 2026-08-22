@@ -213,7 +213,12 @@ impl Broker {
             };
             let fsync = ack.is_none_or(|ack| ack.level == protocol::AckLevel::HighDurability);
             let envelope = cluster.replicate_partition(envelope, fsync).await?;
+            cluster.enforce_retention(self.hooks.clock.now_ms())?;
             self.sync_from_cluster(&cluster).await?;
+            self.inner
+                .lock()
+                .await
+                .enforce_stream_retention(&self.config.streams, self.hooks.clock.now_ms())?;
             let committed_record = PublishRecord::from(envelope.clone());
             self.run_after_commit_middleware(publisher_id, &committed_record)
                 .await?;
@@ -267,6 +272,7 @@ impl Broker {
                     .insert((stream, partition, offset), record.seq);
             }
             inner.messages.insert(record.seq, record.clone());
+            inner.enforce_stream_retention(&self.config.streams, self.hooks.clock.now_ms())?;
             inner.apply_stream_compaction(&self.config.streams);
             record
         };
@@ -518,9 +524,14 @@ impl Broker {
     }
 
     pub(super) async fn expire_and_redeliver(&self) -> Result<()> {
+        let now = self.hooks.clock.now_ms();
+        if let Some(cluster) = self.cluster_runtime().await {
+            cluster.enforce_retention(now)?;
+            self.sync_from_cluster(&cluster).await?;
+        }
         {
             let mut inner = self.inner.lock().await;
-            let now = self.hooks.clock.now_ms();
+            inner.enforce_stream_retention(&self.config.streams, now)?;
             let partitioned = inner
                 .messages
                 .iter()

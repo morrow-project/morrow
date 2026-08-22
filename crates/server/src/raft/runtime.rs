@@ -52,11 +52,18 @@ impl RaftRuntime {
             config.raft_dir.join(SNAPSHOT_FILE),
             raft_nodes.clone(),
         )?;
-        let partition_data = Arc::new(std::sync::Mutex::new(ReplicaDataStore::open(
+        let mut replica_data = ReplicaDataStore::open(
             &config.raft_dir.join("partition-data"),
             streams,
             segment_bytes,
-        )?));
+        )?;
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .min(u128::from(u64::MAX)) as u64;
+        replica_data.enforce_retention(streams.definitions(), now_ms)?;
+        let partition_data = Arc::new(std::sync::Mutex::new(replica_data));
         let network = NetworkFactory {
             nodes: nodes.clone(),
             auth_token: config.auth_token.clone(),
@@ -145,6 +152,13 @@ impl RaftRuntime {
             );
         }
         state
+    }
+
+    pub fn enforce_retention(&self, now_ms: u64) -> Result<()> {
+        self.partition_data
+            .lock()
+            .unwrap()
+            .enforce_retention(&self.configured_streams, now_ms)
     }
 
     pub async fn replicate_partition(

@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
     partition_log::{MessageEnvelope, PartitionLogSet},
-    stream::{PartitionId, StreamCatalog},
+    stream::{PartitionId, StreamCatalog, StreamDefinition},
 };
 use std::sync::Mutex as StdMutex;
 
@@ -154,6 +154,24 @@ impl ReplicaDataStore {
                 .and_then(|record| crate::partition_log::committed_envelope_checksum(record).ok())
                 == Some(commit.checksum)
         })
+    }
+
+    pub(super) fn enforce_retention(
+        &mut self,
+        streams: &[StreamDefinition],
+        now_ms: u64,
+    ) -> Result<()> {
+        let changes = self.logs.retention_changes(streams, now_ms);
+        for change in changes {
+            let records = self
+                .records
+                .entry((change.stream.clone(), change.partition))
+                .or_default();
+            records.retain(|offset, _| *offset >= change.earliest_offset);
+            let retained = records.values().cloned().collect::<Vec<_>>();
+            self.logs.retain_partition(&change, &retained)?;
+        }
+        Ok(())
     }
 }
 

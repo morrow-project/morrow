@@ -17,6 +17,7 @@ impl Broker {
         }
         let (mut partition_logs, mut envelopes) =
             PartitionLogSet::open(&config.wal_dir, &config.streams, config.wal_segment_bytes)?;
+        partition_logs.enforce_retention(&mut envelopes, &config.streams, hooks.clock.now_ms())?;
         let mut envelope_seqs = envelopes
             .iter()
             .map(|envelope| envelope.legacy_seq)
@@ -71,6 +72,14 @@ impl Broker {
             .into_iter()
             .map(|envelope| (envelope.legacy_seq, envelope))
             .collect::<HashMap<_, _>>();
+        replay.partition_appends.retain(|seq, reference| {
+            envelope_by_seq.contains_key(seq)
+                || !partition_logs.is_before_retention_floor(
+                    &reference.stream,
+                    crate::stream::PartitionId(reference.partition),
+                    reference.offset,
+                )
+        });
         for reference in replay.partition_appends.values() {
             let envelope = envelope_by_seq.get(&reference.seq).ok_or_else(|| {
                 BrokerError::msg(format!(
@@ -103,7 +112,12 @@ impl Broker {
             .map(|(id, consumer)| {
                 (
                     id,
-                    Consumer::from_replay(consumer, &config.streams, &replay.messages),
+                    Consumer::from_replay(
+                        consumer,
+                        &config.streams,
+                        &replay.messages,
+                        &partition_logs,
+                    ),
                 )
             })
             .collect();
@@ -313,27 +327,6 @@ impl Broker {
         }
     }
 
-    pub(super) async fn connections_response(&self) -> ConnectionsResponse {
-        self.inner.lock().await.connections_response()
-    }
-
-    pub(super) async fn subscriptions_response(&self) -> SubscriptionsResponse {
-        self.inner.lock().await.subscriptions_response()
-    }
-
-    pub(super) fn streams_response(&self) -> StreamsResponse<'_> {
-        StreamsResponse {
-            streams: self.config.streams.definitions(),
-        }
-    }
-
-    pub(super) async fn wal_status_response(&self) -> WalStatus {
-        let inner = self.inner.lock().await;
-        inner
-            .wal
-            .status(inner.messages.len(), inner.consumers.len())
-    }
-
     pub(super) fn spawn_http_status_listener(&self) {
         let Some(listen) = self.config.http_listen else {
             return;
@@ -412,7 +405,7 @@ impl Broker {
                 write_http_response(&mut stream, "200 OK", "application/json", &body).await
             }
             "/streams" => {
-                let body = serde_json::to_vec(&self.streams_response())
+                let body = serde_json::to_vec(&self.streams_response().await)
                     .context("serializing HTTP streams response")?;
                 write_http_response(&mut stream, "200 OK", "application/json", &body).await
             }

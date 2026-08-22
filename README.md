@@ -428,6 +428,24 @@ published to inactive inboxes are not retained.
 - `_INBOX.*` subjects are reserved for transient request/reply inboxes and are
   live-only.
 
+### Stream retention limits
+
+Stream retention is enforced independently for each partition. `max_age_ms`
+removes records whose age is greater than the configured duration, and
+`max_bytes` keeps the newest encoded records whose combined partition-log batch
+bytes fit within the limit. A single record larger than `max_bytes` is therefore
+not retained. When both limits are configured, a record must satisfy both.
+
+Retention runs during startup, after durable publication, and from the 50 ms
+maintenance tick, so an idle running broker can exceed an age limit by at most
+one maintenance interval. Cleanup rewrites or deletes physical partition-log
+segments, removes resident delivery state, advances affected consumer cursors,
+and preserves the next immutable partition offset even if the partition becomes
+empty. The `/streams` admin response reports retained messages and retained
+encoded bytes per stream, plus earliest and next offsets in `partition_status`.
+Partition status also includes cumulative deleted-message and deleted-byte
+counters for the current process lifetime.
+
 ## Protocol Reference
 
 The protocol uses CRLF-delimited NATS-style frames.

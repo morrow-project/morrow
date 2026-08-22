@@ -229,3 +229,54 @@ impl Inner {
             .collect()
     }
 }
+
+impl Broker {
+    pub(super) async fn connections_response(&self) -> ConnectionsResponse {
+        self.inner.lock().await.connections_response()
+    }
+
+    pub(super) async fn subscriptions_response(&self) -> SubscriptionsResponse {
+        self.inner.lock().await.subscriptions_response()
+    }
+
+    pub(super) async fn wal_status_response(&self) -> WalStatus {
+        let inner = self.inner.lock().await;
+        inner
+            .wal
+            .status(inner.messages.len(), inner.consumers.len())
+    }
+
+    pub(super) async fn streams_response(&self) -> StreamsResponse {
+        let inner = self.inner.lock().await;
+        let streams = self
+            .config
+            .streams
+            .definitions()
+            .iter()
+            .map(|definition| {
+                let partitions = (0..definition.partitions)
+                    .map(|partition| {
+                        inner.partition_logs.retention_status(
+                            definition.name.as_str(),
+                            crate::stream::PartitionId(partition),
+                        )
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                Ok(StreamResponse {
+                    retained_messages: partitions
+                        .iter()
+                        .map(|partition| partition.retained_messages)
+                        .sum(),
+                    retained_bytes: partitions
+                        .iter()
+                        .map(|partition| partition.retained_bytes)
+                        .sum(),
+                    definition: definition.clone(),
+                    partition_status: partitions,
+                })
+            })
+            .collect::<Result<Vec<_>>>()
+            .expect("stream status references configured partition logs");
+        StreamsResponse { streams }
+    }
+}
