@@ -240,6 +240,7 @@ async fn authenticated_permissions_reject_unauthorized_subscribe_and_publish() {
 
     harness.shutdown().await;
 }
+#[tokio::test]
 async fn authenticated_connect_rejects_invalid_signature() {
     let configured_auth = ClientAuth::from_seed("client1", [7; 32]);
     let wrong_auth = ClientAuth::from_seed("client1", [9; 32]);
