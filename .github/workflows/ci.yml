@@ -107,37 +107,3 @@ jobs:
           PROFILE_FLAG: ${{ github.event_name == 'pull_request' && '' || '--release' }}
         run: |
           cargo build --target "${TARGET}" --workspace --locked ${PROFILE_FLAG}
-
-  docker:
-    name: Docker (${{ matrix.name }})
-    needs: test
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: linux/amd64
-            id: linux-amd64
-            runner: ubuntu-24.04
-            platform: linux/amd64
-          - name: linux/arm64
-            id: linux-arm64
-            runner: ubuntu-24.04-arm
-            platform: linux/arm64
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - name: Check out source
-        uses: actions/checkout@v4
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-      - name: Build Docker image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: ./Dockerfile
-          platforms: ${{ matrix.platform }}
-          build-args: |
-            CARGO_PROFILE=${{ github.event_name == 'pull_request' && 'dev' || 'release' }}
-            CARGO_PROFILE_DIR=${{ github.event_name == 'pull_request' && 'debug' || 'release' }}
-          push: false
-          load: true
-          tags: morrow:ci-${{ matrix.id }}
