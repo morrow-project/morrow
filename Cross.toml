@@ -1,6 +1,0 @@
-[target.aarch64-unknown-linux-gnu]
-pre-build = [
-  "apt-get update",
-  "apt-get install --assume-yes --no-install-recommends clang cmake ninja-build perl pkg-config",
-  "rm -rf /var/lib/apt/lists/*",
-]

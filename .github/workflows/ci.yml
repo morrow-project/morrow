@@ -50,19 +50,15 @@ jobs:
           - name: linux/amd64
             runner: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
-            use_cross: false
           - name: linux/arm64
             runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
-            use_cross: true
           - name: windows/amd64
             runner: windows-2025
             target: x86_64-pc-windows-msvc
-            use_cross: false
           - name: macos/arm64
             runner: macos-14
             target: aarch64-apple-darwin
-            use_cross: false
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Check out source
@@ -75,22 +71,13 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.name }}-${{ github.event_name }}
-      - name: Install cross
-        if: matrix.use_cross
-        shell: bash
-        run: cargo install cross --git https://github.com/cross-rs/cross --locked
       - name: Run tests
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
-          USE_CROSS: ${{ matrix.use_cross }}
           PROFILE_FLAG: ${{ github.event_name == 'pull_request' && '' || '--release' }}
         run: |
-          if [[ "${USE_CROSS}" == "true" ]]; then
-            cross test --target "${TARGET}" --workspace --locked ${PROFILE_FLAG}
-          else
-            cargo test --target "${TARGET}" --workspace --locked ${PROFILE_FLAG}
-          fi
+          cargo test --target "${TARGET}" --workspace --locked ${PROFILE_FLAG}
 
   build:
     name: Build (${{ matrix.name }})
@@ -102,19 +89,15 @@ jobs:
           - name: linux/amd64
             runner: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
-            use_cross: false
           - name: linux/arm64
             runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
-            use_cross: true
           - name: windows/amd64
             runner: windows-2025
             target: x86_64-pc-windows-msvc
-            use_cross: false
           - name: macos/arm64
             runner: macos-14
             target: aarch64-apple-darwin
-            use_cross: false
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Check out source
@@ -127,22 +110,13 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.name }}-${{ github.event_name }}
-      - name: Install cross
-        if: matrix.use_cross
-        shell: bash
-        run: cargo install cross --git https://github.com/cross-rs/cross --locked
       - name: Build workspace
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
-          USE_CROSS: ${{ matrix.use_cross }}
           PROFILE_FLAG: ${{ github.event_name == 'pull_request' && '' || '--release' }}
         run: |
-          if [[ "${USE_CROSS}" == "true" ]]; then
-            cross build --target "${TARGET}" --workspace --locked ${PROFILE_FLAG}
-          else
-            cargo build --target "${TARGET}" --workspace --locked ${PROFILE_FLAG}
-          fi
+          cargo build --target "${TARGET}" --workspace --locked ${PROFILE_FLAG}
 
   docker:
     name: Docker (${{ matrix.name }})
