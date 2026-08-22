@@ -65,5 +65,13 @@ under `/var/lib/morrow`.
 
 Release artifacts should be built from a version tag with `--locked`, tested on
 each supported target, accompanied by SHA-256 checksums, and uploaded to the
-release page. Package managers consume immutable source or platform archives;
-do not package arbitrary branch snapshots.
+release page. The release workflow also publishes the production server image
+to `ghcr.io/morrow-project/morrow-server` with the version tag and `latest` tag.
+Pull a specific release image with, for example:
+
+```bash
+docker pull ghcr.io/morrow-project/morrow-server:0.1.1
+```
+
+Package managers consume immutable source or platform archives; do not package
+arbitrary branch snapshots.
