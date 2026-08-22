@@ -110,6 +110,20 @@ pub struct ClusterNodeConfig {
     pub tls_cert_files: Vec<PathBuf>,
 }
 impl Config {
+    pub fn help_requested() -> bool {
+        std::env::args_os()
+            .nth(1)
+            .is_some_and(|arg| Self::is_help_arg(&arg))
+    }
+
+    pub fn usage() -> &'static str {
+        "Usage: morrow-server [CONFIG_PATH]\n\nOptions:\n    -h, --help    Print this help message"
+    }
+
+    fn is_help_arg(arg: &std::ffi::OsStr) -> bool {
+        arg == "-h" || arg == "--help"
+    }
+
     pub fn load_from_args() -> Result<Self> {
         let mut args = std::env::args_os();
         let _program = args.next();
@@ -118,7 +132,8 @@ impl Config {
             (None, None) => PathBuf::from(DEFAULT_CONFIG_PATH),
             _ => {
                 return Err(BrokerError::msg(format!(
-                    "usage: broker [config-path]\nexpected at most one config file path"
+                    "{}\n\nexpected at most one config file path",
+                    Self::usage()
                 )));
             }
         };
