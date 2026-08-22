@@ -26,6 +26,11 @@ cp broker.json.example broker.json
   "fsync_interval_ms": 5,
   "max_payload": 1048576,
   "max_control_line": 8192,
+  "max_ack_timeout_ms": 300000,
+  "max_in_flight": 4096,
+  "max_fetch_messages": 1024,
+  "max_fetch_bytes": 16777216,
+  "max_encoded_batch_bytes": 20971520,
   "verbose": false,
   "tls": null,
   "auth": {
@@ -46,6 +51,14 @@ Fields:
 - `fsync_interval_ms`: maximum batching interval before fsync.
 - `max_payload`: maximum accepted `PUB` payload size in bytes.
 - `max_control_line`: maximum accepted protocol control line length in bytes.
+- `max_ack_timeout_ms`: maximum CONNECT acknowledgment timeout and maximum
+  individual NACK delay or lease extension.
+- `max_in_flight`: maximum CONNECT in-flight delivery window. The default client
+  window remains 1024.
+- `max_fetch_messages` and `max_fetch_bytes`: independent server-owned FETCH
+  request limits.
+- `max_encoded_batch_bytes`: maximum complete encoded FETCH response, including
+  the BATCH line, DMSG metadata, headers, payloads, and frame terminators.
 - `verbose`: enables `+OK` responses for connections unless overridden by
   `CONNECT`.
 - `tls`: optional TLS-first listener config.

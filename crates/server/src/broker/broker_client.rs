@@ -156,6 +156,26 @@ impl Broker {
         protocol_version: Option<u32>,
         auth: Option<ConnectAuth>,
     ) -> Result<()> {
+        let ack_timeout_ms = ack_timeout_ms.unwrap_or(DEFAULT_ACK_TIMEOUT_MS);
+        let max_in_flight = max_in_flight.unwrap_or(DEFAULT_MAX_IN_FLIGHT);
+        crate::broker_ensure!(
+            ack_timeout_ms > 0,
+            "CONNECT ack_timeout_ms must be greater than zero"
+        );
+        crate::broker_ensure!(
+            ack_timeout_ms <= self.config.max_ack_timeout_ms,
+            "CONNECT ack_timeout_ms exceeds server limit {}",
+            self.config.max_ack_timeout_ms
+        );
+        crate::broker_ensure!(
+            max_in_flight > 0,
+            "CONNECT max_in_flight must be greater than zero"
+        );
+        crate::broker_ensure!(
+            max_in_flight <= self.config.max_in_flight,
+            "CONNECT max_in_flight exceeds server limit {}",
+            self.config.max_in_flight
+        );
         let mut inner = self.inner.lock().await;
         let client = inner
             .clients
@@ -190,21 +210,13 @@ impl Broker {
         };
         client.verbose = verbose || self.config.verbose;
         client.durable_id = durable_id;
-        client.ack_timeout_ms = ack_timeout_ms.unwrap_or(DEFAULT_ACK_TIMEOUT_MS);
-        client.max_in_flight = max_in_flight.unwrap_or(DEFAULT_MAX_IN_FLIGHT);
+        client.ack_timeout_ms = ack_timeout_ms;
+        client.max_in_flight = max_in_flight;
         client.protocol_version = protocol_version.unwrap_or(1);
         crate::broker_ensure!(
             matches!(client.protocol_version, 1 | 2),
             "unsupported protocol version {}; supported versions are 1 and 2",
             client.protocol_version
-        );
-        crate::broker_ensure!(
-            client.ack_timeout_ms > 0,
-            "ack_timeout_ms must be greater than zero"
-        );
-        crate::broker_ensure!(
-            client.max_in_flight > 0,
-            "max_in_flight must be greater than zero"
         );
         client.configured = true;
         Ok(())

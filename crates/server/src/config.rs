@@ -8,6 +8,11 @@ use std::{
     time::Duration,
 };
 const DEFAULT_CONFIG_PATH: &str = "broker.json";
+pub const DEFAULT_MAX_ACK_TIMEOUT_MS: u64 = 300_000;
+pub const DEFAULT_MAX_IN_FLIGHT: usize = 4_096;
+pub const DEFAULT_MAX_FETCH_MESSAGES: usize = 1_024;
+pub const DEFAULT_MAX_FETCH_BYTES: usize = 16 * 1_048_576;
+pub const DEFAULT_MAX_ENCODED_BATCH_BYTES: usize = 20 * 1_048_576;
 #[derive(Debug, Clone)]
 pub struct Config {
     pub listen: SocketAddr,
@@ -18,6 +23,11 @@ pub struct Config {
     pub fsync_interval_ms: u64,
     pub max_payload: usize,
     pub max_control_line: usize,
+    pub max_ack_timeout_ms: u64,
+    pub max_in_flight: usize,
+    pub max_fetch_messages: usize,
+    pub max_fetch_bytes: usize,
+    pub max_encoded_batch_bytes: usize,
     pub verbose: bool,
     pub tls: Option<TlsConfig>,
     pub auth: AuthConfig,
@@ -107,6 +117,17 @@ impl Config {
         let fsync_interval_ms = get_u64(value, "fsync_interval_ms")?.unwrap_or(5);
         let max_payload = get_u64(value, "max_payload")?.unwrap_or(1_048_576);
         let max_control_line = get_u64(value, "max_control_line")?.unwrap_or(8192);
+        let max_ack_timeout_ms =
+            get_u64(value, "max_ack_timeout_ms")?.unwrap_or(DEFAULT_MAX_ACK_TIMEOUT_MS);
+        let max_in_flight = get_bounded_usize(value, "max_in_flight", DEFAULT_MAX_IN_FLIGHT)?;
+        let max_fetch_messages =
+            get_bounded_usize(value, "max_fetch_messages", DEFAULT_MAX_FETCH_MESSAGES)?;
+        let max_fetch_bytes = get_bounded_usize(value, "max_fetch_bytes", DEFAULT_MAX_FETCH_BYTES)?;
+        let max_encoded_batch_bytes = get_bounded_usize(
+            value,
+            "max_encoded_batch_bytes",
+            DEFAULT_MAX_ENCODED_BATCH_BYTES,
+        )?;
         let verbose = get_bool(value, "verbose")?.unwrap_or(false);
         let tls = get_tls_config(value)?;
         let auth = get_auth_config(value)?;
@@ -126,6 +147,11 @@ impl Config {
             max_control_line: max_control_line
                 .try_into()
                 .context("config field max_control_line is too large")?,
+            max_ack_timeout_ms,
+            max_in_flight,
+            max_fetch_messages,
+            max_fetch_bytes,
+            max_encoded_batch_bytes,
             verbose,
             tls,
             auth,
@@ -152,6 +178,30 @@ impl Config {
         crate::broker_ensure!(
             self.max_control_line > 0,
             "config field max_control_line must be greater than zero"
+        );
+        for (name, value) in [
+            ("max_in_flight", self.max_in_flight),
+            ("max_fetch_messages", self.max_fetch_messages),
+            ("max_fetch_bytes", self.max_fetch_bytes),
+            ("max_encoded_batch_bytes", self.max_encoded_batch_bytes),
+        ] {
+            crate::broker_ensure!(value > 0, "config field {name} must be greater than zero");
+            crate::broker_ensure!(
+                u32::try_from(value).is_ok(),
+                "config field {name} must fit in 32 bits"
+            );
+        }
+        crate::broker_ensure!(
+            self.max_ack_timeout_ms > 0,
+            "config field max_ack_timeout_ms must be greater than zero"
+        );
+        crate::broker_ensure!(
+            self.max_in_flight >= crate::broker::DEFAULT_MAX_IN_FLIGHT,
+            "config field max_in_flight must allow the default client value"
+        );
+        crate::broker_ensure!(
+            self.max_encoded_batch_bytes >= self.max_payload,
+            "config field max_encoded_batch_bytes must be at least max_payload"
         );
         crate::broker_ensure!(
             self.fsync_interval_ms > 0,
@@ -387,6 +437,15 @@ fn get_u64(value: &serde_json::Value, key: &str) -> Result<Option<u64>> {
         None => Ok(None),
     }
 }
+
+fn get_bounded_usize(value: &serde_json::Value, key: &str, default: usize) -> Result<usize> {
+    get_u64(value, key)?
+        .map(|value| {
+            usize::try_from(value).with_context(|| format!("config field {key} is too large"))
+        })
+        .transpose()
+        .map(|value| value.unwrap_or(default))
+}
 fn get_bool(value: &serde_json::Value, key: &str) -> Result<Option<bool>> {
     match value.get(key) {
         Some(serde_json::Value::Bool(value)) => Ok(Some(*value)),
@@ -429,126 +488,9 @@ fn get_http_listen(value: &serde_json::Value) -> Result<Option<SocketAddr>> {
         )),
     }
 }
-fn get_cluster_config(value: &serde_json::Value) -> Result<Option<ClusterConfig>> {
-    let Some(cluster) = value.get("cluster") else {
-        return Ok(None);
-    };
-    if cluster.is_null() {
-        return Ok(None);
-    }
-    let serde_json::Value::Object(_) = cluster else {
-        return Err(BrokerError::msg("config field cluster must be an object"));
-    };
-    let enabled = get_bool(cluster, "enabled")?.unwrap_or(false);
-    if !enabled {
-        return Ok(None);
-    }
-    let node_id = get_u64(cluster, "node_id")?
-        .ok_or_else(|| BrokerError::msg("config field cluster.node_id is required"))?;
-    let auth_token = get_string(cluster, "auth_token")?
-        .ok_or_else(|| BrokerError::msg("config field cluster.auth_token is required"))?
-        .to_string();
-    let raft_listen = get_string(cluster, "raft_listen")?
-        .ok_or_else(|| BrokerError::msg("config field cluster.raft_listen is required"))?
-        .parse()
-        .context("config field cluster.raft_listen must be a socket address")?;
-    let route_listen = get_optional_socket_addr(cluster, "route_listen")?;
-    let routes = get_string_array(cluster, "routes")?;
-    let route_reconnect_ms = get_u64(cluster, "route_reconnect_ms")?.unwrap_or(500);
-    let raft_dir = PathBuf::from(
-        get_string(cluster, "raft_dir")?
-            .ok_or_else(|| BrokerError::msg("config field cluster.raft_dir is required"))?,
-    );
-    let bootstrap = get_bool(cluster, "bootstrap")?.unwrap_or(false);
-    let election_timeout_min_ms = get_u64(cluster, "election_timeout_min_ms")?.unwrap_or(150);
-    let election_timeout_max_ms = get_u64(cluster, "election_timeout_max_ms")?.unwrap_or(300);
-    let heartbeat_interval_ms = get_u64(cluster, "heartbeat_interval_ms")?.unwrap_or(50);
-    let snapshot_threshold = get_u64(cluster, "snapshot_threshold")?.unwrap_or(10_000);
-    let nodes = get_cluster_nodes(cluster)?;
-    let config = ClusterConfig {
-        enabled,
-        node_id,
-        auth_token,
-        raft_listen,
-        route_listen,
-        routes,
-        route_reconnect_ms,
-        raft_dir,
-        bootstrap,
-        nodes,
-        election_timeout_min_ms,
-        election_timeout_max_ms,
-        heartbeat_interval_ms,
-        snapshot_threshold,
-    };
-    config.validate()?;
-    Ok(Some(config))
-}
-fn get_cluster_nodes(value: &serde_json::Value) -> Result<Vec<ClusterNodeConfig>> {
-    let nodes = value
-        .get("nodes")
-        .ok_or_else(|| BrokerError::msg("config field cluster.nodes is required"))?;
-    let serde_json::Value::Array(nodes) = nodes else {
-        return Err(BrokerError::msg(
-            "config field cluster.nodes must be an array",
-        ));
-    };
-    let mut out = Vec::with_capacity(nodes.len());
-    for node in nodes {
-        let serde_json::Value::Object(_) = node else {
-            return Err(BrokerError::msg(
-                "config field cluster.nodes must contain only objects",
-            ));
-        };
-        let node_id = get_u64(node, "node_id")?
-            .ok_or_else(|| BrokerError::msg("config field cluster.nodes[].node_id is required"))?;
-        let raft_addr = get_string(node, "raft_addr")?
-            .ok_or_else(|| BrokerError::msg("config field cluster.nodes[].raft_addr is required"))?
-            .to_string();
-        let client_addr = get_string(node, "client_addr")?
-            .ok_or_else(|| {
-                BrokerError::msg("config field cluster.nodes[].client_addr is required")
-            })?
-            .to_string();
-        out.push(ClusterNodeConfig {
-            node_id,
-            raft_addr,
-            client_addr,
-        });
-    }
-    Ok(out)
-}
-fn get_optional_socket_addr(value: &serde_json::Value, key: &str) -> Result<Option<SocketAddr>> {
-    match value.get(key) {
-        Some(serde_json::Value::String(value)) => value
-            .parse()
-            .with_context(|| format!("config field cluster.{key} must be a socket address"))
-            .map(Some),
-        Some(serde_json::Value::Null) | None => Ok(None),
-        Some(_) => Err(BrokerError::msg(format!(
-            "config field cluster.{key} must be a string or null"
-        ))),
-    }
-}
-fn get_string_array(value: &serde_json::Value, key: &str) -> Result<Vec<String>> {
-    match value.get(key) {
-        Some(serde_json::Value::Array(values)) => values
-            .iter()
-            .map(|value| {
-                let serde_json::Value::String(value) = value else {
-                    return Err(BrokerError::msg(format!(
-                        "config field cluster.{key} must contain only strings"
-                    )));
-                };
-                Ok(value.clone())
-            })
-            .collect(),
-        Some(serde_json::Value::Null) | None => Ok(Vec::new()),
-        Some(_) => Err(BrokerError::msg(format!(
-            "config field cluster.{key} must be an array"
-        ))),
-    }
-}
+#[path = "config/cluster_config.rs"]
+mod cluster_config;
+use cluster_config::get_cluster_config;
 
 impl From<OsString> for BrokerError {
     fn from(value: OsString) -> Self {

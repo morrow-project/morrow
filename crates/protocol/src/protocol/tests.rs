@@ -397,6 +397,19 @@ async fn rejects_oversized_control_line_before_payload_read() {
     assert!(err.0.contains("max_control_line"));
 }
 
+#[tokio::test]
+async fn rejects_fetch_values_larger_than_platform_usize() {
+    let too_large = (usize::MAX as u128) + 1;
+    for wire in [
+        format!("FETCH worker {too_large} 1 0\r\n"),
+        format!("FETCH worker 1 {too_large} 0\r\n"),
+    ] {
+        let mut reader = BufReader::new(wire.as_bytes());
+        let err = read_command(&mut reader, 1024, 8192).await.unwrap_err();
+        assert!(err.0.contains("too large") || err.0.contains("integer"));
+    }
+}
+
 #[test]
 fn encodes_msg_frames() {
     assert_eq!(

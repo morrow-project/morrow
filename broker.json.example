@@ -7,6 +7,11 @@
   "fsync_interval_ms": 5,
   "max_payload": 1048576,
   "max_control_line": 8192,
+  "max_ack_timeout_ms": 300000,
+  "max_in_flight": 4096,
+  "max_fetch_messages": 1024,
+  "max_fetch_bytes": 16777216,
+  "max_encoded_batch_bytes": 20971520,
   "verbose": false,
   "tls": null,
   "auth": {

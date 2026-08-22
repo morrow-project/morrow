@@ -146,6 +146,16 @@ impl Broker {
     ) -> Result<()> {
         crate::broker_ensure!(max_messages > 0 && max_bytes > 0, "invalid FETCH limits");
         crate::broker_ensure!(
+            max_messages <= self.config.max_fetch_messages,
+            "FETCH max messages exceeds server limit {}",
+            self.config.max_fetch_messages
+        );
+        crate::broker_ensure!(
+            max_bytes <= self.config.max_fetch_bytes,
+            "FETCH max bytes exceeds server limit {}",
+            self.config.max_fetch_bytes
+        );
+        crate::broker_ensure!(
             max_wait_ms <= MAX_FETCH_WAIT_MS,
             "FETCH max wait exceeds {MAX_FETCH_WAIT_MS} ms"
         );
@@ -159,14 +169,20 @@ impl Broker {
             max_messages <= max_in_flight,
             "FETCH max messages exceeds consumer max_in_flight"
         );
-        let max_batch_bytes = self.config.max_payload.saturating_mul(max_messages);
-        crate::broker_ensure!(
-            max_bytes <= max_batch_bytes,
-            "FETCH max bytes exceeds bounded batch capacity"
-        );
+        let header_bytes = protocol::batch(&name, max_messages, max_bytes).len();
+        let encoded_delivery_bytes = self
+            .config
+            .max_encoded_batch_bytes
+            .checked_sub(header_bytes)
+            .ok_or_else(|| BrokerError::msg("FETCH encoded batch exceeds server limit"))?;
 
         let mut batch = self
-            .fetch_pull_once(&consumer_id, max_messages, max_bytes)
+            .fetch_pull_once(
+                &consumer_id,
+                max_messages,
+                max_bytes,
+                encoded_delivery_bytes,
+            )
             .await?;
         if batch.deliveries.is_empty() && max_wait_ms > 0 {
             let deadline = tokio::time::Instant::now() + Duration::from_millis(max_wait_ms);
@@ -177,7 +193,12 @@ impl Broker {
                 }
                 tokio::time::sleep((deadline - now).min(Duration::from_millis(10))).await;
                 batch = self
-                    .fetch_pull_once(&consumer_id, max_messages, max_bytes)
+                    .fetch_pull_once(
+                        &consumer_id,
+                        max_messages,
+                        max_bytes,
+                        encoded_delivery_bytes,
+                    )
                     .await?;
             }
         }
@@ -206,6 +227,11 @@ impl Broker {
                 &message.payload,
             ));
         }
+        crate::broker_ensure!(
+            frame.len() <= self.config.max_encoded_batch_bytes,
+            "FETCH encoded batch exceeds server limit {}",
+            self.config.max_encoded_batch_bytes
+        );
         self.send_to(connection_id, frame).await
     }
 
@@ -214,12 +240,14 @@ impl Broker {
         consumer_id: &str,
         max_messages: usize,
         max_bytes: usize,
+        max_encoded_bytes: usize,
     ) -> Result<PullBatch> {
         let mut inner = self.inner.lock().await;
         inner.prepare_pull_batch(
             consumer_id,
             max_messages,
             max_bytes,
+            max_encoded_bytes,
             self.hooks.clock.now_ms(),
         )
     }
@@ -247,7 +275,17 @@ impl Broker {
                 "ACK"
             }
             PullControl::Nack(delay_ms) => {
-                let deadline = self.hooks.clock.now_ms().saturating_add(delay_ms);
+                crate::broker_ensure!(
+                    delay_ms <= self.config.max_ack_timeout_ms,
+                    "NACK delay exceeds server limit {}",
+                    self.config.max_ack_timeout_ms
+                );
+                let deadline = self
+                    .hooks
+                    .clock
+                    .now_ms()
+                    .checked_add(delay_ms)
+                    .ok_or_else(|| BrokerError::msg("NACK deadline overflow"))?;
                 self.update_pull_lease(&consumer_id, seq, delivery_id, deadline)
                     .await?;
                 "NACK"
@@ -257,12 +295,18 @@ impl Broker {
                     extension_ms > 0,
                     "lease extension must be greater than zero"
                 );
+                crate::broker_ensure!(
+                    extension_ms <= self.config.max_ack_timeout_ms,
+                    "EXTEND duration exceeds server limit {}",
+                    self.config.max_ack_timeout_ms
+                );
                 let current = self
                     .pull_lease_deadline(&consumer_id, seq, delivery_id)
                     .await?;
                 let deadline = current
                     .max(self.hooks.clock.now_ms())
-                    .saturating_add(extension_ms);
+                    .checked_add(extension_ms)
+                    .ok_or_else(|| BrokerError::msg("EXTEND deadline overflow"))?;
                 self.update_pull_lease(&consumer_id, seq, delivery_id, deadline)
                     .await?;
                 "EXTEND"
@@ -400,10 +444,12 @@ impl Inner {
         consumer_id: &str,
         max_messages: usize,
         max_bytes: usize,
+        max_encoded_bytes: usize,
         now: u64,
     ) -> Result<PullBatch> {
         let mut deliveries = Vec::new();
         let mut bytes = 0usize;
+        let mut encoded_bytes = 0usize;
         while deliveries.len() < max_messages {
             let Some((seq, attempt, deadline_ms)) = self.next_pull_candidate(consumer_id, now)
             else {
@@ -412,7 +458,17 @@ impl Inner {
             let Some(message) = self.messages.get(&seq).cloned() else {
                 break;
             };
-            if bytes.saturating_add(message.payload.len()) > max_bytes {
+            let Some(next_payload_bytes) = bytes.checked_add(message.payload.len()) else {
+                crate::broker_bail!("FETCH payload byte count overflow")
+            };
+            if next_payload_bytes > max_bytes {
+                break;
+            }
+            let encoded_upper_bound = encoded_delivery_upper_bound(consumer_id, &message);
+            let Some(next_encoded_bytes) = encoded_bytes.checked_add(encoded_upper_bound) else {
+                crate::broker_bail!("FETCH encoded byte count overflow")
+            };
+            if next_encoded_bytes > max_encoded_bytes {
                 break;
             }
             let lease = self
@@ -437,7 +493,8 @@ impl Inner {
                 consumer_id: consumer_id.to_string(),
                 cursors,
             })?;
-            bytes += message.payload.len();
+            bytes = next_payload_bytes;
+            encoded_bytes = next_encoded_bytes;
             deliveries.push(PullDelivery { message, lease });
         }
         self.wal.flush_due()?;
@@ -470,9 +527,34 @@ impl Inner {
         Some((
             seq,
             attempt,
-            now.saturating_add(consumer.record.ack_timeout_ms),
+            now.checked_add(consumer.record.ack_timeout_ms)?,
         ))
     }
+}
+
+fn encoded_delivery_upper_bound(consumer_id: &str, message: &PublishRecord) -> usize {
+    let headers = message
+        .headers
+        .iter()
+        .map(|header| (header.name.as_str(), header.value.as_str()))
+        .collect::<Vec<_>>();
+    protocol::durable_message(
+        consumer_id,
+        &message.subject,
+        message.reply_to.as_deref(),
+        &headers,
+        message.stream.as_deref().unwrap_or_default(),
+        message.partition.unwrap_or_default(),
+        message.offset.unwrap_or_default(),
+        message.key.as_deref(),
+        message.timestamp_ms,
+        u32::MAX,
+        u64::MAX,
+        u64::MAX,
+        u64::MAX,
+        &message.payload,
+    )
+    .len()
 }
 
 fn pull_consumer_id(durable_id: &str, name: &str) -> String {

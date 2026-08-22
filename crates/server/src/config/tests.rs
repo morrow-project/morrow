@@ -13,6 +13,11 @@ fn parses_json_config() {
         "fsync_interval_ms": 10,
         "max_payload": 2048,
         "max_control_line": 4096,
+        "max_ack_timeout_ms": 60000,
+        "max_in_flight": 2048,
+        "max_fetch_messages": 128,
+        "max_fetch_bytes": 65536,
+        "max_encoded_batch_bytes": 131072,
         "verbose": true,
         "tls": null,
         "auth": null
@@ -27,6 +32,11 @@ fn parses_json_config() {
     assert_eq!(config.fsync_interval_ms, 10);
     assert_eq!(config.max_payload, 2048);
     assert_eq!(config.max_control_line, 4096);
+    assert_eq!(config.max_ack_timeout_ms, 60_000);
+    assert_eq!(config.max_in_flight, 2_048);
+    assert_eq!(config.max_fetch_messages, 128);
+    assert_eq!(config.max_fetch_bytes, 65_536);
+    assert_eq!(config.max_encoded_batch_bytes, 131_072);
     assert!(config.verbose);
     assert!(config.tls.is_none());
     assert!(!config.auth.enabled);
@@ -180,6 +190,23 @@ fn rejects_zero_max_control_line() {
     }))
     .unwrap_err();
     assert!(err.to_string().contains("max_control_line"));
+}
+
+#[test]
+fn rejects_invalid_flow_control_limits() {
+    for (field, limit) in [
+        ("max_ack_timeout_ms", 0_u64),
+        ("max_fetch_messages", 0),
+        ("max_fetch_bytes", 0),
+        ("max_encoded_batch_bytes", 0),
+    ] {
+        let mut config = serde_json::json!({
+            "wal_dir": format!("./target/test-wal-zero-{field}"),
+        });
+        config[field] = limit.into();
+        let err = Config::from_json(&config).unwrap_err();
+        assert!(err.to_string().contains(field), "unexpected error: {err}");
+    }
 }
 
 #[test]

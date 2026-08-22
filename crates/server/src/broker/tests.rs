@@ -427,6 +427,11 @@ fn test_config(dir: &Path) -> Config {
         fsync_interval_ms: 1,
         max_payload: 1024,
         max_control_line: 8192,
+        max_ack_timeout_ms: crate::config::DEFAULT_MAX_ACK_TIMEOUT_MS,
+        max_in_flight: crate::config::DEFAULT_MAX_IN_FLIGHT,
+        max_fetch_messages: crate::config::DEFAULT_MAX_FETCH_MESSAGES,
+        max_fetch_bytes: crate::config::DEFAULT_MAX_FETCH_BYTES,
+        max_encoded_batch_bytes: crate::config::DEFAULT_MAX_ENCODED_BATCH_BYTES,
         verbose: false,
         tls: None,
         auth: Default::default(),
@@ -531,6 +536,7 @@ mod auth_tests;
 mod cluster_admin_tests;
 mod compaction_tests;
 mod cursor_tests;
+mod flow_control_tests;
 mod middleware_tests;
 mod pull_tests;
 mod qos_tests;
