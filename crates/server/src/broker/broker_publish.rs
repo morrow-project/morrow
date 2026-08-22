@@ -245,7 +245,7 @@ impl Broker {
             let fsync = ack.is_none_or(|ack| ack.level == protocol::AckLevel::HighDurability);
             let envelope = cluster.replicate_partition(envelope, fsync).await?;
             cluster.enforce_retention(self.hooks.clock.now_ms())?;
-            self.sync_from_cluster(&cluster).await?;
+            self.apply_cluster_partition(envelope.clone()).await?;
             let _storage_operation = self.storage_gate.read().await;
             self.inner.lock().await.enforce_stream_retention(
                 &self.partition_logs,
@@ -519,7 +519,7 @@ impl Broker {
         let now = self.hooks.clock.now_ms();
         if let Some(cluster) = self.cluster_runtime().await {
             cluster.enforce_retention(now)?;
-            self.sync_from_cluster(&cluster).await?;
+            self.sync_cluster_deltas(&cluster).await?;
         }
         {
             let _storage_operation = self.storage_gate.read().await;

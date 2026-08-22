@@ -217,6 +217,28 @@ impl RaftRuntime {
         state
     }
 
+    pub(crate) fn deltas_after(&self, after: Option<u64>) -> DeltaBatch {
+        self.state_machine.deltas_after(after)
+    }
+
+    pub(crate) fn partition_record(
+        &self,
+        stream: &str,
+        partition: u32,
+        offset: u64,
+    ) -> Option<crate::partition_log::MessageEnvelope> {
+        self.partition_data.lock().unwrap().record(
+            stream,
+            crate::stream::PartitionId(partition),
+            offset,
+        )
+    }
+
+    pub(crate) fn is_local_partition_replica(&self, stream: &str, partition: u32) -> bool {
+        self.state_machine
+            .is_partition_replica(self.node_id, stream, partition)
+    }
+
     pub fn enforce_retention(&self, now_ms: u64) -> Result<()> {
         self.partition_data
             .lock()

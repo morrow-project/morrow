@@ -1,10 +1,26 @@
 use super::*;
 
+const MAX_COMMITTED_DELTAS: usize = 4_096;
+
+#[derive(Debug, Clone)]
+pub(crate) struct CommittedDelta {
+    pub(crate) log_id: LogId<u64>,
+    pub(crate) command: Option<BrokerCommand>,
+    pub(crate) response: BrokerResponse,
+}
+
+pub(crate) enum DeltaBatch {
+    Incremental(Vec<CommittedDelta>),
+    FullReconciliation,
+}
+
 #[derive(Clone)]
 pub struct StateMachineStore {
     path: PathBuf,
     snapshot_path: PathBuf,
     inner: Arc<Mutex<StateMachineData>>,
+    deltas: Arc<Mutex<VecDeque<CommittedDelta>>>,
+    applied_index: Arc<AtomicU64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,19 +93,58 @@ impl StateMachineStore {
                 }
                 StateRecord::Apply(entries) => {
                     let last_applied = data.state.last_applied;
-                    apply_entries_after(&mut data.state, entries, last_applied);
+                    let _ = apply_entries_after(&mut data.state, entries, last_applied);
                 }
             }
         }
+        let applied_index = data
+            .state
+            .last_applied
+            .map_or(0, |log_id| log_id.index.saturating_add(1));
         Ok(Self {
             path,
             snapshot_path,
             inner: Arc::new(Mutex::new(data)),
+            deltas: Arc::new(Mutex::new(VecDeque::new())),
+            applied_index: Arc::new(AtomicU64::new(applied_index)),
         })
     }
 
     pub fn durable_state(&self) -> DurableState {
         self.inner.lock().unwrap().state.clone()
+    }
+
+    pub(crate) fn deltas_after(&self, after: Option<u64>) -> DeltaBatch {
+        let Some(current) = self.applied_index.load(Ordering::Acquire).checked_sub(1) else {
+            return DeltaBatch::Incremental(Vec::new());
+        };
+        if after.is_some_and(|after| after >= current) {
+            return DeltaBatch::Incremental(Vec::new());
+        }
+        let deltas = self.deltas.lock().unwrap();
+        let incremental = deltas
+            .iter()
+            .filter(|delta| after.is_none_or(|after| delta.log_id.index > after))
+            .cloned()
+            .collect::<Vec<_>>();
+        let expected = after.map_or(0, |after| after.saturating_add(1));
+        if incremental
+            .first()
+            .is_none_or(|delta| delta.log_id.index != expected)
+        {
+            return DeltaBatch::FullReconciliation;
+        }
+        DeltaBatch::Incremental(incremental)
+    }
+
+    pub(crate) fn is_partition_replica(&self, node_id: u64, stream: &str, partition: u32) -> bool {
+        self.inner
+            .lock()
+            .unwrap()
+            .state
+            .partition_assignments
+            .get(&partition_key(stream, partition))
+            .is_some_and(|assignment| assignment.replicas.contains(&node_id))
     }
 
     async fn run_io<T>(
@@ -123,12 +178,27 @@ fn apply_entries_after(
     state: &mut DurableState,
     entries: Vec<Entry<BrokerRaftConfig>>,
     after: Option<LogId<u64>>,
-) -> Vec<BrokerResponse> {
-    entries
+) -> (Vec<BrokerResponse>, Vec<CommittedDelta>) {
+    let mut responses = Vec::new();
+    let mut deltas = Vec::new();
+    for entry in entries
         .into_iter()
         .filter(|entry| after.is_none_or(|last| entry.log_id.index > last.index))
-        .map(|entry| apply_entry(state, entry))
-        .collect()
+    {
+        let log_id = entry.log_id;
+        let command = match &entry.payload {
+            EntryPayload::Normal(command) => Some(command.clone()),
+            EntryPayload::Blank | EntryPayload::Membership(_) => None,
+        };
+        let response = apply_entry(state, entry);
+        responses.push(response.clone());
+        deltas.push(CommittedDelta {
+            log_id,
+            command,
+            response,
+        });
+    }
+    (responses, deltas)
 }
 
 fn apply_entry(state: &mut DurableState, entry: Entry<BrokerRaftConfig>) -> BrokerResponse {
@@ -170,9 +240,19 @@ impl RaftStateMachine<BrokerRaftConfig> for StateMachineStore {
             move |store| {
                 let mut data = store.inner.lock().unwrap();
                 let mut next = data.state.clone();
-                let responses = apply_entries_after(&mut next, entries.clone(), None);
+                let (responses, committed) = apply_entries_after(&mut next, entries.clone(), None);
                 append_journal(&store.path, &StateRecord::Apply(entries))?;
                 data.state = next;
+                let mut deltas = store.deltas.lock().unwrap();
+                deltas.extend(committed);
+                while deltas.len() > MAX_COMMITTED_DELTAS {
+                    deltas.pop_front();
+                }
+                if let Some(last_applied) = data.state.last_applied {
+                    store
+                        .applied_index
+                        .store(last_applied.index.saturating_add(1), Ordering::Release);
+                }
                 Ok(responses)
             },
             ErrorSubject::StateMachine,
@@ -210,6 +290,13 @@ impl RaftStateMachine<BrokerRaftConfig> for StateMachineStore {
                 rewrite_journal::<StateRecord>(&store.path, &[])?;
                 data.state = state;
                 data.snapshot = Some(stored);
+                store.deltas.lock().unwrap().clear();
+                store.applied_index.store(
+                    data.state
+                        .last_applied
+                        .map_or(0, |log_id| log_id.index.saturating_add(1)),
+                    Ordering::Release,
+                );
                 Ok(())
             },
             ErrorSubject::Snapshot(None),

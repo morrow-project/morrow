@@ -187,6 +187,45 @@ async fn concurrent_apply_and_snapshot_rotation_recover_the_latest_apply() {
     assert_eq!(reopened.applied_state().await.unwrap().0, Some(log_id(40)));
 }
 
+#[tokio::test]
+async fn delta_stream_advances_by_log_index_and_snapshot_install_forces_reconciliation() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let mut store = StateMachineStore::open(
+        dir.path().join(STATE_FILE),
+        dir.path().join(SNAPSHOT_FILE),
+        dir.path().join(LEGACY_STATE_FILE),
+        dir.path().join(LEGACY_SNAPSHOT_FILE),
+        nodes(),
+    )
+    .unwrap();
+    store
+        .apply(vec![blank_entry(1), blank_entry(2)])
+        .await
+        .unwrap();
+    let DeltaBatch::Incremental(deltas) = store.deltas_after(Some(1)) else {
+        panic!("contiguous committed entry should be incremental");
+    };
+    assert_eq!(deltas.len(), 1);
+    assert_eq!(deltas[0].log_id, log_id(2));
+
+    let mut installed = DurableState::new(nodes());
+    installed.last_applied = Some(log_id(5));
+    let snapshot = serde_json::to_vec(&installed).unwrap();
+    let meta = SnapshotMeta {
+        last_log_id: Some(log_id(5)),
+        last_membership: installed.last_membership.clone(),
+        snapshot_id: "installed-5".into(),
+    };
+    store
+        .install_snapshot(&meta, Box::new(snapshot))
+        .await
+        .unwrap();
+    assert!(matches!(
+        store.deltas_after(Some(2)),
+        DeltaBatch::FullReconciliation
+    ));
+}
+
 #[test]
 fn journal_append_size_is_independent_of_retained_history() {
     let dir = tempfile::TempDir::new().unwrap();

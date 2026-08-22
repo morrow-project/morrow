@@ -71,6 +71,52 @@ impl FakeClusterRuntime {
         state
     }
 
+    pub(super) fn partition_record(
+        &self,
+        stream: &str,
+        partition: u32,
+        offset: u64,
+    ) -> Option<MessageEnvelope> {
+        self.inner
+            .lock()
+            .unwrap()
+            .data_messages
+            .values()
+            .find(|record| {
+                record.stream.as_deref() == Some(stream)
+                    && record.partition == Some(partition)
+                    && record.offset == Some(offset)
+            })
+            .cloned()
+            .and_then(|record| {
+                let stream = crate::stream::StreamId::new(record.stream.as_deref()?).ok()?;
+                Some(MessageEnvelope {
+                    namespace: record.namespace,
+                    stream,
+                    partition: crate::stream::PartitionId(record.partition?),
+                    offset: record.offset?,
+                    subject: record.subject,
+                    key: record.key,
+                    headers: record.headers,
+                    timestamp_ms: record.timestamp_ms,
+                    reply_to: record.reply_to,
+                    payload: record.payload,
+                    partitioning_epoch: record.partitioning_epoch,
+                    leader_epoch: record.leader_epoch,
+                    legacy_seq: record.seq,
+                })
+            })
+    }
+
+    pub(super) fn is_local_partition_replica(&self, stream: &str, partition: u32) -> bool {
+        let inner = self.inner.lock().unwrap();
+        inner
+            .state
+            .partition_assignments
+            .get(&crate::raft::partition_key(stream, partition))
+            .is_some_and(|assignment| assignment.replicas.contains(&inner.local_node_id))
+    }
+
     pub(super) async fn replicate_partition(
         &self,
         mut envelope: MessageEnvelope,

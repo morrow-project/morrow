@@ -144,6 +144,19 @@ pub(super) struct ClusterResponse {
     pub(super) peers: Vec<ClusterPeerResponse>,
     pub(super) partitions: Vec<PartitionLeaderResponse>,
     pub(super) routes: Option<RouteTopologyResponse>,
+    pub(super) state_application: ClusterStateApplicationResponse,
+}
+
+#[derive(Debug, Default)]
+pub(super) struct ClusterApplicationMetrics {
+    pub(super) delta_applications: AtomicU64,
+    pub(super) full_reconciliations: AtomicU64,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub(super) struct ClusterStateApplicationResponse {
+    pub(super) delta_applications: u64,
+    pub(super) full_reconciliations: u64,
 }
 
 #[derive(Debug, serde::Serialize)]

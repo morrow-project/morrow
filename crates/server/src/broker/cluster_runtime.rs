@@ -39,6 +39,39 @@ impl ClusterRuntime {
         }
     }
 
+    pub(super) fn deltas_after(&self, after: Option<u64>) -> Option<DeltaBatch> {
+        match self {
+            Self::Real(runtime) => Some(runtime.deltas_after(after)),
+            #[cfg(test)]
+            Self::Fake(_) => None,
+        }
+    }
+
+    pub(super) fn partition_record(
+        &self,
+        stream: &str,
+        partition: u32,
+        offset: u64,
+    ) -> Option<MessageEnvelope> {
+        match self {
+            Self::Real(runtime) => runtime.partition_record(stream, partition, offset),
+            #[cfg(test)]
+            Self::Fake(runtime) => runtime.partition_record(stream, partition, offset),
+        }
+    }
+
+    pub(super) fn is_local_partition_replica(&self, stream: &str, partition: u32) -> bool {
+        match self {
+            Self::Real(runtime) => runtime.is_local_partition_replica(stream, partition),
+            #[cfg(test)]
+            Self::Fake(runtime) => runtime.is_local_partition_replica(stream, partition),
+        }
+    }
+
+    pub(super) fn has_delta_stream(&self) -> bool {
+        matches!(self, Self::Real(_))
+    }
+
     pub(super) fn enforce_retention(&self, now_ms: u64) -> Result<()> {
         match self {
             Self::Real(runtime) => runtime.enforce_retention(now_ms),

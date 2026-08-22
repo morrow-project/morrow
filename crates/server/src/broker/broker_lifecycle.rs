@@ -178,6 +178,9 @@ impl Broker {
             admin_tls_acceptor,
             quotas,
             cluster: Arc::new(Mutex::new(cluster)),
+            cluster_applied_index: Arc::new(AtomicU64::new(0)),
+            cluster_delta_gate: Arc::new(Mutex::new(())),
+            cluster_application_metrics: Arc::new(ClusterApplicationMetrics::default()),
             route_mesh,
             middleware: hooks.middleware.clone(),
             hooks,
@@ -352,6 +355,16 @@ impl Broker {
             peers,
             partitions,
             routes,
+            state_application: ClusterStateApplicationResponse {
+                delta_applications: self
+                    .cluster_application_metrics
+                    .delta_applications
+                    .load(Ordering::Relaxed),
+                full_reconciliations: self
+                    .cluster_application_metrics
+                    .full_reconciliations
+                    .load(Ordering::Relaxed),
+            },
         }
     }
 

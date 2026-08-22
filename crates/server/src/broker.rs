@@ -32,7 +32,10 @@ use crate::{
         AppendRequest, DEFAULT_NAMESPACE, MessageEnvelope, MessageHeader, PartitionLogSet,
         select_partition,
     },
-    raft::{BrokerCommand, BrokerResponse, DurableState, RaftRuntime, proxy_stream_to_leader},
+    raft::{
+        BrokerCommand, BrokerResponse, CommittedDelta, DeltaBatch, DurableState, RaftRuntime,
+        proxy_stream_to_leader,
+    },
     wal::{
         ConsumerCursorRecord, ConsumerRecord, DeliveryAttemptRecord, PartitionAppendRecord,
         PublishRecord, ReplayedConsumer, Wal, WalStatus,
@@ -53,6 +56,7 @@ mod broker_authorization;
 mod broker_client;
 mod broker_lifecycle;
 mod broker_publish;
+mod cluster_delta;
 mod cluster_operations;
 mod cluster_runtime;
 mod compaction;

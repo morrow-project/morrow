@@ -17,12 +17,15 @@ use openraft::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     fmt, io,
     net::SocketAddr,
     ops::RangeBounds,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 use tokio::{
@@ -293,6 +296,7 @@ mod storage_io;
 
 pub(crate) use self::proxy::proxy_stream_to_leader;
 use self::runtime::RaftTlsRuntime;
+pub(crate) use self::state_machine::{CommittedDelta, DeltaBatch};
 use self::{data_plane::*, log_store::*, network::*, rpc::*, state_machine::*, storage_io::*};
 pub use self::{
     proxy::proxy_to_leader,

@@ -46,11 +46,15 @@ impl Broker {
             tokio::time::interval(Duration::from_millis(CLUSTER_LOG_SCAN_INTERVAL_MS));
         loop {
             interval.tick().await;
-            if let Some(cluster) = self.cluster_runtime().await
-                && cluster.is_leader().await
-                && let Err(err) = cluster.ensure_metadata_ready().await
-            {
-                error!(error = ?err, "cluster metadata reconciliation failed");
+            if let Some(cluster) = self.cluster_runtime().await {
+                if let Err(err) = self.sync_cluster_deltas(&cluster).await {
+                    error!(error = ?err, "cluster delta application failed");
+                }
+                if cluster.is_leader().await
+                    && let Err(err) = cluster.ensure_metadata_ready().await
+                {
+                    error!(error = ?err, "cluster metadata reconciliation failed");
+                }
             }
             let leader = self.current_leader_for_log().await;
             if leader != previous_leader {
@@ -101,8 +105,15 @@ impl Broker {
     pub(super) async fn sync_from_cluster(&self, cluster: &ClusterRuntime) -> Result<()> {
         let _storage_operation = self.storage_gate.read().await;
         let state = cluster.durable_state();
+        let last_applied = state.last_applied.map(|log_id| log_id.index);
         let mut inner = self.inner.lock().await;
-        inner.sync_durable_state(&self.partition_logs, state, &self.config.streams)
+        inner.sync_durable_state(&self.partition_logs, state, &self.config.streams)?;
+        drop(inner);
+        self.set_cluster_applied_log_index(last_applied);
+        self.cluster_application_metrics
+            .full_reconciliations
+            .fetch_add(1, Ordering::Relaxed);
+        Ok(())
     }
 
     pub(super) async fn sync_route_interests(&self) {
@@ -118,10 +129,20 @@ impl Broker {
         cluster: &ClusterRuntime,
         command: BrokerCommand,
     ) -> Result<BrokerResponse> {
-        if self.route_mesh.is_some() {
+        let apply_command = command.clone();
+        let response = if self.route_mesh.is_some() {
             cluster.client_write_forwarded(command).await
         } else {
             cluster.client_write(command).await
+        }?;
+        if cluster.has_delta_stream() {
+            self.sync_cluster_deltas(cluster).await?;
+        } else {
+            self.apply_cluster_command(apply_command, &response).await?;
+            self.cluster_application_metrics
+                .delta_applications
+                .fetch_add(1, Ordering::Relaxed);
         }
+        Ok(response)
     }
 }

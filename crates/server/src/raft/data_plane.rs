@@ -111,6 +111,18 @@ impl ReplicaDataStore {
         committed
     }
 
+    pub(super) fn record(
+        &self,
+        stream: &str,
+        partition: PartitionId,
+        offset: u64,
+    ) -> Option<MessageEnvelope> {
+        self.records
+            .get(&(stream.to_string(), partition))?
+            .get(&offset)
+            .cloned()
+    }
+
     pub(super) fn progress(&self, request: &DataProgressRequest) -> Option<u64> {
         self.records
             .get(&(request.stream.clone(), request.partition))

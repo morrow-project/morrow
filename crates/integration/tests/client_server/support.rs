@@ -338,12 +338,24 @@ pub(super) async fn free_addr() -> SocketAddr {
     listener.local_addr().unwrap()
 }
 pub(super) async fn cluster_json(addr: SocketAddr) -> Option<serde_json::Value> {
-    cluster_json_with_tls(addr, false).await
+    admin_json(addr, "/cluster").await
+}
+
+pub(super) async fn admin_json(addr: SocketAddr, path: &str) -> Option<serde_json::Value> {
+    admin_json_with_tls(addr, false, path).await
 }
 
 pub(super) async fn cluster_json_with_tls(
     addr: SocketAddr,
     secure: bool,
+) -> Option<serde_json::Value> {
+    admin_json_with_tls(addr, secure, "/cluster").await
+}
+
+async fn admin_json_with_tls(
+    addr: SocketAddr,
+    secure: bool,
+    path: &str,
 ) -> Option<serde_json::Value> {
     let stream = tokio::time::timeout(Duration::from_millis(250), TcpStream::connect(addr))
         .await
@@ -368,7 +380,10 @@ pub(super) async fn cluster_json_with_tls(
     };
     stream
         .write_all(
-            b"GET /cluster HTTP/1.1\r\nhost: localhost\r\nauthorization: Bearer test-admin-token\r\n\r\n",
+            format!(
+                "GET {path} HTTP/1.1\r\nhost: localhost\r\nauthorization: Bearer test-admin-token\r\n\r\n"
+            )
+            .as_bytes(),
         )
         .await
         .ok()?;

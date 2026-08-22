@@ -387,7 +387,6 @@ impl Broker {
                     },
                 )
                 .await?;
-                self.sync_from_cluster(&cluster).await?;
             } else {
                 let mut inner = self.inner.lock().await;
                 inner.wal.append_consumer_upsert(&record)?;

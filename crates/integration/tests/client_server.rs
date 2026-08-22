@@ -8,6 +8,9 @@ mod client_server_tests;
 #[path = "client_server/authorization_middleware_tests.rs"]
 mod authorization_middleware_tests;
 
+#[path = "client_server/cluster_delta_tests.rs"]
+mod cluster_delta_tests;
+
 #[path = "client_server/qos_tests.rs"]
 mod qos_tests;
 
