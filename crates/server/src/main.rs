@@ -9,6 +9,11 @@ async fn main() -> server::error::Result<()> {
         )
         .init();
 
+    if Config::help_requested() {
+        println!("{}", Config::usage());
+        return Ok(());
+    }
+
     let config = Config::load_from_args()?;
     let broker = Morrow::open(config)?;
     broker.serve().await

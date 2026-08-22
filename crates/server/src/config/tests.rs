@@ -3,6 +3,13 @@ use super::*;
 mod stream_tests;
 
 #[test]
+fn recognizes_server_help_flags() {
+    assert!(Config::is_help_arg(std::ffi::OsStr::new("-h")));
+    assert!(Config::is_help_arg(std::ffi::OsStr::new("--help")));
+    assert!(!Config::is_help_arg(std::ffi::OsStr::new("morrow.json")));
+}
+
+#[test]
 fn parses_json_config() {
     let value = serde_json::json!({
         "listen": "127.0.0.1:4223",
