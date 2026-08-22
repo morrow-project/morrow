@@ -55,6 +55,9 @@ docker compose config
 docker build -t morrow:dev .
 ```
 
+Pass `CARGO_PROFILE=dev CARGO_PROFILE_DIR=debug` for a debug image; the
+defaults build the release profile.
+
 The image starts `morrow-server` with `/etc/morrow/morrow.json` and stores data
 under `/var/lib/morrow`.
 

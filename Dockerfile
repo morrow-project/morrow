@@ -18,6 +18,8 @@ COPY crates ./crates
 COPY third_party ./third_party
 
 FROM source AS build
+ARG CARGO_PROFILE=release
+ARG CARGO_PROFILE_DIR=release
 RUN mkdir -p /out/data/wal /out/data/raft \
     && cat > /out/morrow.json <<'EOF'
 {
@@ -40,8 +42,12 @@ RUN mkdir -p /out/data/wal /out/data/raft \
 EOF
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/workspace/target \
-    cargo build --release --locked -p server --bin morrow-server \
-    && cp target/release/morrow-server /out/morrow-server
+    if [ "${CARGO_PROFILE}" = "release" ]; then \
+      cargo build --release --locked -p server --bin morrow-server; \
+    else \
+      cargo build --profile "${CARGO_PROFILE}" --locked -p server --bin morrow-server; \
+    fi \
+    && cp "target/${CARGO_PROFILE_DIR}/morrow-server" /out/morrow-server
 
 FROM ${RUNTIME_IMAGE} AS runtime
 WORKDIR /var/lib/morrow
