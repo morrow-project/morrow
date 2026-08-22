@@ -7,7 +7,16 @@ pub(super) const SEGMENT_HEADER_LEN: u64 = SEGMENT_HEADER.len() as u64;
 pub(super) const BATCH_PREFIX_LEN: u64 = 8;
 const MAX_BATCH_BYTES: usize = 64 * 1024 * 1024;
 
+pub(super) struct EncodedBatch {
+    pub(super) bytes: Vec<u8>,
+    pub(super) len: u64,
+}
+
 pub(super) fn encode_batch(envelope: &MessageEnvelope) -> Result<Vec<u8>> {
+    Ok(encode_batch_with_len(envelope)?.bytes)
+}
+
+pub(super) fn encode_batch_with_len(envelope: &MessageEnvelope) -> Result<EncodedBatch> {
     let body = serde_json::to_vec(envelope).context("encoding partition-log envelope")?;
     crate::broker_ensure!(
         body.len() <= u32::MAX as usize,
@@ -17,12 +26,10 @@ pub(super) fn encode_batch(envelope: &MessageEnvelope) -> Result<Vec<u8>> {
     batch.extend_from_slice(&(body.len() as u32).to_le_bytes());
     batch.extend_from_slice(&crc32fast::hash(&body).to_le_bytes());
     batch.extend_from_slice(&body);
-    Ok(batch)
-}
-
-pub(super) fn encoded_batch_len(envelope: &MessageEnvelope) -> Result<u64> {
-    let body = serde_json::to_vec(envelope).context("encoding partition-log envelope")?;
-    Ok(BATCH_PREFIX_LEN.saturating_add(body.len() as u64))
+    Ok(EncodedBatch {
+        len: batch.len() as u64,
+        bytes: batch,
+    })
 }
 
 pub(super) fn envelope_checksum(envelope: &MessageEnvelope) -> Result<u32> {

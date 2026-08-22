@@ -186,17 +186,17 @@ impl PartitionLog {
             envelope.offset == self.next_offset,
             "partition-log append creates an offset gap"
         );
-        let batch = encode_batch(&envelope)?;
+        let batch = encode_batch_with_len(&envelope)?;
         if self.active_bytes > SEGMENT_HEADER_LEN
-            && self.active_bytes.saturating_add(batch.len() as u64) > self.segment_bytes
+            && self.active_bytes.saturating_add(batch.len) > self.segment_bytes
         {
             self.rotate()?;
         }
         let position = self.active_bytes;
-        self.file.write_all(&batch)?;
-        self.active_bytes += batch.len() as u64;
+        self.file.write_all(&batch.bytes)?;
+        self.active_bytes += batch.len;
         self.next_offset += 1;
-        let bytes = encoded_batch_len(&envelope)?;
+        let bytes = batch.len;
         self.retained_bytes = self.retained_bytes.saturating_add(bytes);
         self.retention_records.push_back(RetentionRecord {
             offset: envelope.offset,
