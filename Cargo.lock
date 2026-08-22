@@ -400,6 +400,7 @@ dependencies = [
  "client",
  "serde",
  "serde_json",
+ "server",
  "tempfile",
  "tokio",
 ]

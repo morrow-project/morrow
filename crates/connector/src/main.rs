@@ -1,29 +1,8 @@
-use client::Client;
 use connector::{
-    AppendDatabaseSink, BrokerSinkConfig, CheckpointStore, ControlRecordKind, ObjectStoreSink,
-    SinkTask, run_sink_batch, store_control_record,
+    AppendDatabaseSink, BrokerSinkConfig, CheckpointStore, ConnectorConfig, ConnectorTarget,
+    ControlRecordKind, ObjectStoreSink, SinkTask, run_sink_batch, store_control_record,
 };
-use serde::Deserialize;
-use std::{net::SocketAddr, path::PathBuf, time::Duration};
-
-#[derive(Deserialize)]
-struct Config {
-    broker: SocketAddr,
-    durable_id: String,
-    consumer: String,
-    filter_subject: String,
-    generation: u64,
-    checkpoint_file: PathBuf,
-    #[serde(flatten)]
-    target: Target,
-}
-
-#[derive(Deserialize)]
-#[serde(tag = "target", rename_all = "snake_case")]
-enum Target {
-    ObjectStore { directory: PathBuf },
-    AppendDatabase { file: PathBuf },
-}
+use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -31,17 +10,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .nth(1)
         .ok_or("usage: broker-connector CONFIG.json")?;
     let config_bytes = std::fs::read(path)?;
-    let config: Config = serde_json::from_slice(&config_bytes)?;
-    let mut client = Client::connect(config.broker, 1024 * 1024).await?;
-    client.read_info().await?;
-    client
-        .connect_durable(&config.durable_id, false, 30_000, 256)
-        .await?;
+    let config: ConnectorConfig = serde_json::from_slice(&config_bytes)?;
+    let descriptor = config.descriptor_json()?;
+    let (mut client, redactor) = config.connect_broker().await?;
     store_control_record(
         &mut client,
         ControlRecordKind::Config,
         &config.durable_id,
-        &config_bytes,
+        &descriptor,
         &format!("connect-config-{}", config.generation),
     )
     .await?;
@@ -68,12 +44,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         max_wait: Duration::from_secs(1),
     };
     let mut sink: Box<dyn SinkTask> = match config.target {
-        Target::ObjectStore { directory } => Box::new(ObjectStoreSink::new(
+        ConnectorTarget::ObjectStore { directory } => Box::new(ObjectStoreSink::new(
             &config.durable_id,
             config.generation,
             directory,
         )),
-        Target::AppendDatabase { file } => Box::new(AppendDatabaseSink::open(
+        ConnectorTarget::AppendDatabase { file } => Box::new(AppendDatabaseSink::open(
             &config.durable_id,
             config.generation,
             file,
@@ -96,6 +72,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .await?;
             }
             Err(error) => {
+                let error = redactor.redact(&error);
                 eprintln!("connector batch failed: {error}");
                 let status = serde_json::to_vec(&serde_json::json!({
                     "state": "retrying",

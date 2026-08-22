@@ -94,13 +94,45 @@ the protocol crate and is re-exported by the connector crate:
 ```
 
 For a single-node broker, `"connector_control_plane": true` selects local
-storage. The connector executable durably writes its configuration and status
-at startup and its checkpoint after each completed sink batch. Adapters use
+storage. The connector executable durably writes a versioned, allowlisted
+descriptor and status at startup, and its checkpoint after each completed sink
+batch. The descriptor contains reconciliation fields such as the broker address,
+durable ID, consumer, filter, generation, target type/path, TLS server name, CA
+path, client ID, and external key reference. It never serializes the input
+config, key contents, or unknown future fields. Adapters use
 `store_control_record` for schema versions, with a distinct key per version so
 history is retained. Key compaction preserves monotonically increasing immutable
 log offsets while excluding superseded keyed values from replay and delivery.
 Configuration without the built-in streams is rejected by the control-record
 publisher rather than silently falling back to local-only state.
+
+Connector broker traffic is TLS-only and uses server-name verification plus
+Ed25519 challenge-response client authentication. Configuration references the
+private seed through `auth.private_key_seed_file`; the connector resolves that
+file locally and, on Unix, rejects it when group or other permission bits are
+set. Runtime errors and status records pass through a secret redactor before
+they are printed or published.
+
+```json
+{
+  "broker": "127.0.0.1:4222",
+  "tls": {
+    "server_name": "localhost",
+    "ca_cert_file": "/run/secrets/broker-ca.pem"
+  },
+  "auth": {
+    "client_id": "connector-orders",
+    "private_key_seed_file": "/run/secrets/connector-orders.seed"
+  }
+}
+```
+
+Deployments upgrading from the original raw-config format must rotate any
+credential that may have appeared in `$BROKER.CONNECT.config`, restrict or
+replace the old control stream according to their retention policy, write the
+seed to a mode `0600` secret file, and add the required `tls` and `auth` blocks.
+Old records are not rewritten automatically because doing so cannot erase
+replicas, backups, or previously exported log segments.
 
 Two deterministic adapters establish the boundary without adding SDKs to the
 broker:

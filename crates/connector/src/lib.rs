@@ -2,6 +2,7 @@ mod adapters;
 mod broker_sink;
 mod broker_source;
 mod checkpoint;
+mod config;
 mod control;
 mod runtime;
 mod spi;
@@ -12,6 +13,10 @@ pub use broker_source::{BrokerSourceConfig, run_source_batch};
 pub use checkpoint::CheckpointStore;
 pub use client::protocol::connector_control::{
     CONFIG_SUBJECT, CONTROL_PLANE_VERSION, OFFSET_SUBJECT, SCHEMA_SUBJECT, STATUS_SUBJECT,
+};
+pub use config::{
+    CONNECTOR_DESCRIPTOR_VERSION, ConnectorAuthConfig, ConnectorConfig, ConnectorTarget,
+    ConnectorTlsConfig, SecretRedactor,
 };
 pub use control::{ControlRecordKind, store_control_record};
 pub use runtime::ConnectorWorker;
