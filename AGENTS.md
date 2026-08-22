@@ -22,7 +22,10 @@ Workspace crates:
 - Prefer `rg` / `rg --files` for searching.
 - Use `cargo fmt` before final verification when editing Rust.
 - Use `apply_patch` for manual file edits.
-- Do not stage, commit, or rewrite history unless the user explicitly asks.
+- Whenever the agent modifies any repository file during a turn, it must run
+  the relevant verification, stage the intended changes, and create a commit
+  before ending that turn. Do not leave agent modifications uncommitted.
+- Do not rewrite history or amend commits.
 
 ## Rust Source Layout
 
