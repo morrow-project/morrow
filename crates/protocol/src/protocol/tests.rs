@@ -2,8 +2,8 @@ use tokio::io::BufReader;
 
 use super::*;
 use crate::{
-    batch, consumer_ok, control_ok, durable_message, hmsg, msg, parse_ack_subject, producer_ack,
-    producer_ack_with_position,
+    batch, consumer_ok, control_ok, durable_message, durable_message_encoded_len, hmsg, msg,
+    parse_ack_subject, producer_ack, producer_ack_with_position,
 };
 
 #[tokio::test]
@@ -349,6 +349,46 @@ fn encodes_pull_delivery_frames() {
         ),
         b"DDELIVER worker orders/created - orders 2 41 637573746f6d65722d37 1234 3 900 7 9 14 19\r\nMORROW/1.0\r\n\r\nhello\r\n"
     );
+}
+
+#[test]
+fn calculates_pull_delivery_frame_length_without_encoding() {
+    let headers = [("x-region", "ap-south-1"), ("x-attempt", "17")];
+    let payload = b"hello";
+    let encoded = durable_message(
+        "worker",
+        "orders/created",
+        Some("reply.subject"),
+        &headers,
+        "orders",
+        u32::MAX,
+        u64::MAX,
+        Some(&[0, 1, 0xfe, 0xff]),
+        u64::MAX,
+        u32::MAX,
+        u64::MAX,
+        u64::MAX,
+        u64::MAX,
+        payload,
+    );
+    let length = durable_message_encoded_len(
+        "worker",
+        "orders/created",
+        Some("reply.subject"),
+        headers.iter().copied(),
+        "orders",
+        u32::MAX,
+        u64::MAX,
+        Some(&[0, 1, 0xfe, 0xff]),
+        u64::MAX,
+        u32::MAX,
+        u64::MAX,
+        u64::MAX,
+        u64::MAX,
+        payload,
+    );
+
+    assert_eq!(length, encoded.len());
 }
 
 #[tokio::test]

@@ -161,6 +161,68 @@ pub fn durable_message(
     frame
 }
 
+#[allow(clippy::too_many_arguments)]
+pub fn durable_message_encoded_len<'a, I>(
+    name: &str,
+    subject: &str,
+    reply_to: Option<&str>,
+    headers: I,
+    stream: &str,
+    partition: u32,
+    offset: u64,
+    key: Option<&[u8]>,
+    timestamp_ms: u64,
+    attempt: u32,
+    lease_deadline_ms: u64,
+    seq: u64,
+    delivery_id: u64,
+    payload: &[u8],
+) -> usize
+where
+    I: IntoIterator<Item = (&'a str, &'a str)>,
+{
+    let headers_len = "MORROW/1.0\r\n".len()
+        + headers
+            .into_iter()
+            .map(|(header, value)| header.len() + 2 + value.len() + 2)
+            .sum::<usize>()
+        + 2;
+    let total_len = headers_len + payload.len();
+    let reply_to = reply_to.unwrap_or("-");
+    let key_len = key.map_or(1, |key| key.len().saturating_mul(2));
+    "DDELIVER ".len()
+        + name.len()
+        + 1
+        + subject.len()
+        + 1
+        + reply_to.len()
+        + 1
+        + stream.len()
+        + 1
+        + digits(partition as u64)
+        + 1
+        + digits(offset)
+        + 1
+        + key_len
+        + 1
+        + digits(timestamp_ms)
+        + 1
+        + digits(attempt as u64)
+        + 1
+        + digits(lease_deadline_ms)
+        + 1
+        + digits(seq)
+        + 1
+        + digits(delivery_id)
+        + 1
+        + digits(headers_len as u64)
+        + 1
+        + digits(total_len as u64)
+        + 2
+        + total_len
+        + 2
+}
+
 fn hex(bytes: &[u8]) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
     let mut value = String::with_capacity(bytes.len() * 2);
@@ -169,6 +231,16 @@ fn hex(bytes: &[u8]) -> String {
         value.push(DIGITS[(byte & 0xf) as usize] as char);
     }
     value
+}
+
+fn digits(value: u64) -> usize {
+    let mut value = value;
+    let mut count = 1;
+    while value >= 10 {
+        value /= 10;
+        count += 1;
+    }
+    count
 }
 
 fn payload_frame(header: String, payload: &[u8]) -> Vec<u8> {

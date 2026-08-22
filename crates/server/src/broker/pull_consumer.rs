@@ -322,15 +322,14 @@ impl Morrow {
             let next_bytes = bytes
                 .checked_add(message.payload.len())
                 .ok_or_else(|| BrokerError::msg("FETCH payload byte count overflow"))?;
-            let encoded = protocol::durable_message(
+            let encoded = protocol::durable_message_encoded_len(
                 consumer_id,
                 &message.subject,
                 message.reply_to.as_deref(),
-                &message
+                message
                     .headers
                     .iter()
-                    .map(|header| (header.name.as_str(), header.value.as_str()))
-                    .collect::<Vec<_>>(),
+                    .map(|header| (header.name.as_str(), header.value.as_str())),
                 message.stream.as_deref().unwrap_or_default(),
                 message.partition.unwrap_or_default(),
                 message.offset.unwrap_or_default(),
@@ -341,8 +340,7 @@ impl Morrow {
                 seq,
                 u64::MAX,
                 &message.payload,
-            )
-            .len();
+            );
             if next_bytes > max_bytes || bytes.saturating_add(encoded) > max_encoded_bytes {
                 self.inner
                     .lock()
