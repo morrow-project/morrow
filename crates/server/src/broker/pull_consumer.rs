@@ -291,9 +291,9 @@ impl Morrow {
         max_bytes: usize,
         max_encoded_bytes: usize,
     ) -> Result<PullBatch> {
-        let mut deliveries = Vec::new();
+        let mut prepared = Vec::new();
         let mut bytes = 0usize;
-        while deliveries.len() < max_messages {
+        while prepared.len() < max_messages {
             let candidate = {
                 let mut inner = self.inner.lock().await;
                 crate::broker_ensure!(
@@ -350,13 +350,20 @@ impl Morrow {
                     .release_pull_candidate(consumer_id, seq);
                 break;
             }
-            let lease = {
-                let mut inner = self.inner.lock().await;
-                inner.commit_pull_delivery(consumer_id, seq, attempt, deadline_ms, &message)?
-            };
             bytes = next_bytes;
-            deliveries.push(PullDelivery { message, lease });
+            prepared.push((seq, attempt, deadline_ms, message));
         }
+        let leases = if prepared.is_empty() {
+            Vec::new()
+        } else {
+            let mut inner = self.inner.lock().await;
+            inner.commit_pull_deliveries(consumer_id, prepared.clone())?
+        };
+        let deliveries = prepared
+            .into_iter()
+            .zip(leases)
+            .map(|((_, _, _, message), lease)| PullDelivery { message, lease })
+            .collect();
         self.wal.flush_due().await?;
         Ok(PullBatch { deliveries, bytes })
     }

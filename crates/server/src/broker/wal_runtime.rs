@@ -22,6 +22,10 @@ enum WalCommand {
         response: mpsc::Sender<Result<DeliveryAttemptRecord>>,
     },
     DeliveryLease(DeliveryAttemptRecord, mpsc::Sender<Result<()>>),
+    DeliveryBatch {
+        entries: Vec<DeliveryBatchEntry>,
+        response: mpsc::Sender<Result<Vec<DeliveryAttemptRecord>>>,
+    },
     Ack {
         seq: u64,
         consumer_id: String,
@@ -40,6 +44,14 @@ enum WalCommand {
         consumer_count: usize,
         response: mpsc::Sender<Result<WalStatus>>,
     },
+}
+
+pub(super) struct DeliveryBatchEntry {
+    pub(super) seq: u64,
+    pub(super) consumer_id: String,
+    pub(super) deadline_ms: u64,
+    pub(super) attempt: u32,
+    pub(super) cursors: ConsumerCursorRecord,
 }
 
 impl WalRuntime {
@@ -94,6 +106,13 @@ impl WalRuntime {
 
     pub(super) fn append_delivery_lease(&self, record: &DeliveryAttemptRecord) -> Result<()> {
         self.request(|response| WalCommand::DeliveryLease(record.clone(), response))
+    }
+
+    pub(super) fn append_delivery_batch(
+        &self,
+        entries: Vec<DeliveryBatchEntry>,
+    ) -> Result<Vec<DeliveryAttemptRecord>> {
+        self.request(|response| WalCommand::DeliveryBatch { entries, response })
     }
 
     pub(super) fn append_ack(&self, seq: u64, consumer_id: &str, delivery_id: u64) -> Result<()> {
@@ -187,6 +206,22 @@ fn wal_worker(mut wal: Wal, receiver: mpsc::Receiver<WalCommand>) {
             }
             WalCommand::DeliveryLease(record, response) => {
                 let _ = response.send(wal.append_delivery_lease(&record));
+            }
+            WalCommand::DeliveryBatch { entries, response } => {
+                let result = entries
+                    .into_iter()
+                    .map(|entry| {
+                        let lease = wal.append_delivery_attempt(
+                            entry.seq,
+                            &entry.consumer_id,
+                            entry.deadline_ms,
+                            entry.attempt,
+                        )?;
+                        wal.append_consumer_cursor(&entry.cursors)?;
+                        Ok(lease)
+                    })
+                    .collect();
+                let _ = response.send(result);
             }
             WalCommand::Ack {
                 seq,

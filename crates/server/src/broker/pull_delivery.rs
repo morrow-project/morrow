@@ -20,45 +20,71 @@ impl DurableBrokerState {
         }
     }
 
-    pub(super) fn commit_pull_delivery(
+    pub(super) fn commit_pull_deliveries(
         &mut self,
         consumer_id: &str,
-        seq: u64,
-        attempt: u32,
-        deadline_ms: u64,
-        message: &PublishRecord,
-    ) -> Result<DeliveryAttemptRecord> {
-        let reserved = self
-            .consumers
-            .get_mut(consumer_id)
-            .ok_or_else(|| BrokerError::msg("unknown consumer"))?
-            .preparing
-            .remove(&seq);
-        crate::broker_ensure!(reserved, "pull candidate is not reserved");
-        let lease = self
-            .wal
-            .append_delivery_attempt(seq, consumer_id, deadline_ms, attempt)?;
-        let cursors = {
-            let consumer = self.consumers.get_mut(consumer_id).unwrap();
-            consumer.cursors.mark_delivered(message);
+        prepared: Vec<(u64, u32, u64, PublishRecord)>,
+    ) -> Result<Vec<DeliveryAttemptRecord>> {
+        let (old_cursors, old_delivered, wal_entries) = {
+            let consumer = self
+                .consumers
+                .get_mut(consumer_id)
+                .ok_or_else(|| BrokerError::msg("unknown consumer"))?;
+            let old_cursors = consumer.cursors.clone();
+            let old_delivered = consumer.delivered;
+            let mut entries = Vec::with_capacity(prepared.len());
+            for (seq, attempt, deadline_ms, message) in &prepared {
+                crate::broker_ensure!(
+                    consumer.preparing.remove(seq),
+                    "pull candidate is not reserved"
+                );
+                consumer.cursors.mark_delivered(message);
+                entries.push(DeliveryBatchEntry {
+                    seq: *seq,
+                    consumer_id: consumer_id.to_string(),
+                    deadline_ms: *deadline_ms,
+                    attempt: *attempt,
+                    cursors: ConsumerCursorRecord {
+                        consumer_id: consumer_id.to_string(),
+                        cursors: consumer.cursors.clone(),
+                    },
+                });
+            }
+            (old_cursors, old_delivered, entries)
+        };
+        let leases = match self.wal.append_delivery_batch(wal_entries) {
+            Ok(leases) => leases,
+            Err(err) => {
+                let consumer = self.consumers.get_mut(consumer_id).unwrap();
+                consumer.cursors = old_cursors;
+                consumer.delivered = old_delivered;
+                for (seq, _, _, _) in prepared {
+                    consumer.preparing.insert(seq);
+                }
+                return Err(err);
+            }
+        };
+        crate::broker_ensure!(
+            leases.len() == prepared.len(),
+            "WAL delivery batch length mismatch"
+        );
+        let consumer = self.consumers.get_mut(consumer_id).unwrap();
+        for ((seq, _, _, _), lease) in prepared.iter().zip(&leases) {
+            consumer.pending_attempts.remove(seq);
             consumer.in_flight.insert(
-                seq,
+                *seq,
                 InFlight {
                     delivery_id: lease.delivery_id,
-                    deadline_ms,
-                    attempt,
+                    deadline_ms: lease.deadline_ms,
+                    attempt: lease.attempt,
                 },
             );
-            consumer.pending_attempts.remove(&seq);
             consumer.delivered += 1;
-            consumer.cursors.clone()
-        };
-        self.wal.append_consumer_cursor(&ConsumerCursorRecord {
-            consumer_id: consumer_id.to_string(),
-            cursors,
-        })?;
-        self.schedule_lease(consumer_id, seq, &lease);
-        Ok(lease)
+        }
+        for ((seq, _, _, _), lease) in prepared.iter().zip(&leases) {
+            self.schedule_lease(consumer_id, *seq, lease);
+        }
+        Ok(leases)
     }
 
     fn next_pull_candidate(
