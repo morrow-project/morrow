@@ -111,7 +111,7 @@ jobs:
 
   docker:
     name: Docker (${{ matrix.name }})
-    needs: build
+    needs: test
     strategy:
       fail-fast: false
       matrix:
