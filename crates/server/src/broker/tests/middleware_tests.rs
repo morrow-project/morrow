@@ -82,8 +82,14 @@ async fn before_deliver_mutation_is_a_projection_not_a_stored_record_change() {
 
     publisher.publish("orders.created", b"hello").await;
     assert!(subscriber.expect_msg().await.ends_with("7\r\nchanged\r\n"));
+    let metadata = scenario.broker().inner.lock().await.messages[&1].clone();
     assert_eq!(
-        scenario.broker().inner.lock().await.messages[&1].payload,
+        scenario
+            .broker()
+            .partition_logs
+            .load_record(&metadata)
+            .unwrap()
+            .payload,
         b"hello"
     );
 }

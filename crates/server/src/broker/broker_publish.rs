@@ -1,6 +1,25 @@
 use super::*;
 
 impl Broker {
+    async fn load_partition_record(&self, metadata: PublishRecord) -> Result<PublishRecord> {
+        if metadata.stream.is_none() {
+            return Ok(metadata);
+        }
+        let partition_logs = self.partition_logs.clone();
+        let permit = self
+            .storage_permits
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| BrokerError::msg("storage worker pool closed"))?;
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            partition_logs.load_record(&metadata)
+        })
+        .await
+        .map_err(|err| BrokerError::with_source("partition read worker failed", err))?
+    }
+
     async fn flush_partition(&self, record: &PublishRecord) -> Result<()> {
         let stream = record
             .stream
@@ -316,7 +335,9 @@ impl Broker {
                     .partition_sequences
                     .insert((stream, partition, offset), record.seq);
             }
-            inner.messages.insert(record.seq, record.clone());
+            inner
+                .messages
+                .insert(record.seq, record.clone().into_resident_metadata());
             inner.enforce_stream_retention(
                 &self.partition_logs,
                 &self.config.streams,
@@ -442,6 +463,7 @@ impl Broker {
         drop(inner);
         self.wal.flush_due().await?;
         if let Some(record) = acknowledged_record {
+            let record = self.load_partition_record(record).await?;
             let outcome = self
                 .middleware
                 .process(

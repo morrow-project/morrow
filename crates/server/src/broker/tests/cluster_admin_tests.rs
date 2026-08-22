@@ -79,6 +79,9 @@ async fn http_streams_endpoint_reports_effective_bindings() {
     assert!(response.contains("\"subjects\":[\"orders.>\"]"));
     assert!(response.contains("\"partitions\":8"));
     assert!(response.contains("\"partition_status\""));
+    assert!(response.contains("\"recovery\":{"));
+    assert!(response.contains("\"completed_partitions\":8"));
+    assert!(response.contains("\"resident_metadata_bytes\":"));
 }
 #[tokio::test]
 async fn http_status_and_unknown_paths_return_not_found() {

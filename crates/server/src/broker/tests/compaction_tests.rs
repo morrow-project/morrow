@@ -43,33 +43,34 @@ async fn connector_control_stream_keeps_latest_key_across_restart() {
         .await;
     publisher.ping_roundtrip().await;
 
-    {
+    let current = {
+        let inner = broker.inner.lock().await;
+        assert_eq!(inner.messages.len(), 3);
+        inner
+            .messages
+            .values()
+            .find(|record| record.subject == protocol::connector_control::CONFIG_SUBJECT)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(current.offset, Some(1));
+    assert_eq!(
+        broker.partition_logs.load_record(&current).unwrap().payload,
+        br#"{"generation":2}"#
+    );
+    publisher.disconnect().await;
+    broker.shutdown().await.unwrap();
+
+    let broker = deterministic_broker(config, clock, None);
+    let current = {
         let inner = broker.inner.lock().await;
         assert_eq!(inner.messages.len(), 3);
         let current = inner
             .messages
             .values()
             .find(|record| record.subject == protocol::connector_control::CONFIG_SUBJECT)
-            .unwrap();
-        assert_eq!(current.offset, Some(1));
-        assert_eq!(current.payload, br#"{"generation":2}"#);
-    }
-    publisher.disconnect().await;
-    broker.shutdown().await.unwrap();
-
-    let broker = deterministic_broker(config, clock, None);
-    {
-        let inner = broker.inner.lock().await;
-        assert_eq!(inner.messages.len(), 3);
-        assert_eq!(
-            inner
-                .messages
-                .values()
-                .find(|record| record.subject == protocol::connector_control::CONFIG_SUBJECT)
-                .unwrap()
-                .payload,
-            br#"{"generation":2}"#
-        );
+            .unwrap()
+            .clone();
         assert_eq!(
             inner
                 .messages
@@ -78,7 +79,12 @@ async fn connector_control_stream_keeps_latest_key_across_restart() {
                 .count(),
             2
         );
-    }
+        current
+    };
+    assert_eq!(
+        broker.partition_logs.load_record(&current).unwrap().payload,
+        br#"{"generation":2}"#
+    );
     let mut consumer = TestClient::connect_durable(&broker, "observer", 1_000).await;
     consumer
         .subscribe_at(

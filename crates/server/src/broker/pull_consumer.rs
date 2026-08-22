@@ -270,6 +270,7 @@ impl Broker {
             max_messages,
             max_bytes,
             max_encoded_bytes,
+            &self.partition_logs,
             self.hooks.clock.now_ms(),
         )?;
         self.wal.flush_due().await?;
@@ -471,6 +472,7 @@ impl DurableBrokerState {
         max_messages: usize,
         max_bytes: usize,
         max_encoded_bytes: usize,
+        partition_logs: &PartitionLogSet,
         now: u64,
     ) -> Result<PullBatch> {
         let mut deliveries = Vec::new();
@@ -481,9 +483,10 @@ impl DurableBrokerState {
             else {
                 break;
             };
-            let Some(message) = self.messages.get(&seq).cloned() else {
+            let Some(metadata) = self.messages.get(&seq) else {
                 break;
             };
+            let message = partition_logs.load_record(metadata)?;
             let Some(next_payload_bytes) = bytes.checked_add(message.payload.len()) else {
                 crate::broker_bail!("FETCH payload byte count overflow")
             };

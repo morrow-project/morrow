@@ -24,16 +24,10 @@ impl DurableBrokerState {
         );
         for consumer_id in consumer_ids {
             loop {
-                let Some((seq, connection_id, sid, attempt, deadline_ms)) =
-                    self.next_delivery_for(&consumer_id, connections, partition_logs, now)
+                let Some((seq, connection_id, sid, attempt, deadline_ms, message)) =
+                    self.next_delivery_for(&consumer_id, connections, partition_logs, now)?
                 else {
                     break;
-                };
-                let Some(message) = self.messages.get(&seq).cloned() else {
-                    if let Some(consumer) = self.consumers.get_mut(&consumer_id) {
-                        consumer.pending.remove(&seq);
-                    }
-                    continue;
                 };
                 let outcome = middleware
                     .process(
@@ -154,11 +148,13 @@ impl DurableBrokerState {
         connections: &ConnectionState,
         partition_logs: &PartitionLogSet,
         now: u64,
-    ) -> Option<(u64, u64, String, u32, u64)> {
-        let consumer = self.consumers.get_mut(consumer_id)?;
+    ) -> Result<Option<(u64, u64, String, u32, u64, PublishRecord)>> {
+        let Some(consumer) = self.consumers.get_mut(consumer_id) else {
+            return Ok(None);
+        };
         if consumer.in_flight.len() >= consumer.record.max_in_flight || consumer.members.is_empty()
         {
-            return None;
+            return Ok(None);
         }
         let leased = consumer.in_flight.keys().copied().collect::<HashSet<_>>();
         let seq = if consumer.record.filter_subject.contains('*')
@@ -184,9 +180,16 @@ impl DurableBrokerState {
                 .iter()
                 .find(|seq| !leased.contains(seq))
                 .copied()
-        })?;
-        let payload_len = self.messages.get(&seq)?.payload.len();
-        let (connection_id, member) = consumer
+        });
+        let Some(seq) = seq else {
+            return Ok(None);
+        };
+        let Some(metadata) = self.messages.get(&seq) else {
+            return Ok(None);
+        };
+        let message = partition_logs.load_record(metadata)?;
+        let payload_len = message.payload.len();
+        let member = consumer
             .members
             .iter()
             .filter(|(connection_id, member)| {
@@ -194,16 +197,20 @@ impl DurableBrokerState {
                     && member.credit_messages > 0
                     && member.credit_bytes >= payload_len
             })
-            .min_by_key(|(connection_id, _)| **connection_id)?;
+            .min_by_key(|(connection_id, _)| **connection_id);
+        let Some((connection_id, member)) = member else {
+            return Ok(None);
+        };
         let attempt = consumer.pending_attempts.get(&seq).copied().unwrap_or(1);
         let deadline_ms = now.saturating_add(consumer.record.ack_timeout_ms);
-        Some((
+        Ok(Some((
             seq,
             *connection_id,
             member.sid.clone(),
             attempt,
             deadline_ms,
-        ))
+            message,
+        )))
     }
 
     pub(super) fn sync_durable_state(
@@ -273,6 +280,12 @@ impl DurableBrokerState {
                     offset,
                     subject: record.subject.clone(),
                 })?;
+            }
+        }
+        for record in state.messages.values_mut() {
+            if record.stream.is_some() {
+                record.payload.clear();
+                record.payload.shrink_to_fit();
             }
         }
         self.messages = state.messages;

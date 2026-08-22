@@ -46,6 +46,16 @@ pub struct PublishRecord {
     pub leader_epoch: u64,
 }
 
+impl PublishRecord {
+    pub(crate) fn into_resident_metadata(mut self) -> Self {
+        if self.stream.is_some() {
+            self.payload.clear();
+            self.payload.shrink_to_fit();
+        }
+        self
+    }
+}
+
 impl From<crate::partition_log::MessageEnvelope> for PublishRecord {
     fn from(envelope: crate::partition_log::MessageEnvelope) -> Self {
         Self {

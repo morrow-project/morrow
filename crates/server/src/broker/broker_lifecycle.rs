@@ -96,9 +96,9 @@ impl Broker {
         }
         replay.messages.retain(|_, record| record.stream.is_none());
         replay.messages.extend(
-            envelope_by_seq
-                .into_iter()
-                .map(|(seq, envelope)| (seq, PublishRecord::from(envelope))),
+            envelope_by_seq.into_iter().map(|(seq, envelope)| {
+                (seq, PublishRecord::from(envelope).into_resident_metadata())
+            }),
         );
         compact_stream_records(&mut replay.messages, &config.streams);
         let tls_acceptor = config

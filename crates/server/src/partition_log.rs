@@ -40,6 +40,14 @@ pub struct MessageEnvelope {
     pub legacy_seq: u64,
 }
 
+impl MessageEnvelope {
+    pub(crate) fn into_resident_metadata(mut self) -> Self {
+        self.payload.clear();
+        self.payload.shrink_to_fit();
+        self
+    }
+}
+
 pub struct AppendRequest<'a> {
     pub namespace: &'a str,
     pub stream: &'a StreamDefinition,
@@ -84,6 +92,16 @@ pub(crate) struct PartitionRetentionStatus {
     pub(crate) retained_bytes: u64,
     pub(crate) deleted_messages: u64,
     pub(crate) deleted_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct PartitionRecoveryStatus {
+    pub(crate) total_partitions: usize,
+    pub(crate) completed_partitions: usize,
+    pub(crate) records_scanned: usize,
+    pub(crate) resident_metadata_bytes: usize,
+    pub(crate) elapsed_ms: u64,
+    pub(crate) workers: usize,
 }
 
 pub fn select_partition(

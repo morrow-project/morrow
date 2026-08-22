@@ -169,12 +169,20 @@ async fn transitional_stream_wal_records_migrate_to_partition_history() {
     drop(wal);
 
     let broker = Broker::open(config.clone()).unwrap();
-    {
+    let metadata = {
         let inner = broker.inner.lock().await;
         assert_eq!(inner.messages[&1].partition, Some(0));
         assert_eq!(inner.messages[&1].offset, Some(0));
-        assert_eq!(inner.messages[&1].payload, b"legacy");
-    }
+        inner.messages[&1].clone()
+    };
+    assert_eq!(
+        broker
+            .partition_logs
+            .load_record(&metadata)
+            .unwrap()
+            .payload,
+        b"legacy"
+    );
     broker.shutdown().await.unwrap();
 
     let (_, replay) = Wal::open(

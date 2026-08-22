@@ -1,9 +1,13 @@
 use super::{log::PartitionLog, *};
 use crate::error::ResultExt;
+use crate::wal::PublishRecord;
 use std::sync::{
     Mutex,
     atomic::{AtomicU64, Ordering},
 };
+use std::time::Instant;
+
+const MAX_RECOVERY_WORKERS: usize = 8;
 
 #[derive(Debug)]
 pub struct PartitionLogSet {
@@ -11,6 +15,7 @@ pub struct PartitionLogSet {
     sticky: Mutex<HashMap<String, u64>>,
     next_legacy_seq: AtomicU64,
     pub truncations: u64,
+    recovery: PartitionRecoveryStatus,
 }
 
 impl PartitionLogSet {
@@ -22,22 +27,55 @@ impl PartitionLogSet {
         let root = wal_dir.join("streams");
         std::fs::create_dir_all(&root)
             .with_context(|| format!("creating stream data directory {}", root.display()))?;
+        let started = Instant::now();
+        let work = catalog
+            .definitions()
+            .iter()
+            .flat_map(|stream| {
+                (0..stream.partitions)
+                    .map(|partition| (stream.name.clone(), PartitionId(partition)))
+            })
+            .collect::<Vec<_>>();
+        let workers = std::thread::available_parallelism()
+            .map_or(1, usize::from)
+            .min(MAX_RECOVERY_WORKERS)
+            .min(work.len().max(1));
+        let chunk_size = work.len().max(1).div_ceil(workers);
+        let recovered = std::thread::scope(|scope| -> Result<Vec<_>> {
+            let handles = work
+                .chunks(chunk_size)
+                .map(|chunk| {
+                    let root = &root;
+                    scope.spawn(move || -> Result<Vec<_>> {
+                        chunk
+                            .iter()
+                            .map(|(stream, partition)| {
+                                let (log, replay, repaired) =
+                                    PartitionLog::open(root, stream, *partition, segment_bytes)?;
+                                Ok((stream.clone(), *partition, log, replay, repaired))
+                            })
+                            .collect()
+                    })
+                })
+                .collect::<Vec<_>>();
+            let mut recovered = Vec::with_capacity(work.len());
+            for handle in handles {
+                recovered.extend(handle.join().map_err(|_| {
+                    crate::error::BrokerError::msg("partition recovery worker panicked")
+                })??);
+            }
+            Ok(recovered)
+        })?;
         let mut logs = HashMap::new();
         let mut envelopes = Vec::new();
         let mut truncations = 0;
-        for stream in catalog.definitions() {
-            for partition in 0..stream.partitions {
-                let partition = PartitionId(partition);
-                let (log, replay, repaired) =
-                    PartitionLog::open(&root, &stream.name, partition, segment_bytes)?;
-                logs.insert(
-                    (stream.name.as_str().to_string(), partition),
-                    Mutex::new(log),
-                );
-                envelopes.extend(replay);
-                truncations += repaired;
-            }
+        for (stream, partition, log, replay, repaired) in recovered {
+            logs.insert((stream.as_str().to_string(), partition), Mutex::new(log));
+            envelopes.extend(replay);
+            truncations += repaired;
         }
+        envelopes.sort_by_key(|envelope| envelope.legacy_seq);
+        let resident_metadata_bytes = envelopes.iter().map(resident_envelope_bytes).sum();
         let next_legacy_seq = envelopes
             .iter()
             .map(|envelope| envelope.legacy_seq)
@@ -50,6 +88,14 @@ impl PartitionLogSet {
                 sticky: Mutex::new(HashMap::new()),
                 next_legacy_seq: AtomicU64::new(next_legacy_seq),
                 truncations,
+                recovery: PartitionRecoveryStatus {
+                    total_partitions: work.len(),
+                    completed_partitions: work.len(),
+                    records_scanned: envelopes.len(),
+                    resident_metadata_bytes,
+                    elapsed_ms: started.elapsed().as_millis() as u64,
+                    workers,
+                },
             },
             envelopes,
         ))
@@ -153,7 +199,7 @@ impl PartitionLogSet {
                     || envelope.partition != change.partition
                     || envelope.offset >= change.earliest_offset
             });
-            let retained = envelopes
+            let retained_metadata = envelopes
                 .iter()
                 .filter(|envelope| {
                     envelope.stream.as_str() == change.stream
@@ -161,12 +207,21 @@ impl PartitionLogSet {
                 })
                 .cloned()
                 .collect::<Vec<_>>();
-            self.logs
+            let mut log = self
+                .logs
                 .get(&(change.stream.clone(), change.partition))
                 .expect("retention changes reference configured logs")
                 .lock()
-                .expect("partition log lock poisoned")
-                .rewrite(&retained, Some(change.earliest_offset))?;
+                .expect("partition log lock poisoned");
+            let retained = retained_metadata
+                .iter()
+                .map(|metadata| {
+                    log.read_offset(metadata.offset)?.ok_or_else(|| {
+                        crate::error::BrokerError::msg("retained partition record is missing")
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            log.rewrite(&retained, Some(change.earliest_offset))?;
         }
         Ok(changes)
     }
@@ -227,6 +282,10 @@ impl PartitionLogSet {
             .retention_status(partition))
     }
 
+    pub(crate) fn recovery_status(&self) -> PartitionRecoveryStatus {
+        self.recovery.clone()
+    }
+
     pub(crate) fn is_before_retention_floor(
         &self,
         stream: &str,
@@ -259,6 +318,34 @@ impl PartitionLogSet {
             .matching_offsets(filter)
     }
 
+    pub(crate) fn load_record(&self, metadata: &PublishRecord) -> Result<PublishRecord> {
+        let (Some(stream), Some(partition), Some(offset)) = (
+            metadata.stream.as_deref(),
+            metadata.partition,
+            metadata.offset,
+        ) else {
+            return Ok(metadata.clone());
+        };
+        let envelope = self
+            .load_envelope(stream, PartitionId(partition), offset)?
+            .ok_or_else(|| crate::error::BrokerError::msg("partition record is unavailable"))?;
+        Ok(PublishRecord::from(envelope))
+    }
+
+    pub(crate) fn load_envelope(
+        &self,
+        stream: &str,
+        partition: PartitionId,
+        offset: u64,
+    ) -> Result<Option<MessageEnvelope>> {
+        self.logs
+            .get(&(stream.to_string(), partition))
+            .ok_or_else(|| crate::error::BrokerError::msg("unknown stream partition"))?
+            .lock()
+            .expect("partition log lock poisoned")
+            .read_offset(offset)
+    }
+
     #[cfg(test)]
     pub(crate) fn with_partition_lock_for_test<T>(
         &self,
@@ -274,4 +361,20 @@ impl PartitionLogSet {
             .expect("partition log lock poisoned");
         operation()
     }
+}
+
+fn resident_envelope_bytes(envelope: &MessageEnvelope) -> usize {
+    std::mem::size_of::<MessageEnvelope>()
+        + envelope.namespace.capacity()
+        + envelope.stream.as_str().len()
+        + envelope.subject.capacity()
+        + envelope.key.as_ref().map_or(0, Vec::capacity)
+        + envelope
+            .headers
+            .iter()
+            .map(|header| header.name.capacity() + header.value.capacity())
+            .sum::<usize>()
+        + envelope.headers.capacity() * std::mem::size_of::<MessageHeader>()
+        + envelope.reply_to.as_ref().map_or(0, String::capacity)
+        + envelope.payload.capacity()
 }

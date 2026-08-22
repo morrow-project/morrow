@@ -78,11 +78,19 @@ fn envelopes_round_trip_across_partitions_and_restart() {
     logs.flush().unwrap();
     drop(logs);
 
-    let (_, replay) = PartitionLogSet::open(dir.path(), &catalog, 220).unwrap();
+    let (logs, replay) = PartitionLogSet::open(dir.path(), &catalog, 220).unwrap();
     assert_eq!(replay.len(), 2);
-    assert!(replay.contains(&first));
-    assert!(replay.contains(&second));
+    assert!(replay.iter().all(|envelope| envelope.payload.is_empty()));
     for envelope in replay {
+        let envelope = logs
+            .load_envelope(
+                envelope.stream.as_str(),
+                envelope.partition,
+                envelope.offset,
+            )
+            .unwrap()
+            .unwrap();
+        assert!(envelope == first || envelope == second);
         assert_eq!(envelope.namespace, "tenant-a");
         assert_eq!(envelope.headers[0].name, "Trace-Id");
         assert_eq!(envelope.timestamp_ms, 42);
@@ -145,7 +153,11 @@ fn torn_active_tail_is_truncated_and_index_is_rebuilt() {
 
     let (logs, replay) = PartitionLogSet::open(dir.path(), &catalog, 4096).unwrap();
     assert_eq!(logs.truncations, 1);
-    assert_eq!(replay, vec![expected]);
+    assert_eq!(replay, vec![expected.clone().into_resident_metadata()]);
+    assert_eq!(
+        logs.load_envelope("orders", PartitionId(0), 0).unwrap(),
+        Some(expected)
+    );
     assert!(index.exists());
 }
 
@@ -200,8 +212,12 @@ fn rewriting_a_partition_removes_an_uncommitted_suffix() {
     logs.rewrite_partition("orders", PartitionId(0), std::slice::from_ref(&first))
         .unwrap();
     drop(logs);
-    let (_, replay) = PartitionLogSet::open(dir.path(), &catalog, 4096).unwrap();
-    assert_eq!(replay, vec![first]);
+    let (logs, replay) = PartitionLogSet::open(dir.path(), &catalog, 4096).unwrap();
+    assert_eq!(replay, vec![first.clone().into_resident_metadata()]);
+    assert_eq!(
+        logs.load_envelope("orders", PartitionId(0), 0).unwrap(),
+        Some(first)
+    );
 }
 
 #[test]
@@ -332,7 +348,18 @@ fn age_retention_rewrites_prefix_and_preserves_next_offset() {
     drop(logs);
 
     let (logs, replay) = PartitionLogSet::open(dir.path(), &catalog, 256).unwrap();
-    assert_eq!(replay, envelopes);
+    assert_eq!(
+        replay,
+        envelopes
+            .iter()
+            .cloned()
+            .map(MessageEnvelope::into_resident_metadata)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        logs.load_envelope("orders", PartitionId(0), 2).unwrap(),
+        Some(envelopes[0].clone())
+    );
     let appended = logs.append(request(stream, None, &[])).unwrap();
     assert_eq!(appended.offset, 3);
 }
@@ -425,4 +452,75 @@ fn repeated_byte_retention_reaches_a_bounded_physical_steady_state() {
     assert!(physical_log_bytes <= codec::SEGMENT_HEADER_LEN + 512);
     let (_, replay) = PartitionLogSet::open(dir.path(), &catalog, 256).unwrap();
     assert_eq!(replay, envelopes);
+}
+
+#[test]
+fn large_history_recovery_keeps_payloads_on_disk_and_loads_them_lazily() {
+    let dir = TempDir::new().unwrap();
+    let catalog = catalog(4);
+    let stream = &catalog.definitions()[0];
+    let payload = vec![0x5a; 32 * 1024];
+    let mut expected = Vec::new();
+    let (logs, _) = PartitionLogSet::open(dir.path(), &catalog, 64 * 1024).unwrap();
+    for seq in 0..256_u64 {
+        let mut append = request(stream, None, &[]);
+        append.payload = &payload;
+        append.legacy_seq = Some(seq + 1);
+        expected.push(logs.append(append).unwrap());
+    }
+    logs.flush().unwrap();
+    drop(logs);
+
+    let (logs, replay) = PartitionLogSet::open(dir.path(), &catalog, 64 * 1024).unwrap();
+    let recovery = logs.recovery_status();
+    assert_eq!(recovery.completed_partitions, 4);
+    assert_eq!(recovery.records_scanned, expected.len());
+    assert!(
+        replay
+            .iter()
+            .all(|envelope| envelope.payload.capacity() == 0)
+    );
+    assert!(recovery.resident_metadata_bytes < payload.len() * expected.len() / 8);
+
+    for wanted in [0, 127, 255] {
+        let metadata = &replay[wanted];
+        let loaded = logs
+            .load_envelope(
+                metadata.stream.as_str(),
+                metadata.partition,
+                metadata.offset,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded, expected[wanted]);
+    }
+}
+
+#[test]
+#[ignore = "manual increasing-history recovery benchmark"]
+fn benchmark_recovery_across_increasing_histories() {
+    for records in [100_usize, 1_000, 10_000] {
+        let dir = TempDir::new().unwrap();
+        let catalog = catalog(8);
+        let stream = &catalog.definitions()[0];
+        let payload = vec![0x5a; 1024];
+        let (logs, _) = PartitionLogSet::open(dir.path(), &catalog, 64 * 1024).unwrap();
+        for seq in 0..records {
+            let mut append = request(stream, None, &[]);
+            append.payload = &payload;
+            append.legacy_seq = Some(seq as u64 + 1);
+            logs.append(append).unwrap();
+        }
+        logs.flush().unwrap();
+        drop(logs);
+
+        let started = std::time::Instant::now();
+        let (logs, replay) = PartitionLogSet::open(dir.path(), &catalog, 64 * 1024).unwrap();
+        assert_eq!(replay.len(), records);
+        eprintln!(
+            "records={records} elapsed={:?} metadata_bytes={}",
+            started.elapsed(),
+            logs.recovery_status().resident_metadata_bytes
+        );
+    }
 }

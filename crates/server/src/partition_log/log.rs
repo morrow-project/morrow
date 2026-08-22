@@ -1,9 +1,9 @@
 use super::{codec::*, subject_index::*, *};
 use crate::error::{BrokerError, ResultExt};
 use std::{
-    collections::{BTreeSet, HashMap, VecDeque},
+    collections::{BTreeSet, VecDeque},
     fs::{File, OpenOptions},
-    io::{Seek, Write},
+    io::{Read, Seek, SeekFrom, Write},
     path::PathBuf,
 };
 
@@ -20,6 +20,13 @@ struct RetentionRecord {
 }
 
 #[derive(Debug)]
+struct SegmentRange {
+    path: PathBuf,
+    first_offset: u64,
+    last_offset: u64,
+}
+
+#[derive(Debug)]
 pub(super) struct PartitionLog {
     dir: PathBuf,
     file: File,
@@ -27,7 +34,7 @@ pub(super) struct PartitionLog {
     active_bytes: u64,
     segment_bytes: u64,
     next_offset: u64,
-    record_checksums: HashMap<u64, u32>,
+    segment_ranges: Vec<SegmentRange>,
     sealed_subject_segments: Vec<SubjectSegment>,
     active_subjects: Vec<(String, u64)>,
     subject_index_cache_bytes: usize,
@@ -61,15 +68,39 @@ impl PartitionLog {
         let mut sealed_subject_segments = Vec::new();
         let mut active_subjects = Vec::new();
         let mut subject_index_cache_bytes = 0;
+        let mut retention_records = VecDeque::new();
+        let mut retained_bytes = 0_u64;
+        let mut segment_ranges = Vec::new();
         for (index, (_, path)) in paths.iter().enumerate() {
             let active = index + 1 == paths.len();
             let first_record = envelopes.len();
-            truncations += replay_segment(path, active, stream, partition, &mut envelopes)?;
-            rebuild_index(path, &envelopes, stream, partition)?;
+            let repaired = replay_segment(
+                path,
+                active,
+                stream,
+                partition,
+                &mut envelopes,
+                &mut retention_records,
+                &mut retained_bytes,
+            )?;
+            truncations += repaired;
+            if repaired > 0 || !path.with_extension(INDEX_EXTENSION).exists() {
+                rebuild_index(path, stream, partition)?;
+            }
             let subjects = envelopes[first_record..]
                 .iter()
                 .map(|envelope| (envelope.subject.clone(), envelope.offset))
                 .collect::<Vec<_>>();
+            if let (Some(first), Some(last)) = (
+                envelopes[first_record..].first(),
+                envelopes[first_record..].last(),
+            ) {
+                segment_ranges.push(SegmentRange {
+                    path: path.clone(),
+                    first_offset: first.offset,
+                    last_offset: last.offset,
+                });
+            }
             if active {
                 active_subjects = subjects;
             } else {
@@ -106,21 +137,6 @@ impl PartitionLog {
             persisted_next_offset <= next_offset,
             "partition-log retention offset exceeds the durable high watermark"
         );
-        let record_checksums = envelopes
-            .iter()
-            .map(|envelope| Ok((envelope.offset, envelope_checksum(envelope)?)))
-            .collect::<Result<HashMap<_, _>>>()?;
-        let retention_records = envelopes
-            .iter()
-            .map(|envelope| {
-                Ok(RetentionRecord {
-                    offset: envelope.offset,
-                    timestamp_ms: envelope.timestamp_ms,
-                    bytes: encoded_batch_len(envelope)?,
-                })
-            })
-            .collect::<Result<VecDeque<_>>>()?;
-        let retained_bytes = retention_records.iter().map(|record| record.bytes).sum();
         Ok((
             Self {
                 dir,
@@ -129,7 +145,7 @@ impl PartitionLog {
                 active_bytes,
                 segment_bytes,
                 next_offset,
-                record_checksums,
+                segment_ranges,
                 sealed_subject_segments,
                 active_subjects,
                 subject_index_cache_bytes,
@@ -153,8 +169,9 @@ impl PartitionLog {
         envelope: MessageEnvelope,
     ) -> Result<MessageEnvelope> {
         if envelope.offset < self.next_offset {
+            let existing = self.read_offset(envelope.offset)?;
             crate::broker_ensure!(
-                self.record_checksums.get(&envelope.offset).copied()
+                existing.as_ref().map(envelope_checksum).transpose()?
                     == Some(envelope_checksum(&envelope)?),
                 "partition-log append conflicts with an immutable committed record"
             );
@@ -174,8 +191,6 @@ impl PartitionLog {
         self.file.write_all(&batch)?;
         self.active_bytes += batch.len() as u64;
         self.next_offset += 1;
-        self.record_checksums
-            .insert(envelope.offset, envelope_checksum(&envelope)?);
         let bytes = encoded_batch_len(&envelope)?;
         self.retained_bytes = self.retained_bytes.saturating_add(bytes);
         self.retention_records.push_back(RetentionRecord {
@@ -183,6 +198,20 @@ impl PartitionLog {
             timestamp_ms: envelope.timestamp_ms,
             bytes,
         });
+        let active_path = segment_path(&self.dir, self.segment_id);
+        if let Some(range) = self
+            .segment_ranges
+            .iter_mut()
+            .find(|range| range.path == active_path)
+        {
+            range.last_offset = envelope.offset;
+        } else {
+            self.segment_ranges.push(SegmentRange {
+                path: active_path,
+                first_offset: envelope.offset,
+                last_offset: envelope.offset,
+            });
+        }
         self.active_subjects
             .push((envelope.subject.clone(), envelope.offset));
         if envelope.offset % INDEX_STRIDE == 0 {
@@ -228,7 +257,7 @@ impl PartitionLog {
         self.file = create_segment(&path)?;
         self.active_bytes = SEGMENT_HEADER_LEN;
         self.next_offset = first_offset;
-        self.record_checksums.clear();
+        self.segment_ranges.clear();
         self.sealed_subject_segments.clear();
         self.active_subjects.clear();
         self.subject_index_cache_bytes = 0;
@@ -326,6 +355,52 @@ impl PartitionLog {
             used_index,
         })
     }
+
+    pub(super) fn read_offset(&self, offset: u64) -> Result<Option<MessageEnvelope>> {
+        for range in &self.segment_ranges {
+            if offset < range.first_offset || offset > range.last_offset {
+                continue;
+            }
+            let mut file = OpenOptions::new().read(true).open(&range.path)?;
+            validate_segment_header(&mut file, &range.path)?;
+            if let Some(position) = indexed_position(&range.path, offset)? {
+                file.seek(SeekFrom::Start(position))?;
+            }
+            while let Some((envelope, _)) = read_batch(&mut file)? {
+                if envelope.offset == offset {
+                    return Ok(Some(envelope));
+                }
+                if envelope.offset > offset {
+                    break;
+                }
+            }
+        }
+        Ok(None)
+    }
+}
+
+fn indexed_position(path: &Path, target: u64) -> Result<Option<u64>> {
+    let index_path = path.with_extension(INDEX_EXTENSION);
+    if !index_path.exists() {
+        return Ok(None);
+    }
+    let mut file = File::open(index_path)?;
+    let mut entry = [0_u8; 16];
+    let mut position = None;
+    loop {
+        match file.read_exact(&mut entry) {
+            Ok(()) => {
+                let offset = u64::from_le_bytes(entry[..8].try_into().unwrap());
+                if offset > target {
+                    break;
+                }
+                position = Some(u64::from_le_bytes(entry[8..].try_into().unwrap()));
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(err) => return Err(err.into()),
+        }
+    }
+    Ok(position)
 }
 
 fn read_retention_offset(dir: &Path) -> Result<u64> {
@@ -354,6 +429,8 @@ fn replay_segment(
     stream: &StreamId,
     partition: PartitionId,
     envelopes: &mut Vec<MessageEnvelope>,
+    retention_records: &mut VecDeque<RetentionRecord>,
+    retained_bytes: &mut u64,
 ) -> Result<u64> {
     let mut file = OpenOptions::new().read(true).write(active).open(path)?;
     validate_segment_header(&mut file, path)?;
@@ -362,12 +439,20 @@ fn replay_segment(
     loop {
         let before = boundary;
         match read_batch(&mut file) {
-            Ok(Some((envelope, bytes))) => {
+            Ok(Some((mut envelope, bytes))) => {
                 crate::broker_ensure!(
                     envelope.stream == *stream && envelope.partition == partition,
                     "partition-log envelope stored under the wrong stream or partition"
                 );
                 boundary += bytes;
+                retention_records.push_back(RetentionRecord {
+                    offset: envelope.offset,
+                    timestamp_ms: envelope.timestamp_ms,
+                    bytes,
+                });
+                *retained_bytes = retained_bytes.saturating_add(bytes);
+                envelope.payload.clear();
+                envelope.payload.shrink_to_fit();
                 envelopes.push(envelope);
             }
             Ok(None) => return Ok(0),
@@ -390,12 +475,7 @@ fn replay_segment(
     }
 }
 
-fn rebuild_index(
-    path: &Path,
-    all_envelopes: &[MessageEnvelope],
-    stream: &StreamId,
-    partition: PartitionId,
-) -> Result<()> {
+fn rebuild_index(path: &Path, stream: &StreamId, partition: PartitionId) -> Result<()> {
     let index_path = path.with_extension(INDEX_EXTENSION);
     let tmp_path = path.with_extension("idx.tmp");
     let mut source = OpenOptions::new().read(true).open(path)?;
@@ -406,9 +486,6 @@ fn rebuild_index(
         if envelope.stream == *stream
             && envelope.partition == partition
             && envelope.offset % INDEX_STRIDE == 0
-            && all_envelopes
-                .iter()
-                .any(|candidate| candidate.offset == envelope.offset)
         {
             write_index_entry(&mut index, envelope.offset, position)?;
         }

@@ -203,16 +203,18 @@ impl RaftRuntime {
 
     pub fn durable_state(&self) -> DurableState {
         let mut state = self.state_machine.durable_state();
-        for envelope in self
+        if let Ok(records) = self
             .partition_data
             .lock()
             .unwrap()
             .committed_records(&state)
         {
-            state.messages.insert(
-                envelope.legacy_seq,
-                crate::wal::PublishRecord::from(envelope),
-            );
+            for envelope in records {
+                state.messages.insert(
+                    envelope.legacy_seq,
+                    crate::wal::PublishRecord::from(envelope),
+                );
+            }
         }
         state
     }
@@ -227,11 +229,12 @@ impl RaftRuntime {
         partition: u32,
         offset: u64,
     ) -> Option<crate::partition_log::MessageEnvelope> {
-        self.partition_data.lock().unwrap().record(
-            stream,
-            crate::stream::PartitionId(partition),
-            offset,
-        )
+        self.partition_data
+            .lock()
+            .unwrap()
+            .record(stream, crate::stream::PartitionId(partition), offset)
+            .ok()
+            .flatten()
     }
 
     pub(crate) fn is_local_partition_replica(&self, stream: &str, partition: u32) -> bool {
@@ -294,7 +297,7 @@ impl RaftRuntime {
             envelope.stream.as_str(),
             envelope.partition,
             None,
-        );
+        )?;
         for (node_id, node) in &self.nodes {
             if *node_id == self.node_id {
                 continue;

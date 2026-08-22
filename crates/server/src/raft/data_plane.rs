@@ -53,11 +53,21 @@ impl ReplicaDataStore {
             request.envelope.stream.as_str().to_string(),
             request.envelope.partition,
         );
-        let must_truncate = self
+        let existing = self
             .records
             .get(&key)
-            .and_then(|records| records.get(&request.envelope.offset))
-            .is_some_and(|existing| existing != &request.envelope);
+            .and_then(|records| records.get(&request.envelope.offset));
+        let must_truncate = existing
+            .map(|existing| {
+                self.logs
+                    .load_envelope(&key.0, key.1, existing.offset)
+                    .and_then(|stored| {
+                        stored.ok_or_else(|| BrokerError::msg("replica record is unavailable"))
+                    })
+                    .map(|stored| stored != request.envelope)
+            })
+            .transpose()?
+            .unwrap_or(false);
         if must_truncate {
             crate::broker_ensure!(
                 request
@@ -67,7 +77,14 @@ impl ReplicaDataStore {
             );
             let records = self.records.entry(key.clone()).or_default();
             records.split_off(&request.envelope.offset);
-            let retained = records.values().cloned().collect::<Vec<_>>();
+            let retained = records
+                .values()
+                .map(|record| {
+                    self.logs
+                        .load_envelope(&key.0, key.1, record.offset)?
+                        .ok_or_else(|| BrokerError::msg("replica record is unavailable"))
+                })
+                .collect::<Result<Vec<_>>>()?;
             self.logs.rewrite_partition(&key.0, key.1, &retained)?;
         }
         if let Some(existing) = self
@@ -75,13 +92,17 @@ impl ReplicaDataStore {
             .get(&key)
             .and_then(|records| records.get(&request.envelope.offset))
         {
-            crate::broker_ensure!(existing == &request.envelope, "divergent replica suffix");
+            let stored = self
+                .logs
+                .load_envelope(&key.0, key.1, existing.offset)?
+                .ok_or_else(|| BrokerError::msg("replica record is unavailable"))?;
+            crate::broker_ensure!(stored == request.envelope, "divergent replica suffix");
         } else {
             self.logs.append_committed(request.envelope.clone())?;
-            self.records
-                .entry(key)
-                .or_default()
-                .insert(request.envelope.offset, request.envelope.clone());
+            self.records.entry(key).or_default().insert(
+                request.envelope.offset,
+                request.envelope.clone().into_resident_metadata(),
+            );
         }
         if request.fsync {
             self.logs.flush()?;
@@ -92,7 +113,10 @@ impl ReplicaDataStore {
         })
     }
 
-    pub(super) fn committed_records(&self, metadata: &DurableState) -> Vec<MessageEnvelope> {
+    pub(super) fn committed_records(
+        &self,
+        metadata: &DurableState,
+    ) -> Result<Vec<MessageEnvelope>> {
         let mut committed = Vec::new();
         for ((stream, partition), records) in &self.records {
             let Some(high_watermark) = metadata
@@ -102,13 +126,17 @@ impl ReplicaDataStore {
             else {
                 continue;
             };
-            committed.extend(
-                records
-                    .range(..=high_watermark)
-                    .map(|(_, envelope)| envelope.clone()),
-            );
+            for (_, envelope) in records.range(..=high_watermark) {
+                committed.push(
+                    self.logs
+                        .load_envelope(stream, *partition, envelope.offset)?
+                        .ok_or_else(|| {
+                            BrokerError::msg("committed replica record is unavailable")
+                        })?,
+                );
+            }
         }
-        committed
+        Ok(committed)
     }
 
     pub(super) fn record(
@@ -116,11 +144,15 @@ impl ReplicaDataStore {
         stream: &str,
         partition: PartitionId,
         offset: u64,
-    ) -> Option<MessageEnvelope> {
-        self.records
-            .get(&(stream.to_string(), partition))?
-            .get(&offset)
-            .cloned()
+    ) -> Result<Option<MessageEnvelope>> {
+        let Some(metadata) = self
+            .records
+            .get(&(stream.to_string(), partition))
+            .and_then(|records| records.get(&offset))
+        else {
+            return Ok(None);
+        };
+        self.logs.load_envelope(stream, partition, metadata.offset)
     }
 
     pub(super) fn progress(&self, request: &DataProgressRequest) -> Option<u64> {
@@ -135,20 +167,24 @@ impl ReplicaDataStore {
         stream: &str,
         partition: PartitionId,
         after: Option<u64>,
-    ) -> Vec<MessageEnvelope> {
+    ) -> Result<Vec<MessageEnvelope>> {
         let Some(high_watermark) = metadata
             .partition_commits
             .get(&partition_key(stream, partition.0))
             .map(|commit| commit.high_watermark)
         else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
         let start = after.map_or(0, |offset| offset.saturating_add(1));
         self.records
             .get(&(stream.to_string(), partition))
             .into_iter()
             .flat_map(|records| records.range(start..=high_watermark))
-            .map(|(_, envelope)| envelope.clone())
+            .map(|(_, envelope)| {
+                self.logs
+                    .load_envelope(stream, partition, envelope.offset)?
+                    .ok_or_else(|| BrokerError::msg("replica catch-up record is unavailable"))
+            })
             .collect()
     }
 
@@ -163,7 +199,13 @@ impl ReplicaDataStore {
             self.records
                 .get(&(stream.to_string(), PartitionId(partition)))
                 .and_then(|records| records.get(&commit.high_watermark))
-                .and_then(|record| crate::partition_log::committed_envelope_checksum(record).ok())
+                .and_then(|record| {
+                    self.logs
+                        .load_envelope(stream, PartitionId(partition), record.offset)
+                        .ok()
+                        .flatten()
+                })
+                .and_then(|record| crate::partition_log::committed_envelope_checksum(&record).ok())
                 == Some(commit.checksum)
         })
     }
@@ -180,7 +222,14 @@ impl ReplicaDataStore {
                 .entry((change.stream.clone(), change.partition))
                 .or_default();
             records.retain(|offset, _| *offset >= change.earliest_offset);
-            let retained = records.values().cloned().collect::<Vec<_>>();
+            let retained = records
+                .values()
+                .map(|record| {
+                    self.logs
+                        .load_envelope(&change.stream, change.partition, record.offset)?
+                        .ok_or_else(|| BrokerError::msg("retained replica record is unavailable"))
+                })
+                .collect::<Result<Vec<_>>>()?;
             self.logs.retain_partition(&change, &retained)?;
         }
         Ok(())

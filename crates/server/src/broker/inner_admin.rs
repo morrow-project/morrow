@@ -311,6 +311,9 @@ impl Broker {
             })
             .collect::<Result<Vec<_>>>()
             .expect("stream status references configured partition logs");
-        StreamsResponse { streams }
+        StreamsResponse {
+            streams,
+            recovery: partition_logs.recovery_status(),
+        }
     }
 }

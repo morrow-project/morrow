@@ -40,7 +40,8 @@ impl DurableBrokerState {
                     .offset
                     .is_some_and(|offset| offset >= change.earliest_offset)
             })
-            .map(message_envelope)
+            .map(|record| partition_logs.load_record(record))
+            .map(|record| record.and_then(|record| message_envelope(&record)))
             .collect::<Result<Vec<_>>>()?;
         partition_logs.retain_partition(change, &retained)?;
         self.messages.retain(|seq, _| !removed.contains(seq));

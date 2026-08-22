@@ -223,6 +223,7 @@ pub(super) struct SubscriptionsResponse {
 #[derive(Debug, serde::Serialize)]
 pub(super) struct StreamsResponse {
     pub(super) streams: Vec<StreamResponse>,
+    pub(super) recovery: crate::partition_log::PartitionRecoveryStatus,
 }
 
 #[derive(Debug, serde::Serialize)]
