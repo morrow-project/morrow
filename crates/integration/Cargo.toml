@@ -9,7 +9,7 @@ serde_json.workspace = true
 server.workspace = true
 tokio.workspace = true
 rustls.workspace = true
-rustls-pemfile.workspace = true
+broker-pem.workspace = true
 tokio-rustls.workspace = true
 
 [dev-dependencies]

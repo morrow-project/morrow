@@ -1,6 +1,6 @@
 use super::*;
 use rustls::{ClientConfig, RootCertStore, pki_types::ServerName};
-use std::{fs::File, io::BufReader, sync::Arc};
+use std::sync::Arc;
 use tokio_rustls::TlsConnector;
 
 #[tokio::test]
@@ -154,10 +154,7 @@ async fn admin_tls_request(addr: SocketAddr, token: &str) -> String {
 }
 
 fn tls_connector(ca_file: PathBuf) -> TlsConnector {
-    let mut reader = BufReader::new(File::open(ca_file).unwrap());
-    let certs = rustls_pemfile::certs(&mut reader)
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
+    let certs = broker_pem::load_certificates(ca_file).unwrap();
     let mut roots = RootCertStore::empty();
     roots.add_parsable_certificates(certs);
     TlsConnector::from(Arc::new(
@@ -168,20 +165,11 @@ fn tls_connector(ca_file: PathBuf) -> TlsConnector {
 }
 
 fn internal_client_connector(cert_file: PathBuf, key_file: PathBuf) -> TlsConnector {
-    let mut ca_reader = BufReader::new(File::open(internal_fixture("ca-cert.pem")).unwrap());
-    let ca_certs = rustls_pemfile::certs(&mut ca_reader)
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
+    let ca_certs = broker_pem::load_certificates(internal_fixture("ca-cert.pem")).unwrap();
     let mut roots = RootCertStore::empty();
     roots.add_parsable_certificates(ca_certs);
-    let mut cert_reader = BufReader::new(File::open(cert_file).unwrap());
-    let certs = rustls_pemfile::certs(&mut cert_reader)
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
-    let mut key_reader = BufReader::new(File::open(key_file).unwrap());
-    let key = rustls_pemfile::private_key(&mut key_reader)
-        .unwrap()
-        .unwrap();
+    let certs = broker_pem::load_certificates(cert_file).unwrap();
+    let key = broker_pem::load_private_key(key_file).unwrap();
     TlsConnector::from(Arc::new(
         ClientConfig::builder()
             .with_root_certificates(roots)

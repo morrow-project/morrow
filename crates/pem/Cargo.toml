@@ -1,0 +1,7 @@
+[package]
+name = "broker-pem"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rustls.workspace = true

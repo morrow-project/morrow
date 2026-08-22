@@ -5,8 +5,7 @@ use rustls::{
     pki_types::{CertificateDer, ServerName},
 };
 use std::{
-    error::Error, fmt, fs::File, io::BufReader as StdBufReader, net::SocketAddr, path::Path,
-    path::PathBuf, sync::Arc, time::Duration,
+    error::Error, fmt, net::SocketAddr, path::Path, path::PathBuf, sync::Arc, time::Duration,
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader},

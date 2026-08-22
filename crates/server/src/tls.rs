@@ -1,4 +1,4 @@
-use std::{fs::File, io::BufReader, sync::Arc};
+use std::sync::Arc;
 
 use rustls::{
     RootCertStore,
@@ -86,12 +86,7 @@ fn load_certs(config: &TlsConfig) -> Result<Vec<CertificateDer<'static>>> {
 }
 
 fn load_certs_from(path: &std::path::Path) -> Result<Vec<CertificateDer<'static>>> {
-    let file =
-        File::open(path).with_context(|| format!("opening TLS certificate {}", path.display()))?;
-    let mut reader = BufReader::new(file);
-    let certs: Vec<_> = rustls_pemfile::certs(&mut reader)
-        .collect::<std::result::Result<_, _>>()
-        .context("reading TLS certificate PEM")?;
+    let certs = broker_pem::load_certificates(path).context("reading TLS certificate PEM")?;
     crate::broker_ensure!(
         !certs.is_empty(),
         "TLS certificate file contains no certificates"
@@ -104,12 +99,7 @@ fn load_key(config: &TlsConfig) -> Result<PrivateKeyDer<'static>> {
 }
 
 fn load_key_from(path: &std::path::Path) -> Result<PrivateKeyDer<'static>> {
-    let file =
-        File::open(path).with_context(|| format!("opening TLS private key {}", path.display()))?;
-    let mut reader = BufReader::new(file);
-    rustls_pemfile::private_key(&mut reader)
-        .context("reading TLS private key PEM")?
-        .ok_or_else(|| BrokerError::msg("TLS private key file contains no private key"))
+    broker_pem::load_private_key(path).context("reading TLS private key PEM")
 }
 
 fn load_roots(path: &std::path::Path) -> Result<RootCertStore> {

@@ -4,6 +4,7 @@ members = [
     "crates/cli",
     "crates/connector",
     "crates/integration",
+    "crates/pem",
     "crates/protocol",
     "crates/server",
     "third_party/byte-unit-compat",
@@ -21,6 +22,7 @@ edition = "2024"
 
 [workspace.dependencies]
 client = { path = "crates/client" }
+broker-pem = { path = "crates/pem" }
 cli = { path = "crates/cli" }
 protocol = { path = "crates/protocol" }
 server = { path = "crates/server" }
@@ -30,7 +32,6 @@ ed25519-dalek = { version = "2.2.0", default-features = false, features = ["allo
 getrandom = { version = "0.4.2", default-features = false, features = ["std"] }
 openraft = { version = "0.9.24", default-features = false, features = ["generic-snapshot-data", "serde", "storage-v2"] }
 rustls = { version = "0.23.40", default-features = false, features = ["aws_lc_rs", "std"] }
-rustls-pemfile = { version = "2.2.0", default-features = false, features = ["std"] }
 serde = { version = "1.0.228", default-features = false, features = ["derive", "std"] }
 serde_json = { version = "1.0.150", default-features = false, features = ["std"] }
 tokio = { version = "1.52.3", default-features = false, features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }

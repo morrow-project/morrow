@@ -520,11 +520,7 @@ pub(super) fn tls_config(root_cert_file: impl AsRef<Path>) -> Result<ClientConfi
 
 pub(super) fn load_certs(path: impl AsRef<Path>) -> Result<Vec<CertificateDer<'static>>> {
     let path = path.as_ref();
-    let file = File::open(path)
-        .map_err(|err| ClientError::with_source(format!("opening {}", path.display()), err))?;
-    let mut reader = StdBufReader::new(file);
-    let certs: Vec<_> = rustls_pemfile::certs(&mut reader)
-        .collect::<std::result::Result<_, _>>()
+    let certs = broker_pem::load_certificates(path)
         .map_err(|err| ClientError::with_source("reading root certificate PEM", err))?;
     if certs.is_empty() {
         return Err(ClientError::msg(

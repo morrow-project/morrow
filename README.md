@@ -265,6 +265,12 @@ Plain `telnet` will not work against a TLS listener. For manual testing, use:
 openssl s_client -connect 127.0.0.1:4222
 ```
 
+Certificate and CA files accept one or more RFC 7468 `CERTIFICATE` sections.
+Private-key files must contain exactly one unencrypted PKCS#8 `PRIVATE KEY`,
+legacy PKCS#1 `RSA PRIVATE KEY`, or SEC1 `EC PRIVATE KEY` section. Unsupported or
+mixed sections, multiple keys, malformed boundaries/base64, and non-whitespace
+material outside PEM sections are rejected.
+
 Authentication is disabled when `auth.enabled` is `false`. To enable
 challenge-response authentication, configure a list of allowed client IDs and
 Ed25519 public keys:

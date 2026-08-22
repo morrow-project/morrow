@@ -386,10 +386,7 @@ pub(super) async fn cluster_json_with_tls(
 }
 
 fn internal_tls_connector(ca_file: PathBuf) -> Option<tokio_rustls::TlsConnector> {
-    let mut reader = std::io::BufReader::new(std::fs::File::open(ca_file).ok()?);
-    let certs = rustls_pemfile::certs(&mut reader)
-        .collect::<Result<Vec<_>, _>>()
-        .ok()?;
+    let certs = broker_pem::load_certificates(ca_file).ok()?;
     let mut roots = rustls::RootCertStore::empty();
     roots.add_parsable_certificates(certs);
     Some(tokio_rustls::TlsConnector::from(std::sync::Arc::new(
