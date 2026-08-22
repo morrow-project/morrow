@@ -63,7 +63,7 @@ fn envelopes_round_trip_across_partitions_and_restart() {
     let dir = TempDir::new().unwrap();
     let catalog = catalog(4);
     let stream = &catalog.definitions()[0];
-    let (mut logs, replay) = PartitionLogSet::open(dir.path(), &catalog, 220).unwrap();
+    let (logs, replay) = PartitionLogSet::open(dir.path(), &catalog, 220).unwrap();
     assert!(replay.is_empty());
 
     let headers = [MessageHeader {
@@ -94,11 +94,39 @@ fn envelopes_round_trip_across_partitions_and_restart() {
 }
 
 #[test]
+fn blocked_partition_does_not_serialize_an_independent_partition() {
+    let dir = TempDir::new().unwrap();
+    let catalog = catalog(2);
+    let stream = &catalog.definitions()[0];
+    let (logs, _) = PartitionLogSet::open(dir.path(), &catalog, 4096).unwrap();
+    let logs = std::sync::Arc::new(logs);
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let blocked = logs.clone();
+    let holder = std::thread::spawn(move || {
+        blocked.with_partition_lock_for_test("orders", PartitionId(0), || {
+            ready_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        });
+    });
+    ready_rx.recv().unwrap();
+
+    let mut independent = request(stream, None, &[]);
+    independent.partition_hint = Some(PartitionId(1));
+    let appended = logs.append(independent).unwrap();
+    assert_eq!(appended.partition, PartitionId(1));
+    assert_eq!(appended.offset, 0);
+
+    release_tx.send(()).unwrap();
+    holder.join().unwrap();
+}
+
+#[test]
 fn torn_active_tail_is_truncated_and_index_is_rebuilt() {
     let dir = TempDir::new().unwrap();
     let catalog = catalog(1);
     let stream = &catalog.definitions()[0];
-    let (mut logs, _) = PartitionLogSet::open(dir.path(), &catalog, 4096).unwrap();
+    let (logs, _) = PartitionLogSet::open(dir.path(), &catalog, 4096).unwrap();
     let expected = logs.append(request(stream, None, &[])).unwrap();
     logs.flush().unwrap();
     drop(logs);
@@ -126,7 +154,7 @@ fn sealed_checksum_corruption_is_reported() {
     let dir = TempDir::new().unwrap();
     let catalog = catalog(1);
     let stream = &catalog.definitions()[0];
-    let (mut logs, _) = PartitionLogSet::open(dir.path(), &catalog, 1).unwrap();
+    let (logs, _) = PartitionLogSet::open(dir.path(), &catalog, 1).unwrap();
     logs.append(request(stream, None, &[])).unwrap();
     logs.append(request(stream, None, &[])).unwrap();
     logs.flush().unwrap();
@@ -148,7 +176,7 @@ fn committed_envelopes_are_immutable() {
     let dir = TempDir::new().unwrap();
     let catalog = catalog(1);
     let stream = &catalog.definitions()[0];
-    let (mut logs, _) = PartitionLogSet::open(dir.path(), &catalog, 4096).unwrap();
+    let (logs, _) = PartitionLogSet::open(dir.path(), &catalog, 4096).unwrap();
     let committed = logs.append(request(stream, None, &[])).unwrap();
     logs.append_committed(committed.clone()).unwrap();
 
@@ -163,7 +191,7 @@ fn rewriting_a_partition_removes_an_uncommitted_suffix() {
     let dir = TempDir::new().unwrap();
     let catalog = catalog(1);
     let stream = &catalog.definitions()[0];
-    let (mut logs, _) = PartitionLogSet::open(dir.path(), &catalog, 4096).unwrap();
+    let (logs, _) = PartitionLogSet::open(dir.path(), &catalog, 4096).unwrap();
     let first = logs.append(request(stream, None, &[])).unwrap();
     let mut second_request = request(stream, None, &[]);
     second_request.payload = b"uncommitted";
@@ -181,7 +209,7 @@ fn sealed_subject_index_matches_ordered_full_scan_results() {
     let dir = TempDir::new().unwrap();
     let catalog = catalog(1);
     let stream = &catalog.definitions()[0];
-    let (mut logs, _) = PartitionLogSet::open(dir.path(), &catalog, 1).unwrap();
+    let (logs, _) = PartitionLogSet::open(dir.path(), &catalog, 1).unwrap();
     let subjects = [
         "orders.created",
         "orders.eu.created",
@@ -213,7 +241,7 @@ fn missing_and_corrupt_subject_indexes_fall_back_and_rebuild() {
     let dir = TempDir::new().unwrap();
     let catalog = catalog(1);
     let stream = &catalog.definitions()[0];
-    let (mut logs, _) = PartitionLogSet::open(dir.path(), &catalog, 1).unwrap();
+    let (logs, _) = PartitionLogSet::open(dir.path(), &catalog, 1).unwrap();
     logs.append(request_for_subject(stream, "orders.created"))
         .unwrap();
     logs.append(request_for_subject(stream, "orders.updated"))
@@ -247,7 +275,7 @@ fn benchmark_sealed_subject_index_exact_star_and_tail_filters() {
     let dir = TempDir::new().unwrap();
     let catalog = catalog(1);
     let stream = &catalog.definitions()[0];
-    let (mut logs, _) = PartitionLogSet::open(dir.path(), &catalog, 512 * 1024).unwrap();
+    let (logs, _) = PartitionLogSet::open(dir.path(), &catalog, 512 * 1024).unwrap();
     let subjects = (0..10_000)
         .map(|id| format!("orders.{}.event", id % 1_000))
         .collect::<Vec<_>>();
@@ -286,7 +314,7 @@ fn age_retention_rewrites_prefix_and_preserves_next_offset() {
     definition.retention.max_age_ms = Some(10);
     let catalog = StreamCatalog::new(vec![definition]).unwrap();
     let stream = &catalog.definitions()[0];
-    let (mut logs, _) = PartitionLogSet::open(dir.path(), &catalog, 256).unwrap();
+    let (logs, _) = PartitionLogSet::open(dir.path(), &catalog, 256).unwrap();
     let mut envelopes = Vec::new();
     for timestamp_ms in [0, 10, 20] {
         let mut request = request(stream, None, &[]);
@@ -303,7 +331,7 @@ fn age_retention_rewrites_prefix_and_preserves_next_offset() {
     assert_eq!(envelopes[0].offset, 2);
     drop(logs);
 
-    let (mut logs, replay) = PartitionLogSet::open(dir.path(), &catalog, 256).unwrap();
+    let (logs, replay) = PartitionLogSet::open(dir.path(), &catalog, 256).unwrap();
     assert_eq!(replay, envelopes);
     let appended = logs.append(request(stream, None, &[])).unwrap();
     assert_eq!(appended.offset, 3);
@@ -314,7 +342,7 @@ fn byte_retention_keeps_newest_records_within_limit() {
     let dir = TempDir::new().unwrap();
     let base_catalog = catalog(1);
     let stream = &base_catalog.definitions()[0];
-    let (mut logs, _) = PartitionLogSet::open(dir.path(), &base_catalog, 4096).unwrap();
+    let (logs, _) = PartitionLogSet::open(dir.path(), &base_catalog, 4096).unwrap();
     let mut envelopes = Vec::new();
     for payload in [b"first".as_slice(), b"second", b"third"] {
         let mut request = request(stream, None, &[]);
@@ -350,7 +378,7 @@ fn combined_retention_can_remove_every_record_without_reusing_offsets() {
     definition.retention.max_bytes = Some(1);
     let catalog = StreamCatalog::new(vec![definition]).unwrap();
     let stream = &catalog.definitions()[0];
-    let (mut logs, _) = PartitionLogSet::open(dir.path(), &catalog, 4096).unwrap();
+    let (logs, _) = PartitionLogSet::open(dir.path(), &catalog, 4096).unwrap();
     let first = logs.append(request(stream, None, &[])).unwrap();
     let mut envelopes = vec![first];
 
@@ -359,7 +387,7 @@ fn combined_retention_can_remove_every_record_without_reusing_offsets() {
     assert!(envelopes.is_empty());
     drop(logs);
 
-    let (mut logs, replay) = PartitionLogSet::open(dir.path(), &catalog, 4096).unwrap();
+    let (logs, replay) = PartitionLogSet::open(dir.path(), &catalog, 4096).unwrap();
     assert!(replay.is_empty());
     assert_eq!(logs.append(request(stream, None, &[])).unwrap().offset, 1);
 }
@@ -371,7 +399,7 @@ fn repeated_byte_retention_reaches_a_bounded_physical_steady_state() {
     definition.retention.max_bytes = Some(512);
     let catalog = StreamCatalog::new(vec![definition]).unwrap();
     let stream = &catalog.definitions()[0];
-    let (mut logs, _) = PartitionLogSet::open(dir.path(), &catalog, 256).unwrap();
+    let (logs, _) = PartitionLogSet::open(dir.path(), &catalog, 256).unwrap();
     let mut envelopes = Vec::new();
     let payload = [b'x'; 128];
     for id in 0..100_u64 {

@@ -99,19 +99,17 @@ impl Broker {
     }
 
     pub(super) async fn sync_from_cluster(&self, cluster: &ClusterRuntime) -> Result<()> {
+        let _storage_operation = self.storage_gate.read().await;
         let state = cluster.durable_state();
         let mut inner = self.inner.lock().await;
-        inner.sync_durable_state(state, &self.config.streams)
+        inner.sync_durable_state(&self.partition_logs, state, &self.config.streams)
     }
 
     pub(super) async fn sync_route_interests(&self) {
         let Some(route_mesh) = &self.route_mesh else {
             return;
         };
-        let interests = {
-            let inner = self.inner.lock().await;
-            inner.route_interests()
-        };
+        let interests = self.transient.lock().await.route_interests();
         route_mesh.set_local_interests(interests).await;
     }
 

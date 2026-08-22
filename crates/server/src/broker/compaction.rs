@@ -64,7 +64,7 @@ pub(super) fn compact_stream_records(
     });
 }
 
-impl Inner {
+impl DurableBrokerState {
     pub(super) fn apply_stream_compaction(&mut self, catalog: &crate::stream::StreamCatalog) {
         compact_stream_records(&mut self.messages, catalog);
         self.partition_sequences

@@ -62,13 +62,7 @@ async fn transient_subscription_quotas_reject_without_state_and_release() {
         .expect_err_contains("transient subscription quota exceeded")
         .await;
     assert_eq!(
-        scenario
-            .broker()
-            .inner
-            .lock()
-            .await
-            .transient_subscriptions
-            .len(),
+        scenario.broker().transient.lock().await.subscriptions.len(),
         1
     );
 
@@ -76,13 +70,7 @@ async fn transient_subscription_quotas_reject_without_state_and_release() {
     second.write_line("SUB _INBOX.two.a sid-2 @latest").await;
     second.ping_roundtrip().await;
     assert_eq!(
-        scenario
-            .broker()
-            .inner
-            .lock()
-            .await
-            .transient_subscriptions
-            .len(),
+        scenario.broker().transient.lock().await.subscriptions.len(),
         2
     );
     second.write_line("SUB _INBOX.two.b sid-3 @latest").await;
@@ -98,13 +86,7 @@ async fn transient_subscription_quotas_reject_without_state_and_release() {
     third.write_line("SUB _INBOX.three.a sid-4 @latest").await;
     third.ping_roundtrip().await;
     assert_eq!(
-        scenario
-            .broker()
-            .inner
-            .lock()
-            .await
-            .transient_subscriptions
-            .len(),
+        scenario.broker().transient.lock().await.subscriptions.len(),
         2
     );
     second.disconnect().await;
@@ -191,7 +173,15 @@ async fn configured_idle_client_is_closed_at_deadline() {
         .unwrap()
         .unwrap_err();
     assert!(err.to_string().contains("client idle read timed out"));
-    assert!(scenario.broker().inner.lock().await.clients.is_empty());
+    assert!(
+        scenario
+            .broker()
+            .connections
+            .lock()
+            .await
+            .clients
+            .is_empty()
+    );
 }
 
 #[tokio::test]

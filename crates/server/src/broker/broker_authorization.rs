@@ -28,8 +28,8 @@ impl Broker {
         if !self.config.auth.enabled {
             return Ok(());
         }
-        let inner = self.inner.lock().await;
-        let client = inner
+        let connections = self.connections.lock().await;
+        let client = connections
             .clients
             .get(&connection_id)
             .ok_or_else(|| BrokerError::msg("unknown connection"))?;
@@ -74,12 +74,13 @@ impl Broker {
         if !self.config.auth.enabled {
             return Ok(());
         }
-        let inner = self.inner.lock().await;
-        let client = inner
+        let connections = self.connections.lock().await;
+        let client = connections
             .clients
             .get(&connection_id)
             .ok_or_else(|| BrokerError::msg("unknown connection"))?;
         crate::broker_ensure!(client.authenticated, "authentication required");
+        let inner = self.inner.lock().await;
         let consumer = inner
             .consumers
             .get(&ack.consumer_id)

@@ -12,6 +12,7 @@ async fn keyed_qos_publish_encodes_partition_key_and_waits_for_commit_ack() {
         inbox_counter: 0,
         durable: true,
         push_credit_messages: 1,
+        pending_messages: VecDeque::new(),
     };
     let server = tokio::spawn(async move {
         let mut server = tokio::io::BufReader::new(server_io);
@@ -45,6 +46,37 @@ async fn keyed_qos_publish_encodes_partition_key_and_waits_for_commit_ack() {
         .await
         .unwrap();
     assert_eq!(ack.offset, Some(4));
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn ping_roundtrip_buffers_delivery_that_arrives_before_pong() {
+    let (client_io, server_io) = tokio::io::duplex(1024);
+    let mut client = Client {
+        stream: BufReader::new(Box::new(client_io)),
+        max_payload: 1024,
+        inbox_prefix: "_INBOX.test".to_string(),
+        inbox_counter: 0,
+        durable: true,
+        push_credit_messages: 1,
+        pending_messages: VecDeque::new(),
+    };
+    let server = tokio::spawn(async move {
+        let mut server = tokio::io::BufReader::new(server_io);
+        let mut ping = String::new();
+        server.read_line(&mut ping).await.unwrap();
+        assert_eq!(ping, "PING\r\n");
+        server
+            .get_mut()
+            .write_all(b"MSG orders.created sid1 5\r\nhello\r\nPONG\r\n")
+            .await
+            .unwrap();
+    });
+
+    client.ping_roundtrip().await.unwrap();
+    let message = client.next_message().await.unwrap();
+    assert_eq!(message.subject, "orders.created");
+    assert_eq!(message.payload, b"hello");
     server.await.unwrap();
 }
 

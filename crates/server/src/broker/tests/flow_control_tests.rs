@@ -25,9 +25,9 @@ async fn connect_rejects_server_limit_overflow_before_configuring_client() {
         .expect_err_contains("CONNECT max_in_flight exceeds server limit 1024")
         .await;
 
-    let inner = broker.inner.lock().await;
+    let connections = broker.connections.lock().await;
     assert_eq!(
-        inner
+        connections
             .clients
             .values()
             .filter(|client| client.configured)

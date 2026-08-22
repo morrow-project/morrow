@@ -2,7 +2,13 @@ use super::*;
 
 #[derive(Clone)]
 pub struct Broker {
-    pub(super) inner: Arc<Mutex<Inner>>,
+    pub(super) inner: Arc<Mutex<DurableBrokerState>>,
+    pub(super) wal: WalRuntime,
+    pub(super) partition_logs: Arc<PartitionLogSet>,
+    pub(super) storage_permits: Arc<tokio::sync::Semaphore>,
+    pub(super) storage_gate: Arc<tokio::sync::RwLock<()>>,
+    pub(super) connections: Arc<Mutex<ConnectionState>>,
+    pub(super) transient: Arc<Mutex<TransientState>>,
     pub(super) next_connection_id: Arc<AtomicU64>,
     pub(super) config: Config,
     pub(super) tls_acceptor: Option<TlsAcceptor>,

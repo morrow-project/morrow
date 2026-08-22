@@ -1,7 +1,13 @@
 use super::*;
 
-impl Inner {
-    pub(super) fn prepare_durable_deliveries(&mut self, now: u64) -> Result<Vec<Delivery>> {
+impl DurableBrokerState {
+    pub(super) fn prepare_durable_deliveries(
+        &mut self,
+        connections: &ConnectionState,
+        partition_logs: &PartitionLogSet,
+        middleware: &MiddlewareRuntime,
+        now: u64,
+    ) -> Result<Vec<Delivery>> {
         let mut deliveries = Vec::new();
         let mut consumer_ids = BTreeSet::new();
         let mut subjects = HashSet::new();
@@ -19,7 +25,7 @@ impl Inner {
         for consumer_id in consumer_ids {
             loop {
                 let Some((seq, connection_id, sid, attempt, deadline_ms)) =
-                    self.next_delivery_for(&consumer_id, now)
+                    self.next_delivery_for(&consumer_id, connections, partition_logs, now)
                 else {
                     break;
                 };
@@ -29,8 +35,7 @@ impl Inner {
                     }
                     continue;
                 };
-                let outcome = self
-                    .middleware
+                let outcome = middleware
                     .process(
                         MiddlewareStage::BeforeDeliver,
                         MiddlewareMessage {
@@ -100,7 +105,7 @@ impl Inner {
                         cursors,
                     })?;
                 }
-                if let Some(client) = self.clients.get(&connection_id) {
+                if let Some(client) = connections.clients.get(&connection_id) {
                     let frame = durable_message_frame(
                         &delivery_message,
                         &sid,
@@ -121,7 +126,6 @@ impl Inner {
                 }
             }
         }
-        self.wal.flush_due()?;
         Ok(deliveries)
     }
 
@@ -147,6 +151,8 @@ impl Inner {
     pub(super) fn next_delivery_for(
         &mut self,
         consumer_id: &str,
+        connections: &ConnectionState,
+        partition_logs: &PartitionLogSet,
         now: u64,
     ) -> Option<(u64, u64, String, u32, u64)> {
         let consumer = self.consumers.get_mut(consumer_id)?;
@@ -168,7 +174,7 @@ impl Inner {
                 &consumer.record.filter_subject,
                 &self.messages,
                 &self.partition_sequences,
-                &self.partition_logs,
+                partition_logs,
                 &leased,
             )
         }
@@ -184,7 +190,7 @@ impl Inner {
             .members
             .iter()
             .filter(|(connection_id, member)| {
-                self.clients.contains_key(connection_id)
+                connections.clients.contains_key(connection_id)
                     && member.credit_messages > 0
                     && member.credit_bytes >= payload_len
             })
@@ -202,6 +208,7 @@ impl Inner {
 
     pub(super) fn sync_durable_state(
         &mut self,
+        partition_logs: &PartitionLogSet,
         mut state: DurableState,
         catalog: &crate::stream::StreamCatalog,
     ) -> Result<()> {
@@ -211,7 +218,7 @@ impl Inner {
             else {
                 return true;
             };
-            !self.partition_logs.is_before_retention_floor(
+            !partition_logs.is_before_retention_floor(
                 stream,
                 crate::stream::PartitionId(partition),
                 offset,
@@ -257,7 +264,7 @@ impl Inner {
                 leader_epoch: record.leader_epoch,
                 legacy_seq: record.seq,
             };
-            self.partition_logs.append_committed(envelope)?;
+            partition_logs.append_committed(envelope)?;
             if is_new {
                 self.wal.append_partition_append(&PartitionAppendRecord {
                     seq: record.seq,
@@ -366,21 +373,6 @@ impl Inner {
         }
     }
 
-    pub(super) fn decrement_transient_subscription(&mut self, connection_id: u64, sid: &str) {
-        let key = (connection_id, sid.to_string());
-        let should_remove = self
-            .transient_subscriptions
-            .get_mut(&key)
-            .and_then(|subscription| decrement_remaining(&mut subscription.remaining_deliveries))
-            .unwrap_or(false);
-        if should_remove {
-            if let Some(subscription) = self.transient_subscriptions.remove(&key) {
-                self.transient_interest_index
-                    .remove(&subscription.subject, &key);
-            }
-        }
-    }
-
     pub(super) fn consume_durable_member(
         &mut self,
         consumer_id: &str,
@@ -401,6 +393,20 @@ impl Inner {
             if let Some(consumer) = self.consumers.get_mut(consumer_id) {
                 consumer.members.remove(&connection_id);
             }
+        }
+    }
+}
+
+impl TransientState {
+    pub(super) fn decrement_subscription(&mut self, connection_id: u64, sid: &str) {
+        let key = (connection_id, sid.to_string());
+        let should_remove = self
+            .subscriptions
+            .get_mut(&key)
+            .and_then(|subscription| decrement_remaining(&mut subscription.remaining_deliveries))
+            .unwrap_or(false);
+        if should_remove && let Some(subscription) = self.subscriptions.remove(&key) {
+            self.interest_index.remove(&subscription.subject, &key);
         }
     }
 }

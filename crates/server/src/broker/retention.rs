@@ -1,22 +1,25 @@
 use super::*;
 use crate::partition_log::RetentionChange;
 
-impl Inner {
+impl DurableBrokerState {
     pub(super) fn enforce_stream_retention(
         &mut self,
+        partition_logs: &PartitionLogSet,
         catalog: &crate::stream::StreamCatalog,
         now_ms: u64,
     ) -> Result<()> {
-        let changes = self
-            .partition_logs
-            .retention_changes(catalog.definitions(), now_ms);
+        let changes = partition_logs.retention_changes(catalog.definitions(), now_ms);
         for change in &changes {
-            self.apply_retention_change(change)?;
+            self.apply_retention_change(partition_logs, change)?;
         }
         Ok(())
     }
 
-    fn apply_retention_change(&mut self, change: &RetentionChange) -> Result<()> {
+    fn apply_retention_change(
+        &mut self,
+        partition_logs: &PartitionLogSet,
+        change: &RetentionChange,
+    ) -> Result<()> {
         let removed = self
             .messages
             .iter()
@@ -39,7 +42,7 @@ impl Inner {
             })
             .map(message_envelope)
             .collect::<Result<Vec<_>>>()?;
-        self.partition_logs.retain_partition(change, &retained)?;
+        partition_logs.retain_partition(change, &retained)?;
         self.messages.retain(|seq, _| !removed.contains(seq));
         self.partition_sequences
             .retain(|_, seq| !removed.contains(seq));

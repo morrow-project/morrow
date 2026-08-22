@@ -330,6 +330,9 @@ cargo run --release -p server
 The WAL directory is created automatically. Stop the broker with `Ctrl-C`; it
 flushes the WAL before exiting.
 
+Storage locking, partition ordering, worker backpressure, and acknowledgement
+boundaries are described in [docs/storage-concurrency.md](docs/storage-concurrency.md).
+
 ## Workspace Layout
 
 - `crates/server`: the broker runtime, WAL, TLS, and JSON configuration.

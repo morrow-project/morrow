@@ -1,18 +1,23 @@
 use super::*;
 
-pub(super) struct Inner {
-    pub(super) wal: Wal,
-    pub(super) partition_logs: crate::partition_log::PartitionLogSet,
-    pub(super) clients: HashMap<u64, Client>,
+pub(super) struct DurableBrokerState {
+    pub(super) wal: WalRuntime,
     pub(super) consumers: HashMap<String, Consumer>,
-    pub(super) transient_subscriptions: HashMap<(u64, String), TransientSubscription>,
-    pub(super) transient_interest_index: subject::SubjectTrie<(u64, String)>,
     pub(super) consumer_interest_index: subject::SubjectTrie<String>,
     pub(super) messages: HashMap<u64, PublishRecord>,
     pub(super) partition_sequences: HashMap<(String, u32, u64), u64>,
-    pub(super) middleware: MiddlewareRuntime,
 }
 
+pub(super) struct ConnectionState {
+    pub(super) clients: HashMap<u64, Client>,
+}
+
+pub(super) struct TransientState {
+    pub(super) subscriptions: HashMap<(u64, String), TransientSubscription>,
+    pub(super) interest_index: subject::SubjectTrie<(u64, String)>,
+}
+
+#[derive(Clone)]
 pub(super) struct Client {
     pub(super) sender: OutboundQueue,
     pub(super) remote_addr: Option<SocketAddr>,

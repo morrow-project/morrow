@@ -1,6 +1,10 @@
 use super::*;
 
 impl Wal {
+    pub(crate) fn next_publish_seq(&self) -> u64 {
+        self.next_seq
+    }
+
     pub fn reserve_publish_seq(&mut self) -> u64 {
         let seq = self.next_seq;
         self.next_seq = self.next_seq.saturating_add(1);

@@ -122,12 +122,12 @@ impl Broker {
         sender: OutboundQueue,
         remote_addr: Option<SocketAddr>,
     ) -> Result<()> {
-        let mut inner = self.inner.lock().await;
-        if inner.clients.len() >= self.config.quotas.max_connections {
+        let mut connections = self.connections.lock().await;
+        if connections.clients.len() >= self.config.quotas.max_connections {
             self.quotas.reject_state();
             crate::broker_bail!("connection quota exceeded");
         }
-        inner.clients.insert(
+        connections.clients.insert(
             id,
             Client {
                 sender,
@@ -185,8 +185,8 @@ impl Broker {
             matches!(protocol_version, 1 | 2),
             "unsupported protocol version {protocol_version}; supported versions are 1 and 2"
         );
-        let mut inner = self.inner.lock().await;
-        let client = inner
+        let mut connections = self.connections.lock().await;
+        let client = connections
             .clients
             .get(&id)
             .ok_or_else(|| BrokerError::msg("unknown connection"))?;
@@ -217,19 +217,22 @@ impl Broker {
             (durable_id, false)
         };
         if let Some(identity) = durable_id.as_deref() {
-            let connections = inner
+            let identity_connections = connections
                 .clients
                 .values()
                 .filter(|client| {
                     client.configured && client.durable_id.as_deref() == Some(identity)
                 })
                 .count();
-            if connections >= self.config.quotas.max_connections_per_identity {
+            if identity_connections >= self.config.quotas.max_connections_per_identity {
                 self.quotas.reject_state();
                 crate::broker_bail!("connection quota exceeded for identity");
             }
         }
-        let client = inner.clients.get_mut(&id).expect("checked client exists");
+        let client = connections
+            .clients
+            .get_mut(&id)
+            .expect("checked client exists");
         client.authenticated = authenticated;
         client.verbose = verbose || self.config.verbose;
         client.durable_id = durable_id;
@@ -260,19 +263,15 @@ impl Broker {
         }
 
         let durable_record = {
-            let mut inner = self.inner.lock().await;
-            let (durable_id, ack_timeout_ms, max_in_flight, protocol_version) = {
-                let client = inner
-                    .clients
-                    .get(&connection_id)
-                    .ok_or_else(|| BrokerError::msg("unknown connection"))?;
-                (
-                    client.durable_id.clone(),
-                    client.ack_timeout_ms,
-                    client.max_in_flight,
-                    client.protocol_version,
-                )
-            };
+            let connections = self.connections.lock().await;
+            let client = connections
+                .clients
+                .get(&connection_id)
+                .ok_or_else(|| BrokerError::msg("unknown connection"))?;
+            let durable_id = client.durable_id.clone();
+            let ack_timeout_ms = client.ack_timeout_ms;
+            let max_in_flight = client.max_in_flight;
+            let protocol_version = client.protocol_version;
             if is_inbox_subscription(&sub_subject) || durable_id.is_none() {
                 crate::broker_ensure!(
                     start == protocol::StartPosition::Latest,
@@ -283,13 +282,14 @@ impl Broker {
                     "transient subscriptions do not support queue groups"
                 );
                 let key = (connection_id, sid.clone());
-                if !inner.transient_subscriptions.contains_key(&key) {
+                let mut transient = self.transient.lock().await;
+                if !transient.subscriptions.contains_key(&key) {
                     let identity_count = if let Some(identity) = durable_id.as_deref() {
-                        inner
-                            .transient_subscriptions
+                        transient
+                            .subscriptions
                             .keys()
                             .filter(|(client_id, _)| {
-                                inner
+                                connections
                                     .clients
                                     .get(client_id)
                                     .and_then(|client| client.durable_id.as_deref())
@@ -297,13 +297,13 @@ impl Broker {
                             })
                             .count()
                     } else {
-                        inner
-                            .transient_subscriptions
+                        transient
+                            .subscriptions
                             .keys()
                             .filter(|(client_id, _)| *client_id == connection_id)
                             .count()
                     };
-                    if inner.transient_subscriptions.len()
+                    if transient.subscriptions.len()
                         >= self.config.quotas.max_transient_subscriptions
                         || identity_count
                             >= self.config.quotas.max_transient_subscriptions_per_identity
@@ -312,16 +312,12 @@ impl Broker {
                         crate::broker_bail!("transient subscription quota exceeded");
                     }
                 }
-                if let Some(existing) = inner.transient_subscriptions.get(&key) {
+                if let Some(existing) = transient.subscriptions.get(&key) {
                     let existing_subject = existing.subject.clone();
-                    inner
-                        .transient_interest_index
-                        .remove(&existing_subject, &key);
+                    transient.interest_index.remove(&existing_subject, &key);
                 }
-                inner
-                    .transient_interest_index
-                    .insert(&sub_subject, key.clone());
-                inner.transient_subscriptions.insert(
+                transient.interest_index.insert(&sub_subject, key.clone());
+                transient.subscriptions.insert(
                     key,
                     TransientSubscription {
                         subject: sub_subject,
@@ -332,6 +328,7 @@ impl Broker {
                 None
             } else {
                 if let Some(durable_id) = &durable_id {
+                    let inner = self.inner.lock().await;
                     let consumer_id = consumer_id(durable_id, queue.as_deref(), &sub_subject, &sid);
                     if !inner.consumers.contains_key(&consumer_id) {
                         let identity_consumers = inner
@@ -339,7 +336,7 @@ impl Broker {
                             .values()
                             .filter(|consumer| {
                                 consumer.members.keys().any(|member_id| {
-                                    inner
+                                    connections
                                         .clients
                                         .get(member_id)
                                         .and_then(|client| client.durable_id.as_deref())
@@ -402,8 +399,8 @@ impl Broker {
                     consumer_id: record.consumer_id.clone(),
                     cursors,
                 })?;
-                inner.wal.flush_due()?;
             }
+            self.wal.flush_due().await?;
             let mut inner = self.inner.lock().await;
             let consumer = inner.upsert_consumer(record, &self.config.streams);
             consumer.members.insert(
@@ -430,8 +427,8 @@ impl Broker {
         if !self.config.auth.enabled {
             return Ok(());
         }
-        let inner = self.inner.lock().await;
-        let client = inner
+        let connections = self.connections.lock().await;
+        let client = connections
             .clients
             .get(&connection_id)
             .ok_or_else(|| BrokerError::msg("unknown connection"))?;
@@ -480,10 +477,10 @@ impl Broker {
                 "UNSUB max_messages must be greater than zero"
             );
         }
-        let mut inner = self.inner.lock().await;
         let mut found = false;
-        if let Some(subscription) = inner
-            .transient_subscriptions
+        let mut transient = self.transient.lock().await;
+        if let Some(subscription) = transient
+            .subscriptions
             .get_mut(&(connection_id, sid.to_string()))
         {
             found = true;
@@ -492,10 +489,12 @@ impl Broker {
             } else {
                 let key = (connection_id, sid.to_string());
                 let subject = subscription.subject.clone();
-                inner.transient_subscriptions.remove(&key);
-                inner.transient_interest_index.remove(&subject, &key);
+                transient.subscriptions.remove(&key);
+                transient.interest_index.remove(&subject, &key);
             }
         }
+        drop(transient);
+        let mut inner = self.inner.lock().await;
         for consumer in inner.consumers.values_mut() {
             if consumer
                 .members

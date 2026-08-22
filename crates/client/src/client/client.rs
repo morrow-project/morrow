@@ -12,6 +12,7 @@ impl Client {
             inbox_counter: 0,
             durable: false,
             push_credit_messages: 0,
+            pending_messages: VecDeque::new(),
         })
     }
 
@@ -38,6 +39,7 @@ impl Client {
             inbox_counter: 0,
             durable: false,
             push_credit_messages: 0,
+            pending_messages: VecDeque::new(),
         })
     }
 
@@ -363,9 +365,11 @@ impl Client {
     pub async fn ping_roundtrip(&mut self) -> Result<()> {
         self.ping().await?;
         loop {
-            match self.next_frame().await? {
+            match self.read_frame().await? {
                 Some(ServerFrame::Pong) => return Ok(()),
                 Some(ServerFrame::Ok) => {}
+                Some(ServerFrame::Message(message)) => self.pending_messages.push_back(message),
+                Some(ServerFrame::Err(err)) => return Err(ClientError::msg(err)),
                 Some(frame) => {
                     return Err(ClientError::msg(format!(
                         "expected PONG during ping roundtrip, got {frame:?}"
@@ -377,6 +381,9 @@ impl Client {
     }
 
     pub async fn next_message(&mut self) -> Result<Message> {
+        if let Some(message) = self.pending_messages.pop_front() {
+            return Ok(message);
+        }
         loop {
             match self.next_frame().await? {
                 Some(ServerFrame::Message(message)) => return Ok(message),
@@ -390,6 +397,13 @@ impl Client {
     }
 
     pub async fn next_frame(&mut self) -> Result<Option<ServerFrame>> {
+        if let Some(message) = self.pending_messages.pop_front() {
+            return Ok(Some(ServerFrame::Message(message)));
+        }
+        self.read_frame().await
+    }
+
+    async fn read_frame(&mut self) -> Result<Option<ServerFrame>> {
         let mut line = Vec::new();
         let read = self
             .stream

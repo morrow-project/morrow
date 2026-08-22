@@ -46,6 +46,7 @@ const CLUSTER_LOG_SCAN_INTERVAL_MS: u64 = 500;
 const UNAUTHENTICATED_READ_TIMEOUT_MS: u64 = 5_000;
 const ROUTE_FRAME_READ_TIMEOUT_MS: u64 = 5_000;
 const MAX_ROUTE_FRAME: usize = 2 * 1024 * 1024;
+const MAX_BLOCKING_STORAGE_OPS: usize = 64;
 
 mod broker;
 mod broker_authorization;
@@ -73,6 +74,7 @@ mod route_state;
 mod route_tls;
 mod state;
 mod subject_helpers;
+mod wal_runtime;
 
 pub use self::broker::Broker;
 #[allow(unused_imports)]
@@ -80,6 +82,7 @@ use self::{
     cluster_runtime::*, compaction::*, consumer::*, fake_cluster::*, fake_cluster_types::*,
     hooks::*, http::*, inner_admin::*, inner_delivery::*, manual_clock::*, pull_consumer::*,
     retention::*, route_mesh::*, route_state::*, route_tls::*, state::*, subject_helpers::*,
+    wal_runtime::*,
 };
 
 #[cfg(test)]

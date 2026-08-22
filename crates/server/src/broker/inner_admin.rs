@@ -1,21 +1,17 @@
 use super::*;
 
-impl Inner {
-    pub(super) fn connections_response(&self) -> ConnectionsResponse {
+impl ConnectionState {
+    pub(super) fn response(
+        &self,
+        durable_counts: &HashMap<u64, usize>,
+        transient_counts: &HashMap<u64, usize>,
+    ) -> ConnectionsResponse {
         let mut connections = self
             .clients
             .iter()
             .map(|(id, client)| {
-                let subscriptions = self
-                    .consumers
-                    .values()
-                    .filter(|consumer| consumer.members.contains_key(id))
-                    .count();
-                let transient_subscriptions = self
-                    .transient_subscriptions
-                    .keys()
-                    .filter(|(connection_id, _)| connection_id == id)
-                    .count();
+                let subscriptions = durable_counts.get(id).copied().unwrap_or_default();
+                let transient_subscriptions = transient_counts.get(id).copied().unwrap_or_default();
                 ConnectionResponse {
                     id: *id,
                     remote_addr: client.remote_addr.map(|addr| addr.to_string()),
@@ -37,7 +33,9 @@ impl Inner {
             connections,
         }
     }
+}
 
+impl DurableBrokerState {
     pub(super) fn subscriptions_response(&self) -> SubscriptionsResponse {
         let mut durable_consumers = self
             .consumers
@@ -84,35 +82,11 @@ impl Inner {
             })
             .collect::<Vec<_>>();
         durable_consumers.sort_by(|left, right| left.consumer_id.cmp(&right.consumer_id));
-        let mut transient_subscriptions = self
-            .transient_subscriptions
-            .iter()
-            .map(
-                |((connection_id, _), subscription)| TransientSubscriptionResponse {
-                    connection_id: *connection_id,
-                    sid: subscription.sid.clone(),
-                    subject: subscription.subject.clone(),
-                    remaining_deliveries: subscription.remaining_deliveries,
-                },
-            )
-            .collect::<Vec<_>>();
-        transient_subscriptions
-            .sort_by_key(|subscription| (subscription.connection_id, subscription.sid.clone()));
+        let transient_subscriptions = Vec::new();
         SubscriptionsResponse {
             durable_consumers,
             transient_subscriptions,
         }
-    }
-
-    pub(super) fn route_interests(&self) -> Vec<String> {
-        let mut interests = self
-            .transient_subscriptions
-            .values()
-            .map(|subscription| subscription.subject.clone())
-            .collect::<Vec<_>>();
-        interests.sort();
-        interests.dedup();
-        interests
     }
 
     pub(super) fn replayed_consumers(&self) -> Vec<ReplayedConsumer> {
@@ -179,22 +153,54 @@ impl Inner {
         consumer.record = record;
         consumer
     }
+}
+
+impl TransientState {
+    pub(super) fn subscriptions_response(&self) -> Vec<TransientSubscriptionResponse> {
+        let mut subscriptions = self
+            .subscriptions
+            .iter()
+            .map(
+                |((connection_id, _), subscription)| TransientSubscriptionResponse {
+                    connection_id: *connection_id,
+                    sid: subscription.sid.clone(),
+                    subject: subscription.subject.clone(),
+                    remaining_deliveries: subscription.remaining_deliveries,
+                },
+            )
+            .collect::<Vec<_>>();
+        subscriptions
+            .sort_by_key(|subscription| (subscription.connection_id, subscription.sid.clone()));
+        subscriptions
+    }
+
+    pub(super) fn route_interests(&self) -> Vec<String> {
+        let mut interests = self
+            .subscriptions
+            .values()
+            .map(|subscription| subscription.subject.clone())
+            .collect::<Vec<_>>();
+        interests.sort();
+        interests.dedup();
+        interests
+    }
 
     pub(super) fn prepare_transient_deliveries(
         &mut self,
+        connections: &ConnectionState,
         subject_name: &str,
         reply_to: Option<&str>,
         headers: &[(String, String)],
         payload: &[u8],
     ) -> Vec<Delivery> {
         let matched = self
-            .transient_interest_index
+            .interest_index
             .matching(subject_name)
             .into_iter()
             .filter_map(|key| {
-                let subscription = self.transient_subscriptions.get(&key)?;
+                let subscription = self.subscriptions.get(&key)?;
                 let (connection_id, _) = &key;
-                let client = self.clients.get(connection_id)?;
+                let client = connections.clients.get(connection_id)?;
                 let header_refs = headers
                     .iter()
                     .map(|(name, value)| (name.as_str(), value.as_str()))
@@ -221,7 +227,7 @@ impl Inner {
             })
             .collect::<Vec<_>>();
         for (connection_id, sid, _) in &matched {
-            self.decrement_transient_subscription(*connection_id, sid);
+            self.decrement_subscription(*connection_id, sid);
         }
         matched
             .into_iter()
@@ -232,11 +238,39 @@ impl Inner {
 
 impl Broker {
     pub(super) async fn connections_response(&self) -> ConnectionsResponse {
-        self.inner.lock().await.connections_response()
+        let durable_counts = {
+            let inner = self.inner.lock().await;
+            let mut counts = HashMap::new();
+            for consumer in inner.consumers.values() {
+                for connection_id in consumer.members.keys() {
+                    *counts.entry(*connection_id).or_default() += 1;
+                }
+            }
+            counts
+        };
+        let transient_counts = {
+            let transient = self.transient.lock().await;
+            let mut counts = HashMap::new();
+            for connection_id in transient
+                .subscriptions
+                .keys()
+                .map(|(connection_id, _)| connection_id)
+            {
+                *counts.entry(*connection_id).or_default() += 1;
+            }
+            counts
+        };
+        self.connections
+            .lock()
+            .await
+            .response(&durable_counts, &transient_counts)
     }
 
     pub(super) async fn subscriptions_response(&self) -> SubscriptionsResponse {
-        self.inner.lock().await.subscriptions_response()
+        let transient_subscriptions = self.transient.lock().await.subscriptions_response();
+        let mut response = self.inner.lock().await.subscriptions_response();
+        response.transient_subscriptions = transient_subscriptions;
+        response
     }
 
     pub(super) async fn wal_status_response(&self) -> WalStatus {
@@ -247,7 +281,7 @@ impl Broker {
     }
 
     pub(super) async fn streams_response(&self) -> StreamsResponse {
-        let inner = self.inner.lock().await;
+        let partition_logs = &self.partition_logs;
         let streams = self
             .config
             .streams
@@ -256,7 +290,7 @@ impl Broker {
             .map(|definition| {
                 let partitions = (0..definition.partitions)
                     .map(|partition| {
-                        inner.partition_logs.retention_status(
+                        partition_logs.retention_status(
                             definition.name.as_str(),
                             crate::stream::PartitionId(partition),
                         )

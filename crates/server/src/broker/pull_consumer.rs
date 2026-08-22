@@ -37,12 +37,15 @@ impl Broker {
         let (consumer_id, ack_timeout_ms, max_in_flight) =
             self.pull_consumer_context(connection_id, &name).await?;
         {
-            let inner = self.inner.lock().await;
-            let identity = inner
+            let identity = self
+                .connections
+                .lock()
+                .await
                 .clients
                 .get(&connection_id)
-                .and_then(|client| client.durable_id.as_deref())
+                .and_then(|client| client.durable_id.clone())
                 .ok_or_else(|| BrokerError::msg("durable identity required"))?;
+            let inner = self.inner.lock().await;
             let prefix = format!("pull-{}-", hex(identity.as_bytes()));
             let identity_consumers = inner
                 .consumers
@@ -101,7 +104,6 @@ impl Broker {
                 consumer_id: consumer_id.clone(),
                 cursors: cursors.clone(),
             })?;
-            inner.wal.flush_due()?;
             inner
                 .consumer_interest_index
                 .insert(&record.filter_subject, consumer_id.clone());
@@ -118,6 +120,8 @@ impl Broker {
                     delivered: 0,
                 },
             );
+            drop(inner);
+            self.wal.flush_due().await?;
         }
         self.send_to(connection_id, protocol::consumer_ok("CREATE", &name))
             .await
@@ -145,12 +149,13 @@ impl Broker {
         } else {
             let mut inner = self.inner.lock().await;
             inner.wal.append_consumer_delete(&consumer_id)?;
-            inner.wal.flush_due()?;
             if let Some(consumer) = inner.consumers.remove(&consumer_id) {
                 inner
                     .consumer_interest_index
                     .remove(&consumer.record.filter_subject, &consumer_id);
             }
+            drop(inner);
+            self.wal.flush_due().await?;
         }
         self.send_to(connection_id, protocol::consumer_ok("DELETE", &name))
             .await
@@ -262,14 +267,15 @@ impl Broker {
         max_bytes: usize,
         max_encoded_bytes: usize,
     ) -> Result<PullBatch> {
-        let mut inner = self.inner.lock().await;
-        inner.prepare_pull_batch(
+        let batch = self.inner.lock().await.prepare_pull_batch(
             consumer_id,
             max_messages,
             max_bytes,
             max_encoded_bytes,
             self.hooks.clock.now_ms(),
-        )
+        )?;
+        self.wal.flush_due().await?;
+        Ok(batch)
     }
 
     pub(super) async fn control_pull_delivery(
@@ -362,7 +368,6 @@ impl Broker {
             attempt: lease.attempt,
         };
         inner.wal.append_delivery_lease(&record)?;
-        inner.wal.flush_due()?;
         inner
             .consumers
             .get_mut(consumer_id)
@@ -371,6 +376,8 @@ impl Broker {
             .get_mut(&seq)
             .unwrap()
             .deadline_ms = deadline_ms;
+        drop(inner);
+        self.wal.flush_due().await?;
         Ok(())
     }
 
@@ -397,8 +404,8 @@ impl Broker {
         name: &str,
     ) -> Result<(String, u64, usize)> {
         protocol::validate_identifier("consumer name", name)?;
-        let inner = self.inner.lock().await;
-        let client = inner
+        let connections = self.connections.lock().await;
+        let client = connections
             .clients
             .get(&connection_id)
             .ok_or_else(|| BrokerError::msg("unknown connection"))?;
@@ -425,15 +432,16 @@ impl Broker {
         messages: usize,
         bytes: usize,
     ) -> Result<()> {
-        let mut inner = self.inner.lock().await;
-        let client = inner
+        let protocol_version = self
+            .connections
+            .lock()
+            .await
             .clients
             .get(&connection_id)
+            .map(|client| client.protocol_version)
             .ok_or_else(|| BrokerError::msg("unknown connection"))?;
-        crate::broker_ensure!(
-            client.protocol_version >= 2,
-            "CREDIT requires protocol version 2"
-        );
+        crate::broker_ensure!(protocol_version >= 2, "CREDIT requires protocol version 2");
+        let mut inner = self.inner.lock().await;
         let (member, max_messages) = inner
             .consumers
             .values_mut()
@@ -458,7 +466,7 @@ impl Broker {
     }
 }
 
-impl Inner {
+impl DurableBrokerState {
     fn prepare_pull_batch(
         &mut self,
         consumer_id: &str,
@@ -517,7 +525,6 @@ impl Inner {
             encoded_bytes = next_encoded_bytes;
             deliveries.push(PullDelivery { message, lease });
         }
-        self.wal.flush_due()?;
         Ok(PullBatch { deliveries, bytes })
     }
 

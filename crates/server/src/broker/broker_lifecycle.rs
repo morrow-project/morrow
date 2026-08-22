@@ -15,7 +15,7 @@ impl Broker {
         if let Some(cluster) = &config.cluster {
             wal.namespace_delivery_ids(cluster.node_id);
         }
-        let (mut partition_logs, mut envelopes) =
+        let (partition_logs, mut envelopes) =
             PartitionLogSet::open(&config.wal_dir, &config.streams, config.wal_segment_bytes)?;
         partition_logs.enforce_retention(&mut envelopes, &config.streams, hooks.clock.now_ms())?;
         let mut envelope_seqs = envelopes
@@ -152,18 +152,25 @@ impl Broker {
         };
         let quotas = Arc::new(crate::quota::QuotaRuntime::new(&config.quotas));
         let route_mesh = RouteMesh::from_config(&config, quotas.clone())?;
+        let wal = WalRuntime::new(wal);
         Ok(Self {
-            inner: Arc::new(Mutex::new(Inner {
-                wal,
-                partition_logs,
-                clients: HashMap::new(),
+            inner: Arc::new(Mutex::new(DurableBrokerState {
+                wal: wal.clone(),
                 consumers,
-                transient_subscriptions: HashMap::new(),
-                transient_interest_index: subject::SubjectTrie::default(),
                 consumer_interest_index,
                 messages: replay.messages,
                 partition_sequences,
-                middleware: hooks.middleware.clone(),
+            })),
+            wal,
+            partition_logs: Arc::new(partition_logs),
+            storage_permits: Arc::new(tokio::sync::Semaphore::new(MAX_BLOCKING_STORAGE_OPS)),
+            storage_gate: Arc::new(tokio::sync::RwLock::new(())),
+            connections: Arc::new(Mutex::new(ConnectionState {
+                clients: HashMap::new(),
+            })),
+            transient: Arc::new(Mutex::new(TransientState {
+                subscriptions: HashMap::new(),
+                interest_index: subject::SubjectTrie::default(),
             })),
             next_connection_id: Arc::new(AtomicU64::new(1)),
             config,
@@ -228,12 +235,25 @@ impl Broker {
     }
 
     pub async fn shutdown(&self) -> Result<()> {
-        let mut inner = self.inner.lock().await;
+        let _shutdown = self.storage_gate.write().await;
+        let inner = self.inner.lock().await;
+        let partition_logs = self.partition_logs.clone();
+        let permit = self
+            .storage_permits
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| BrokerError::msg("storage worker pool closed"))?;
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            partition_logs.flush()
+        })
+        .await
+        .map_err(|err| BrokerError::with_source("partition flush worker failed", err))??;
         let messages = inner.messages.values().cloned().collect::<Vec<_>>();
         let consumers = inner.replayed_consumers();
-        inner.partition_logs.flush()?;
-        inner.wal.checkpoint(messages, consumers)?;
-        inner.wal.flush()?;
+        self.wal.checkpoint(messages, consumers).await?;
+        self.wal.flush().await?;
         Ok(())
     }
 
@@ -336,15 +356,16 @@ impl Broker {
     }
 
     pub(super) async fn quotas_response(&self) -> QuotasResponse {
-        let inner = self.inner.lock().await;
+        let transient_subscriptions = self.transient.lock().await.subscriptions.len();
+        let durable_consumers = self.inner.lock().await.consumers.len();
         QuotasResponse {
             sockets: self.quotas.snapshot(),
             transient_subscriptions: StateQuotaUsage {
-                used: inner.transient_subscriptions.len(),
+                used: transient_subscriptions,
                 limit: self.config.quotas.max_transient_subscriptions,
             },
             durable_consumers: StateQuotaUsage {
-                used: inner.consumers.len(),
+                used: durable_consumers,
                 limit: self.config.quotas.max_durable_consumers,
             },
             outbound_bytes_per_connection_limit: self
@@ -475,8 +496,8 @@ impl Broker {
         );
         self.add_client(id, sender, remote_addr).await?;
         let nonce = {
-            let inner = self.inner.lock().await;
-            inner
+            let connections = self.connections.lock().await;
+            connections
                 .clients
                 .get(&id)
                 .and_then(|client| client.auth_nonce.clone())
@@ -548,7 +569,7 @@ impl Broker {
     }
 
     pub(super) async fn client_is_configured(&self, id: u64) -> bool {
-        self.inner
+        self.connections
             .lock()
             .await
             .clients

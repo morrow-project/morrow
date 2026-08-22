@@ -1,11 +1,15 @@
 use super::{log::PartitionLog, *};
 use crate::error::ResultExt;
+use std::sync::{
+    Mutex,
+    atomic::{AtomicU64, Ordering},
+};
 
 #[derive(Debug)]
 pub struct PartitionLogSet {
-    logs: HashMap<(String, PartitionId), PartitionLog>,
-    sticky: HashMap<String, u64>,
-    next_legacy_seq: u64,
+    logs: HashMap<(String, PartitionId), Mutex<PartitionLog>>,
+    sticky: Mutex<HashMap<String, u64>>,
+    next_legacy_seq: AtomicU64,
     pub truncations: u64,
 }
 
@@ -26,7 +30,10 @@ impl PartitionLogSet {
                 let partition = PartitionId(partition);
                 let (log, replay, repaired) =
                     PartitionLog::open(&root, &stream.name, partition, segment_bytes)?;
-                logs.insert((stream.name.as_str().to_string(), partition), log);
+                logs.insert(
+                    (stream.name.as_str().to_string(), partition),
+                    Mutex::new(log),
+                );
                 envelopes.extend(replay);
                 truncations += repaired;
             }
@@ -40,29 +47,29 @@ impl PartitionLogSet {
         Ok((
             Self {
                 logs,
-                sticky: HashMap::new(),
-                next_legacy_seq,
+                sticky: Mutex::new(HashMap::new()),
+                next_legacy_seq: AtomicU64::new(next_legacy_seq),
                 truncations,
             },
             envelopes,
         ))
     }
 
-    pub fn append(&mut self, request: AppendRequest<'_>) -> Result<MessageEnvelope> {
-        let sticky = self
-            .sticky
+    pub fn append(&self, request: AppendRequest<'_>) -> Result<MessageEnvelope> {
+        let mut sticky_values = self.sticky.lock().expect("partition sticky lock poisoned");
+        let sticky = sticky_values
             .entry(request.stream.name.as_str().to_string())
             .or_default();
         let partition = request.partition_hint.unwrap_or_else(|| {
             select_partition(request.stream, request.subject, request.key, *sticky)
         });
         *sticky = sticky.saturating_add(1);
-        let legacy_seq = request.legacy_seq.unwrap_or_else(|| {
-            let seq = self.next_legacy_seq;
-            self.next_legacy_seq = self.next_legacy_seq.saturating_add(1);
-            seq
-        });
-        self.next_legacy_seq = self.next_legacy_seq.max(legacy_seq.saturating_add(1));
+        drop(sticky_values);
+        let legacy_seq = request
+            .legacy_seq
+            .unwrap_or_else(|| self.next_legacy_seq.fetch_add(1, Ordering::Relaxed));
+        self.next_legacy_seq
+            .fetch_max(legacy_seq.saturating_add(1), Ordering::Relaxed);
         let envelope = MessageEnvelope {
             namespace: request.namespace.to_string(),
             stream: request.stream.name.clone(),
@@ -78,43 +85,63 @@ impl PartitionLogSet {
             leader_epoch: request.leader_epoch,
             legacy_seq,
         };
+        self.append_envelope(envelope)
+    }
+
+    pub(crate) fn append_envelope(&self, envelope: MessageEnvelope) -> Result<MessageEnvelope> {
+        self.next_legacy_seq
+            .fetch_max(envelope.legacy_seq.saturating_add(1), Ordering::Relaxed);
         self.logs
-            .get_mut(&(request.stream.name.as_str().to_string(), partition))
+            .get(&(envelope.stream.as_str().to_string(), envelope.partition))
             .expect("catalog partitions are opened together")
+            .lock()
+            .expect("partition log lock poisoned")
             .append(envelope)
     }
 
-    pub fn flush(&mut self) -> Result<()> {
-        for log in self.logs.values_mut() {
-            log.flush()?;
+    pub fn flush(&self) -> Result<()> {
+        for log in self.logs.values() {
+            log.lock().expect("partition log lock poisoned").flush()?;
         }
         Ok(())
     }
 
-    pub fn append_committed(&mut self, envelope: MessageEnvelope) -> Result<MessageEnvelope> {
-        self.next_legacy_seq = self
-            .next_legacy_seq
-            .max(envelope.legacy_seq.saturating_add(1));
+    pub fn flush_partition(&self, stream: &str, partition: PartitionId) -> Result<()> {
         self.logs
-            .get_mut(&(envelope.stream.as_str().to_string(), envelope.partition))
+            .get(&(stream.to_string(), partition))
             .ok_or_else(|| crate::error::BrokerError::msg("unknown stream partition"))?
+            .lock()
+            .expect("partition log lock poisoned")
+            .flush()
+    }
+
+    pub fn append_committed(&self, envelope: MessageEnvelope) -> Result<MessageEnvelope> {
+        self.next_legacy_seq
+            .fetch_max(envelope.legacy_seq.saturating_add(1), Ordering::Relaxed);
+        self.logs
+            .get(&(envelope.stream.as_str().to_string(), envelope.partition))
+            .ok_or_else(|| crate::error::BrokerError::msg("unknown stream partition"))?
+            .lock()
+            .expect("partition log lock poisoned")
             .append_committed(envelope)
     }
 
     pub(crate) fn rewrite_partition(
-        &mut self,
+        &self,
         stream: &str,
         partition: PartitionId,
         records: &[MessageEnvelope],
     ) -> Result<()> {
         self.logs
-            .get_mut(&(stream.to_string(), partition))
+            .get(&(stream.to_string(), partition))
             .ok_or_else(|| crate::error::BrokerError::msg("unknown stream partition"))?
+            .lock()
+            .expect("partition log lock poisoned")
             .rewrite(records, None)
     }
 
     pub(crate) fn enforce_retention(
-        &mut self,
+        &self,
         envelopes: &mut Vec<MessageEnvelope>,
         catalog: &StreamCatalog,
         now_ms: u64,
@@ -135,15 +162,17 @@ impl PartitionLogSet {
                 .cloned()
                 .collect::<Vec<_>>();
             self.logs
-                .get_mut(&(change.stream.clone(), change.partition))
+                .get(&(change.stream.clone(), change.partition))
                 .expect("retention changes reference configured logs")
+                .lock()
+                .expect("partition log lock poisoned")
                 .rewrite(&retained, Some(change.earliest_offset))?;
         }
         Ok(changes)
     }
 
     pub(crate) fn retention_changes(
-        &mut self,
+        &self,
         streams: &[StreamDefinition],
         now_ms: u64,
     ) -> Vec<RetentionChange> {
@@ -153,9 +182,13 @@ impl PartitionLogSet {
                 let partition = PartitionId(partition);
                 let log = self
                     .logs
-                    .get_mut(&(stream.name.as_str().to_string(), partition))
+                    .get(&(stream.name.as_str().to_string(), partition))
                     .expect("catalog partitions are opened together");
-                if let Some(earliest_offset) = log.enforce_retention(&stream.retention, now_ms) {
+                if let Some(earliest_offset) = log
+                    .lock()
+                    .expect("partition log lock poisoned")
+                    .enforce_retention(&stream.retention, now_ms)
+                {
                     changes.push(RetentionChange {
                         stream: stream.name.as_str().to_string(),
                         partition,
@@ -168,13 +201,15 @@ impl PartitionLogSet {
     }
 
     pub(crate) fn retain_partition(
-        &mut self,
+        &self,
         change: &RetentionChange,
         records: &[MessageEnvelope],
     ) -> Result<()> {
         self.logs
-            .get_mut(&(change.stream.clone(), change.partition))
+            .get(&(change.stream.clone(), change.partition))
             .ok_or_else(|| crate::error::BrokerError::msg("unknown stream partition"))?
+            .lock()
+            .expect("partition log lock poisoned")
             .rewrite(records, Some(change.earliest_offset))
     }
 
@@ -187,6 +222,8 @@ impl PartitionLogSet {
             .logs
             .get(&(stream.to_string(), partition))
             .ok_or_else(|| crate::error::BrokerError::msg("unknown stream partition"))?
+            .lock()
+            .expect("partition log lock poisoned")
             .retention_status(partition))
     }
 
@@ -198,7 +235,14 @@ impl PartitionLogSet {
     ) -> bool {
         self.logs
             .get(&(stream.to_string(), partition))
-            .is_some_and(|log| offset < log.retention_status(partition).earliest_offset)
+            .is_some_and(|log| {
+                offset
+                    < log
+                        .lock()
+                        .expect("partition log lock poisoned")
+                        .retention_status(partition)
+                        .earliest_offset
+            })
     }
 
     pub(crate) fn matching_offsets(
@@ -210,6 +254,24 @@ impl PartitionLogSet {
         self.logs
             .get(&(stream.to_string(), partition))
             .ok_or_else(|| crate::error::BrokerError::msg("unknown stream partition"))?
+            .lock()
+            .expect("partition log lock poisoned")
             .matching_offsets(filter)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_partition_lock_for_test<T>(
+        &self,
+        stream: &str,
+        partition: PartitionId,
+        operation: impl FnOnce() -> T,
+    ) -> T {
+        let _guard = self
+            .logs
+            .get(&(stream.to_string(), partition))
+            .expect("test partition exists")
+            .lock()
+            .expect("partition log lock poisoned");
+        operation()
     }
 }

@@ -64,12 +64,23 @@ async fn failed_auth_leaves_no_durable_or_subscription_state() {
     client.subscribe("_INBOX.client1.1", "inbox1").await;
     client.expect_err_contains("authentication required").await;
 
-    let inner = scenario.broker().inner.lock().await;
-    let client = inner.clients.get(&1).unwrap();
+    let connections = scenario.broker().connections.lock().await;
+    let client = connections.clients.get(&1).unwrap();
     assert!(!client.authenticated);
     assert!(client.durable_id.is_none());
+    drop(connections);
+    let inner = scenario.broker().inner.lock().await;
     assert!(inner.consumers.is_empty());
-    assert!(inner.transient_subscriptions.is_empty());
+    drop(inner);
+    assert!(
+        scenario
+            .broker()
+            .transient
+            .lock()
+            .await
+            .subscriptions
+            .is_empty()
+    );
 }
 
 #[tokio::test]

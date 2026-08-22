@@ -5,7 +5,8 @@ use rustls::{
     pki_types::{CertificateDer, ServerName},
 };
 use std::{
-    error::Error, fmt, net::SocketAddr, path::Path, path::PathBuf, sync::Arc, time::Duration,
+    collections::VecDeque, error::Error, fmt, net::SocketAddr, path::Path, path::PathBuf,
+    sync::Arc, time::Duration,
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader},
@@ -19,6 +20,7 @@ pub struct Client {
     inbox_counter: u64,
     durable: bool,
     push_credit_messages: usize,
+    pending_messages: VecDeque<Message>,
 }
 #[derive(Debug, Clone)]
 pub struct ClientOptions {

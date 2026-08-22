@@ -19,9 +19,21 @@ async fn auth_enabled_generates_fresh_nonce_per_connection() {
     broker.add_client(1, tx1, None).await.unwrap();
     broker.add_client(2, tx2, None).await.unwrap();
 
-    let inner = broker.inner.lock().await;
-    let first = inner.clients.get(&1).unwrap().auth_nonce.as_ref().unwrap();
-    let second = inner.clients.get(&2).unwrap().auth_nonce.as_ref().unwrap();
+    let connections = broker.connections.lock().await;
+    let first = connections
+        .clients
+        .get(&1)
+        .unwrap()
+        .auth_nonce
+        .as_ref()
+        .unwrap();
+    let second = connections
+        .clients
+        .get(&2)
+        .unwrap()
+        .auth_nonce
+        .as_ref()
+        .unwrap();
     assert_ne!(first, second);
     assert_eq!(first.len(), 64);
     assert_eq!(second.len(), 64);
@@ -41,7 +53,11 @@ async fn non_durable_connect_subscribes_as_transient_core() {
     assert_eq!(frame, "MSG orders.created sid1 5\r\nhello\r\n");
     let inner = scenario.broker().inner.lock().await;
     assert!(inner.consumers.is_empty());
-    assert_eq!(inner.transient_subscriptions.len(), 1);
+    drop(inner);
+    assert_eq!(
+        scenario.broker().transient.lock().await.subscriptions.len(),
+        1
+    );
 }
 #[tokio::test]
 async fn durable_subscribe_publish_delivery_and_ack_are_deterministic() {
@@ -238,8 +254,12 @@ async fn request_reply_inbox_delivery_is_transient() {
     assert_eq!(response, "MSG _INBOX.requester.1 inbox1 5\r\nworld\r\n");
     let inner = scenario.broker().inner.lock().await;
     assert!(inner.messages.contains_key(&1));
-    assert_eq!(inner.transient_subscriptions.len(), 1);
     assert_eq!(inner.consumers.len(), 1);
+    drop(inner);
+    assert_eq!(
+        scenario.broker().transient.lock().await.subscriptions.len(),
+        1
+    );
 }
 #[tokio::test]
 async fn publish_without_stream_binding_is_not_retained() {
@@ -339,10 +359,10 @@ async fn transient_unsub_with_max_receives_one_more_live_message_then_detaches()
     assert!(
         scenario
             .broker()
-            .inner
+            .transient
             .lock()
             .await
-            .transient_subscriptions
+            .subscriptions
             .is_empty()
     );
 }

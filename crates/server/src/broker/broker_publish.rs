@@ -1,6 +1,31 @@
 use super::*;
 
 impl Broker {
+    async fn flush_partition(&self, record: &PublishRecord) -> Result<()> {
+        let stream = record
+            .stream
+            .clone()
+            .ok_or_else(|| BrokerError::msg("durable record has no stream"))?;
+        let partition = crate::stream::PartitionId(
+            record
+                .partition
+                .ok_or_else(|| BrokerError::msg("durable record has no partition"))?,
+        );
+        let partition_logs = self.partition_logs.clone();
+        let permit = self
+            .storage_permits
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| BrokerError::msg("storage worker pool closed"))?;
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            partition_logs.flush_partition(&stream, partition)
+        })
+        .await
+        .map_err(|err| BrokerError::with_source("partition flush worker failed", err))?
+    }
+
     pub(super) async fn publish(
         &self,
         publisher_id: u64,
@@ -135,8 +160,8 @@ impl Broker {
         }
 
         let (transient_deliveries, verbose, namespace) = {
-            let mut inner = self.inner.lock().await;
-            let client = inner.clients.get(&publisher_id);
+            let connections = self.connections.lock().await;
+            let client = connections.clients.get(&publisher_id);
             let verbose = client
                 .map(|client| client.verbose)
                 .unwrap_or(self.config.verbose);
@@ -144,7 +169,8 @@ impl Broker {
                 .and_then(|client| client.durable_id.clone())
                 .unwrap_or_else(|| DEFAULT_NAMESPACE.to_string());
             (
-                inner.prepare_transient_deliveries(
+                self.transient.lock().await.prepare_transient_deliveries(
+                    &connections,
                     &subject_name,
                     reply_to.as_deref(),
                     &headers,
@@ -200,7 +226,7 @@ impl Broker {
                     value: value.clone(),
                 })
                 .collect::<Vec<_>>();
-            let seq = self.inner.lock().await.wal.reserve_publish_seq();
+            let seq = self.wal.reserve_publish_seq();
             let envelope = MessageEnvelope {
                 namespace,
                 stream: stream.name.clone(),
@@ -220,10 +246,12 @@ impl Broker {
             let envelope = cluster.replicate_partition(envelope, fsync).await?;
             cluster.enforce_retention(self.hooks.clock.now_ms())?;
             self.sync_from_cluster(&cluster).await?;
-            self.inner
-                .lock()
-                .await
-                .enforce_stream_retention(&self.config.streams, self.hooks.clock.now_ms())?;
+            let _storage_operation = self.storage_gate.read().await;
+            self.inner.lock().await.enforce_stream_retention(
+                &self.partition_logs,
+                &self.config.streams,
+                self.hooks.clock.now_ms(),
+            )?;
             let committed_record = PublishRecord::from(envelope.clone());
             self.run_after_commit_middleware(publisher_id, &committed_record)
                 .await?;
@@ -238,35 +266,47 @@ impl Broker {
             return Ok(());
         }
 
+        let storage_operation = self.storage_gate.read().await;
+        let seq = self.wal.reserve_publish_seq();
+        let stored_headers = headers
+            .iter()
+            .map(|(name, value)| MessageHeader {
+                name: name.clone(),
+                value: value.clone(),
+            })
+            .collect::<Vec<_>>();
+        let partition = select_partition(&stream, &subject_name, key.as_deref(), publisher_id);
+        let pending_envelope = MessageEnvelope {
+            namespace,
+            stream: stream.name.clone(),
+            partition,
+            offset: 0,
+            subject: subject_name,
+            key,
+            headers: stored_headers,
+            timestamp_ms: self.hooks.clock.now_ms(),
+            reply_to,
+            payload,
+            partitioning_epoch: stream.partitioning.epoch,
+            leader_epoch: 0,
+            legacy_seq: seq,
+        };
         let record = {
-            let mut inner = self.inner.lock().await;
-            let seq = inner.wal.reserve_publish_seq();
-            let stored_headers = headers
-                .iter()
-                .map(|(name, value)| MessageHeader {
-                    name: name.clone(),
-                    value: value.clone(),
-                })
-                .collect::<Vec<_>>();
-            let envelope = inner.partition_logs.append(AppendRequest {
-                namespace: &namespace,
-                stream: &stream,
-                subject: &subject_name,
-                key: key.as_deref(),
-                partition_hint: Some(select_partition(
-                    &stream,
-                    &subject_name,
-                    key.as_deref(),
-                    publisher_id,
-                )),
-                headers: &stored_headers,
-                timestamp_ms: self.hooks.clock.now_ms(),
-                reply_to: reply_to.as_deref(),
-                payload: &payload,
-                leader_epoch: 0,
-                legacy_seq: Some(seq),
-            })?;
+            let partition_logs = self.partition_logs.clone();
+            let permit = self
+                .storage_permits
+                .clone()
+                .acquire_owned()
+                .await
+                .map_err(|_| BrokerError::msg("storage worker pool closed"))?;
+            let envelope = tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                partition_logs.append_envelope(pending_envelope)
+            })
+            .await
+            .map_err(|err| BrokerError::with_source("partition append worker failed", err))??;
             let reference = PartitionAppendRecord::from(&envelope);
+            let mut inner = self.inner.lock().await;
             inner.wal.append_partition_append(&reference)?;
             let record = PublishRecord::from(envelope);
             if let (Some(stream), Some(partition), Some(offset)) =
@@ -277,7 +317,11 @@ impl Broker {
                     .insert((stream, partition, offset), record.seq);
             }
             inner.messages.insert(record.seq, record.clone());
-            inner.enforce_stream_retention(&self.config.streams, self.hooks.clock.now_ms())?;
+            inner.enforce_stream_retention(
+                &self.partition_logs,
+                &self.config.streams,
+                self.hooks.clock.now_ms(),
+            )?;
             inner.apply_stream_compaction(&self.config.streams);
             record
         };
@@ -289,18 +333,17 @@ impl Broker {
             match self.hooks.durable_publish_flush_mode {
                 DurablePublishFlushMode::SleepThenFlush => {
                     tokio::time::sleep(self.config.fsync_interval()).await;
-                    let mut inner = self.inner.lock().await;
-                    inner.partition_logs.flush()?;
-                    inner.wal.flush()?;
+                    self.flush_partition(&record).await?;
+                    self.wal.flush().await?;
                 }
                 #[cfg(test)]
                 DurablePublishFlushMode::FlushImmediately => {
-                    let mut inner = self.inner.lock().await;
-                    inner.partition_logs.flush()?;
-                    inner.wal.flush()?;
+                    self.flush_partition(&record).await?;
+                    self.wal.flush().await?;
                 }
             }
         }
+        drop(storage_operation);
 
         if let Some(ack) = ack.filter(|_| !accepted_ack) {
             self.send_positioned_producer_ack(publisher_id, ack, &record)
@@ -331,8 +374,14 @@ impl Broker {
             "route payload exceeds max payload"
         );
         let deliveries = {
-            let mut inner = self.inner.lock().await;
-            inner.prepare_transient_deliveries(subject_name, reply_to, &[], payload)
+            let connections = self.connections.lock().await;
+            self.transient.lock().await.prepare_transient_deliveries(
+                &connections,
+                subject_name,
+                reply_to,
+                &[],
+                payload,
+            )
         };
         for delivery in deliveries {
             let _ = delivery.sender.send(delivery.frame).await;
@@ -387,11 +436,11 @@ impl Broker {
             })?;
             should_cleanup = true;
         }
-        inner.wal.flush_due()?;
         if should_cleanup {
             inner.cleanup_acked_messages();
         }
         drop(inner);
+        self.wal.flush_due().await?;
         if let Some(record) = acknowledged_record {
             let outcome = self
                 .middleware
@@ -421,8 +470,8 @@ impl Broker {
 
     pub(super) async fn send_verbose_ok(&self, publisher_id: u64) -> Result<()> {
         let verbose = {
-            let inner = self.inner.lock().await;
-            inner
+            let connections = self.connections.lock().await;
+            connections
                 .clients
                 .get(&publisher_id)
                 .map(|client| client.verbose)
@@ -436,9 +485,18 @@ impl Broker {
 
     pub(super) async fn deliver_pending(&self) -> Result<()> {
         let deliveries = {
+            let connections = ConnectionState {
+                clients: self.connections.lock().await.clients.clone(),
+            };
             let mut inner = self.inner.lock().await;
-            inner.prepare_durable_deliveries(self.hooks.clock.now_ms())?
+            inner.prepare_durable_deliveries(
+                &connections,
+                &self.partition_logs,
+                &self.middleware,
+                self.hooks.clock.now_ms(),
+            )?
         };
+        self.wal.flush_due().await?;
 
         for delivery in deliveries {
             let _ = delivery.sender.send(delivery.frame).await;
@@ -464,8 +522,9 @@ impl Broker {
             self.sync_from_cluster(&cluster).await?;
         }
         {
+            let _storage_operation = self.storage_gate.read().await;
             let mut inner = self.inner.lock().await;
-            inner.enforce_stream_retention(&self.config.streams, now)?;
+            inner.enforce_stream_retention(&self.partition_logs, &self.config.streams, now)?;
             let partitioned = inner
                 .messages
                 .iter()
@@ -496,8 +555,8 @@ impl Broker {
 
     pub(super) async fn send_to(&self, connection_id: u64, frame: Vec<u8>) -> Result<()> {
         let sender = {
-            let inner = self.inner.lock().await;
-            inner
+            let connections = self.connections.lock().await;
+            connections
                 .clients
                 .get(&connection_id)
                 .map(|client| client.sender.clone())
@@ -510,18 +569,20 @@ impl Broker {
     }
 
     pub(super) async fn remove_client(&self, connection_id: u64) -> Result<()> {
-        let mut inner = self.inner.lock().await;
-        inner.clients.remove(&connection_id);
-        let removed = inner
-            .transient_subscriptions
+        self.connections.lock().await.clients.remove(&connection_id);
+        let mut transient = self.transient.lock().await;
+        let removed = transient
+            .subscriptions
             .iter()
             .filter(|((client_id, _), _)| *client_id == connection_id)
             .map(|(key, subscription)| (key.clone(), subscription.subject.clone()))
             .collect::<Vec<_>>();
         for (key, subject) in removed {
-            inner.transient_subscriptions.remove(&key);
-            inner.transient_interest_index.remove(&subject, &key);
+            transient.subscriptions.remove(&key);
+            transient.interest_index.remove(&subject, &key);
         }
+        drop(transient);
+        let mut inner = self.inner.lock().await;
         for consumer in inner.consumers.values_mut() {
             consumer.members.remove(&connection_id);
         }
