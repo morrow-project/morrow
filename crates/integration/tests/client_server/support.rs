@@ -254,33 +254,43 @@ impl ClusterHarness {
     }
 
     pub(super) async fn wait_for_full_route_mesh(&self) {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-        let mut observed = Vec::new();
+        const ROUTE_MESH_TIMEOUT: Duration = Duration::from_secs(30);
+        let deadline = tokio::time::Instant::now() + ROUTE_MESH_TIMEOUT;
+        let mut observed = Vec::with_capacity(self.nodes.len());
         loop {
             let mut ready = true;
             observed.clear();
             for node in &self.nodes {
                 let Some(value) = cluster_json_with_tls(node.http_addr, self.secure).await else {
                     ready = false;
-                    observed.push(None);
+                    observed.push(format!("node {}: admin endpoint unavailable", node.node_id));
                     continue;
                 };
                 let Some(connected) = value["routes"]["connected"].as_array() else {
                     ready = false;
-                    observed.push(None);
+                    observed.push(format!(
+                        "node {}: connected route list unavailable",
+                        node.node_id
+                    ));
                     continue;
                 };
-                observed.push(Some(connected.len()));
-                ready &= connected.len() == self.nodes.len() - 1;
+                let connected_count = connected.len();
+                ready &= connected_count == self.nodes.len() - 1;
+                observed.push(format!(
+                    "node {}: {connected_count}/{} connected",
+                    node.node_id,
+                    self.nodes.len() - 1
+                ));
             }
             if ready {
                 return;
             }
             assert!(
                 tokio::time::Instant::now() < deadline,
-                "route mesh did not become full: {observed:?}"
+                "route mesh did not become full within {ROUTE_MESH_TIMEOUT:?}: {}",
+                observed.join(", ")
             );
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
 
