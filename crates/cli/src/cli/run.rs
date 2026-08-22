@@ -10,12 +10,17 @@ pub type Result<T> = std::result::Result<T, CliError>;
 
 pub async fn run(args: impl IntoIterator<Item = String>) -> Result<()> {
     let args = Args::parse(args)?;
+    if args.command == Command::Version {
+        println!("morrow-cli {VERSION}");
+        return Ok(());
+    }
     let config = CliConfig::load(&args.config_path)?;
     run_command(&config, args.command).await
 }
 
 pub(super) async fn run_command(config: &CliConfig, command: Command) -> Result<()> {
     match command {
+        Command::Version => unreachable!("version is handled before loading configuration"),
         Command::Ping => {
             let mut client = config.connect_client().await?;
             client.ping_roundtrip().await?;

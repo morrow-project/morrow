@@ -4,8 +4,15 @@ use connector::{
 };
 use std::time::Duration;
 
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::args_os().skip(1).any(|arg| arg == "--version") {
+        println!("morrow-connector {VERSION}");
+        return Ok(());
+    }
+
     let path = std::env::args()
         .nth(1)
         .ok_or("usage: morrow-connector CONFIG.json")?;

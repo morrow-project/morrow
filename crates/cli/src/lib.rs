@@ -10,6 +10,7 @@ use std::{
     time::Duration,
 };
 const DEFAULT_CONFIG_PATH: &str = "client.json";
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 const DEFAULT_SERVER: &str = "127.0.0.1:4222";
 const DEFAULT_MAX_PAYLOAD: usize = 1_048_576;
 const DEFAULT_ACK_TIMEOUT_MS: u64 = 30_000;
@@ -17,6 +18,7 @@ const DEFAULT_MAX_IN_FLIGHT: usize = 1024;
 const DEFAULT_SID: &str = "sid1";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
+    Version,
     Ping,
     Pub {
         subject: String,

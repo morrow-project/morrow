@@ -7,6 +7,13 @@ impl Args {
         let mut config_path = PathBuf::from(DEFAULT_CONFIG_PATH);
         let mut rest = Vec::new();
         while let Some(arg) = args.next() {
+            if arg == "--version" {
+                ensure_no_more(args, "--version")?;
+                return Ok(Self {
+                    config_path,
+                    command: Command::Version,
+                });
+            }
             if arg == "--config" {
                 let value = args
                     .next()
