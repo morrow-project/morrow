@@ -1,45 +1,47 @@
-name: Tag Morrow Release
+name: Tag and Publish Morrow Release
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: Merged workspace version to tag, such as 0.1.1
+        description: Merged workspace version to release, such as 0.1.1
         required: true
         type: string
 
 permissions:
-  actions: write
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   tag:
-    name: Tag release ${{ inputs.version }}
+    name: Create release tag
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.validate.outputs.version }}
     steps:
       - name: Check out main
         uses: actions/checkout@v4
         with:
           ref: main
           fetch-depth: 0
-
       - name: Set up Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           cache: false
           rustflags: ""
-
-      - name: Verify merged workspace version
+      - name: Validate workspace version and tag
+        id: validate
         shell: bash
         env:
           VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
           if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "Release tags must use plain semantic versions such as 0.1.1; got ${VERSION}" >&2
+            echo "Release tags must use plain semantic versions such as 0.1.0; got ${VERSION}" >&2
             exit 1
           fi
 
@@ -56,6 +58,8 @@ jobs:
             exit 1
           fi
 
+          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
+
       - name: Create and push tag
         shell: bash
         env:
@@ -67,8 +71,132 @@ jobs:
           git tag --annotate "${VERSION}" --message "Release ${VERSION}"
           git push origin "${VERSION}"
 
-      - name: Dispatch binary release
+  build:
+    name: Build (${{ matrix.name }})
+    needs: tag
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux/amd64
+            id: linux-amd64
+            runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - name: linux/arm64
+            id: linux-arm64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - name: macos/arm64
+            id: macos-arm64
+            runner: macos-14
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.tag.outputs.version }}
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: ${{ matrix.target }}
+          cache-key: release-${{ matrix.id }}
+          rustflags: ""
+      - name: Build workspace
+        run: cargo build --release --locked --workspace
+      - name: Package release archive
+        shell: bash
+        env:
+          VERSION: ${{ needs.tag.outputs.version }}
+          PLATFORM: ${{ matrix.id }}
+        run: |
+          archive_root="morrow-${VERSION}-${PLATFORM}"
+          mkdir -p "${archive_root}/docs"
+          cp target/release/morrow-server "${archive_root}/"
+          cp target/release/morrow-cli "${archive_root}/"
+          cp target/release/morrow-connector "${archive_root}/"
+          cp morrow.json.example client.json.example LICENSE README.md "${archive_root}/"
+          cp docs/building.md docs/operations.md "${archive_root}/docs/"
+          tar -czf "${archive_root}.tar.gz" "${archive_root}"
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "${archive_root}.tar.gz" > "${archive_root}.tar.gz.sha256"
+          else
+            shasum -a 256 "${archive_root}.tar.gz" > "${archive_root}.tar.gz.sha256"
+          fi
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.id }}
+          path: morrow-${{ needs.tag.outputs.version }}-${{ matrix.id }}.tar.gz*
+          if-no-files-found: error
+
+  docker:
+    name: Publish Docker image
+    needs: tag
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.tag.outputs.version }}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/morrow-project/morrow-server
+          tags: |
+            type=raw,value=${{ needs.tag.outputs.version }}
+            type=raw,value=latest
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            CARGO_PROFILE=release
+            CARGO_PROFILE_DIR=release
+
+  publish:
+    name: Publish GitHub Release
+    needs: [tag, build, docker]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: dist
+      - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ inputs.version }}
-        run: gh workflow run release.yml --repo "${GITHUB_REPOSITORY}" --ref "${VERSION}"
+          VERSION: ${{ needs.tag.outputs.version }}
+        run: |
+          gh release create "${VERSION}" dist/* \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "Morrow ${VERSION}" \
+            --generate-notes
