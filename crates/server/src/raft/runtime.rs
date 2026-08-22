@@ -58,12 +58,25 @@ impl RaftRuntime {
             .map(|node| (node.node_id, BasicNode::new(node.raft_addr.clone())))
             .collect::<BTreeMap<_, _>>();
 
-        let log_store = LogStore::open(config.raft_dir.join(LOG_FILE))?;
-        let state_machine = StateMachineStore::open(
-            config.raft_dir.join(STATE_FILE),
-            config.raft_dir.join(SNAPSHOT_FILE),
-            raft_nodes.clone(),
-        )?;
+        let raft_dir = config.raft_dir.clone();
+        let log_store = tokio::task::spawn_blocking(move || {
+            LogStore::open(raft_dir.join(LOG_FILE), raft_dir.join(LEGACY_LOG_FILE))
+        })
+        .await
+        .map_err(|err| BrokerError::with_source("opening Raft log worker", err))??;
+        let raft_dir = config.raft_dir.clone();
+        let state_nodes = raft_nodes.clone();
+        let state_machine = tokio::task::spawn_blocking(move || {
+            StateMachineStore::open(
+                raft_dir.join(STATE_FILE),
+                raft_dir.join(SNAPSHOT_FILE),
+                raft_dir.join(LEGACY_STATE_FILE),
+                raft_dir.join(LEGACY_SNAPSHOT_FILE),
+                state_nodes,
+            )
+        })
+        .await
+        .map_err(|err| BrokerError::with_source("opening Raft state worker", err))??;
         let mut replica_data = ReplicaDataStore::open(
             &config.raft_dir.join("partition-data"),
             streams,

@@ -332,6 +332,8 @@ flushes the WAL before exiting.
 
 Storage locking, partition ordering, worker backpressure, and acknowledgement
 boundaries are described in [docs/storage-concurrency.md](docs/storage-concurrency.md).
+Raft journal framing, recovery, migration, snapshot rotation, and benchmark
+results are described in [docs/raft-storage.md](docs/raft-storage.md).
 
 ## Workspace Layout
 

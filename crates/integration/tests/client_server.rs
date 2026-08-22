@@ -16,3 +16,6 @@ mod pull_tests;
 
 #[path = "client_server/internal_tls_tests.rs"]
 mod internal_tls_tests;
+
+#[path = "client_server/raft_storage_benchmark.rs"]
+mod raft_storage_benchmark;

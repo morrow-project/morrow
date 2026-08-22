@@ -30,9 +30,12 @@ use tokio::{
     net::{TcpListener, TcpStream},
 };
 use tracing::error;
-const LOG_FILE: &str = "raft-log.json";
-const STATE_FILE: &str = "raft-state.json";
-const SNAPSHOT_FILE: &str = "raft-snapshot.json";
+const LOG_FILE: &str = "raft-log.journal";
+const STATE_FILE: &str = "raft-state.journal";
+const SNAPSHOT_FILE: &str = "raft-snapshot.v1.json";
+const LEGACY_LOG_FILE: &str = "raft-log.json";
+const LEGACY_STATE_FILE: &str = "raft-state.json";
+const LEGACY_SNAPSHOT_FILE: &str = "raft-snapshot.json";
 const MAX_RAFT_FRAME: usize = 16 * 1024 * 1024;
 const RAFT_FRAME_READ_TIMEOUT_MS: u64 = 5_000;
 openraft::declare_raft_types!(
@@ -296,5 +299,7 @@ pub use self::{
     runtime::{ClusterNode, RaftRuntime},
 };
 
+#[cfg(test)]
+mod storage_tests;
 #[cfg(test)]
 mod tests;
