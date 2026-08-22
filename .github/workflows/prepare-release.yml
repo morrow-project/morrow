@@ -93,6 +93,10 @@ jobs:
           branch="release/${VERSION}"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet -- Cargo.toml Cargo.lock; then
+            echo "Workspace is already at version ${VERSION}; no version bump PR is needed."
+            exit 0
+          fi
           git switch -c "${branch}"
           git add Cargo.toml Cargo.lock
           git commit -m "Prepare release ${VERSION}"
