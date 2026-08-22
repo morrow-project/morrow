@@ -35,6 +35,7 @@
       "handshake_timeout_ms": 2000
     },
     "route_listen": "0.0.0.0:6222",
+    "route_advertise": "broker-1:6222",
     "route_tls": {
       "cert_file": "/run/secrets/broker_node_1_cert",
       "key_file": "/run/secrets/broker_node_1_key",

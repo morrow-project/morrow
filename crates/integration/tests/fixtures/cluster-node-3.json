@@ -20,6 +20,7 @@
     "raft_listen": "127.0.0.1:5223",
     "allow_insecure_internal_transports": true,
     "route_listen": "127.0.0.1:6223",
+    "route_advertise": "127.0.0.1:6223",
     "routes": ["127.0.0.1:6221"],
     "route_reconnect_ms": 500,
     "raft_dir": "./target/manual-cluster/node3/raft",

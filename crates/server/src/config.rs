@@ -88,6 +88,7 @@ pub struct ClusterConfig {
     pub raft_tls: Option<InternalTlsConfig>,
     pub allow_insecure_internal_transports: bool,
     pub route_listen: Option<SocketAddr>,
+    pub route_advertise: Option<String>,
     pub route_tls: Option<InternalTlsConfig>,
     pub routes: Vec<String>,
     pub route_reconnect_ms: u64,

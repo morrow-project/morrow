@@ -1,6 +1,89 @@
 use super::*;
 
 #[tokio::test]
+async fn wildcard_route_bind_announces_hostname_and_peers_by_node_id() {
+    let dir = TempDir::new().unwrap();
+    let mut config = test_config(dir.path());
+    let mut cluster = fake_cluster_config(dir.path(), 3, 1);
+    cluster.route_listen = Some("0.0.0.0:6222".parse().unwrap());
+    cluster.route_advertise = Some("broker-1:6222".to_string());
+    for node in &mut cluster.nodes {
+        node.route_addr = Some(format!("broker-{}:6222", node.node_id));
+    }
+    config.cluster = Some(cluster);
+    let broker = deterministic_broker(config, Arc::new(ManualClock::new(1_000)), None);
+    let mesh = broker.route_mesh.clone().unwrap();
+
+    assert!(matches!(
+        mesh.hello().await,
+        RouteFrame::Hello { node_id: 1, route_addr, .. }
+            if route_addr == "broker-1:6222"
+    ));
+    let (competing_sender, _competing_frames) = mpsc::channel(1);
+    assert_eq!(
+        mesh.register_peer(
+            RoutePeerInfo {
+                node_id: 2,
+                route_addr: "broker-2:6222".to_string(),
+                client_addr: "127.0.0.1:4222".parse().unwrap(),
+            },
+            RouteDirection::Outbound,
+            competing_sender,
+        )
+        .await,
+        None
+    );
+
+    let (first_sender, _first_frames) = mpsc::channel(1);
+    assert_eq!(
+        mesh.register_peer(
+            RoutePeerInfo {
+                node_id: 2,
+                route_addr: "broker-2:6222".to_string(),
+                client_addr: "127.0.0.1:4222".parse().unwrap(),
+            },
+            RouteDirection::Inbound,
+            first_sender.clone(),
+        )
+        .await,
+        Some(true)
+    );
+    let (replacement_sender, _replacement_frames) = mpsc::channel(1);
+    assert_eq!(
+        mesh.register_peer(
+            RoutePeerInfo {
+                node_id: 2,
+                route_addr: "broker-2-new:6222".to_string(),
+                client_addr: "127.0.0.1:4222".parse().unwrap(),
+            },
+            RouteDirection::Inbound,
+            replacement_sender.clone(),
+        )
+        .await,
+        Some(false)
+    );
+    let (duplicate_sender, _duplicate_frames) = mpsc::channel(1);
+    assert_eq!(
+        mesh.register_peer(
+            RoutePeerInfo {
+                node_id: 3,
+                route_addr: "broker-2-new:6222".to_string(),
+                client_addr: "127.0.0.1:4223".parse().unwrap(),
+            },
+            RouteDirection::Inbound,
+            duplicate_sender,
+        )
+        .await,
+        None
+    );
+
+    mesh.remove_peer(2, &first_sender).await;
+    assert_eq!(mesh.connected_peer_count().await, 1);
+    mesh.remove_peer(2, &replacement_sender).await;
+    assert_eq!(mesh.connected_peer_count().await, 0);
+}
+
+#[tokio::test]
 async fn route_interests_use_reference_counted_deltas_off_the_publish_path() {
     let scenario = Scenario::new_fake_route_cluster_local_node(2, 1, Some(1));
     let mesh = scenario.broker().route_mesh.clone().unwrap();
@@ -12,7 +95,7 @@ async fn route_interests_use_reference_counted_deltas_off_the_publish_path() {
                 route_addr: "127.0.0.1:39999".to_string(),
                 client_addr: "127.0.0.1:19999".parse().unwrap(),
             },
-            RouteDirection::Outbound,
+            RouteDirection::Inbound,
             sender,
         )
         .await,

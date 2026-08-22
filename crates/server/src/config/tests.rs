@@ -55,6 +55,7 @@ fn parses_cluster_route_mesh_config() {
             "raft_listen": "127.0.0.1:5221",
             "allow_insecure_internal_transports": true,
             "route_listen": "127.0.0.1:6221",
+            "route_advertise": "broker-1:6221",
             "routes": ["127.0.0.1:6222", "127.0.0.1:6223"],
             "raft_dir": "./target/test-wal-config-routes/raft",
             "bootstrap": true,
@@ -74,8 +75,96 @@ fn parses_cluster_route_mesh_config() {
         cluster.route_listen,
         Some("127.0.0.1:6221".parse().unwrap())
     );
+    assert_eq!(cluster.route_advertise.as_deref(), Some("broker-1:6221"));
     assert_eq!(cluster.routes, vec!["127.0.0.1:6222", "127.0.0.1:6223"]);
     assert_eq!(cluster.route_reconnect_ms, 500);
+}
+
+#[test]
+fn derives_route_advertisement_from_self_node_metadata() {
+    let config = Config::from_json(&route_advertisement_config()).unwrap();
+    let cluster = config.cluster.unwrap();
+    assert_eq!(cluster.route_listen, Some("0.0.0.0:6222".parse().unwrap()));
+    assert_eq!(cluster.advertised_route_addr(), Some("broker-1:6222"));
+}
+
+#[test]
+fn rejects_wildcard_duplicate_and_self_route_advertisements() {
+    let mut wildcard = route_advertisement_config();
+    wildcard["cluster"]["route_advertise"] = serde_json::json!("0.0.0.0:6222");
+    assert!(
+        Config::from_json(&wildcard)
+            .unwrap_err()
+            .to_string()
+            .contains("wildcard")
+    );
+
+    let mut invalid_hostname = route_advertisement_config();
+    invalid_hostname["cluster"]["route_advertise"] = serde_json::json!("bad/host:6222");
+    assert!(
+        Config::from_json(&invalid_hostname)
+            .unwrap_err()
+            .to_string()
+            .contains("routable hostname")
+    );
+
+    let mut duplicate = route_advertisement_config();
+    duplicate["cluster"]["nodes"][1]["route_addr"] = serde_json::json!("broker-1:6222");
+    assert!(
+        Config::from_json(&duplicate)
+            .unwrap_err()
+            .to_string()
+            .contains("duplicate route_addr")
+    );
+
+    let mut self_seed = route_advertisement_config();
+    self_seed["cluster"]["routes"] = serde_json::json!(["broker-1:6222"]);
+    assert!(
+        Config::from_json(&self_seed)
+            .unwrap_err()
+            .to_string()
+            .contains("must not contain this node")
+    );
+
+    let mut conflict = route_advertisement_config();
+    conflict["cluster"]["route_advertise"] = serde_json::json!("broker-other:6222");
+    assert!(
+        Config::from_json(&conflict)
+            .unwrap_err()
+            .to_string()
+            .contains("conflicts with self")
+    );
+}
+
+fn route_advertisement_config() -> serde_json::Value {
+    serde_json::json!({
+        "wal_dir": "./target/test-route-advertisement-config",
+        "cluster": {
+            "enabled": true,
+            "node_id": 1,
+            "auth_token": "cluster-secret",
+            "raft_listen": "0.0.0.0:5222",
+            "allow_insecure_internal_transports": true,
+            "route_listen": "0.0.0.0:6222",
+            "routes": ["broker-2:6222"],
+            "raft_dir": "./target/test-route-advertisement-config/raft",
+            "bootstrap": true,
+            "nodes": [
+                {
+                    "node_id": 1,
+                    "raft_addr": "broker-1:5222",
+                    "client_addr": "broker-1:4222",
+                    "route_addr": "broker-1:6222"
+                },
+                {
+                    "node_id": 2,
+                    "raft_addr": "broker-2:5222",
+                    "client_addr": "broker-2:4222",
+                    "route_addr": "broker-2:6222"
+                }
+            ]
+        }
+    })
 }
 
 #[test]

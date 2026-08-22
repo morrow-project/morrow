@@ -518,6 +518,9 @@ fn fake_cluster_config(dir: &Path, node_count: u64, local_node_id: u64) -> Clust
             [127, 0, 0, 1],
             30_000 + local_node_id as u16,
         ))),
+        route_advertise: Some(
+            SocketAddr::from(([127, 0, 0, 1], 30_000 + local_node_id as u16)).to_string(),
+        ),
         route_tls: None,
         routes: Vec::new(),
         route_reconnect_ms: 50,

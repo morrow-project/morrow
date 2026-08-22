@@ -74,6 +74,7 @@ impl ClusterConfig {
         );
 
         let mut ids = std::collections::HashSet::new();
+        let mut route_addresses = std::collections::HashMap::new();
         let mut has_self = false;
         for node in &self.nodes {
             crate::broker_ensure!(
@@ -85,8 +86,54 @@ impl ClusterConfig {
                 "cluster.nodes contains duplicate node_id"
             );
             has_self |= node.node_id == self.node_id;
+            if let Some(route_addr) = node.route_addr.as_deref() {
+                validate_route_advertisement(route_addr, "cluster.nodes[].route_addr")?;
+                crate::broker_ensure!(
+                    route_addresses.insert(route_addr, node.node_id).is_none(),
+                    "cluster.nodes contains duplicate route_addr {route_addr}"
+                );
+            }
         }
         crate::broker_ensure!(has_self, "cluster.node_id must be present in cluster.nodes");
+        crate::broker_ensure!(
+            self.route_listen.is_some() || self.route_advertise.is_none(),
+            "cluster.route_advertise requires cluster.route_listen"
+        );
+        if self.route_listen.is_some() {
+            let advertised = self.advertised_route_addr().ok_or_else(|| {
+                BrokerError::msg(
+                    "cluster.route_advertise or self cluster.nodes[].route_addr is required when route_listen is set",
+                )
+            })?;
+            validate_route_advertisement(advertised, "cluster.route_advertise")?;
+            if let (Some(configured), Some(node_addr)) = (
+                self.route_advertise.as_deref(),
+                self.self_node().and_then(|node| node.route_addr.as_deref()),
+            ) {
+                crate::broker_ensure!(
+                    configured == node_addr,
+                    "cluster.route_advertise conflicts with self cluster.nodes[].route_addr"
+                );
+            }
+            crate::broker_ensure!(
+                !self.nodes.iter().any(|node| {
+                    node.node_id != self.node_id && node.route_addr.as_deref() == Some(advertised)
+                }),
+                "cluster.route_advertise conflicts with another node"
+            );
+            let mut routes = std::collections::HashSet::new();
+            for route in &self.routes {
+                validate_route_advertisement(route, "cluster.routes[]")?;
+                crate::broker_ensure!(
+                    routes.insert(route),
+                    "cluster.routes contains duplicate address {route}"
+                );
+                crate::broker_ensure!(
+                    route != advertised,
+                    "cluster.routes must not contain this node's advertised route address"
+                );
+            }
+        }
         if self.raft_tls.is_some() || self.route_tls.is_some() {
             for node in &self.nodes {
                 crate::broker_ensure!(
@@ -118,6 +165,59 @@ impl ClusterConfig {
     pub fn self_node(&self) -> Option<&ClusterNodeConfig> {
         self.nodes.iter().find(|node| node.node_id == self.node_id)
     }
+
+    pub fn advertised_route_addr(&self) -> Option<&str> {
+        self.route_advertise
+            .as_deref()
+            .or_else(|| self.self_node().and_then(|node| node.route_addr.as_deref()))
+    }
+}
+
+fn validate_route_advertisement(value: &str, field: &str) -> Result<()> {
+    if let Ok(address) = value.parse::<SocketAddr>() {
+        crate::broker_ensure!(
+            !address.ip().is_unspecified(),
+            "config field {field} must not advertise a wildcard address"
+        );
+        crate::broker_ensure!(
+            address.port() > 0,
+            "config field {field} must use a non-zero port"
+        );
+        return Ok(());
+    }
+    let (host, port) = value
+        .rsplit_once(':')
+        .ok_or_else(|| BrokerError::msg(format!("config field {field} must be host:port")))?;
+    let port = port
+        .parse::<u16>()
+        .map_err(|_| BrokerError::msg(format!("config field {field} has an invalid port")))?;
+    crate::broker_ensure!(port > 0, "config field {field} must use a non-zero port");
+    let host = host.trim_matches(['[', ']']);
+    crate::broker_ensure!(
+        valid_route_hostname(host),
+        "config field {field} must advertise a routable hostname or IP address"
+    );
+    Ok(())
+}
+
+fn valid_route_hostname(host: &str) -> bool {
+    !host.is_empty()
+        && host.len() <= 253
+        && host.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                && label
+                    .as_bytes()
+                    .first()
+                    .is_some_and(u8::is_ascii_alphanumeric)
+                && label
+                    .as_bytes()
+                    .last()
+                    .is_some_and(u8::is_ascii_alphanumeric)
+        })
 }
 
 pub(super) fn get_cluster_config(value: &serde_json::Value) -> Result<Option<ClusterConfig>> {
@@ -147,6 +247,7 @@ pub(super) fn get_cluster_config(value: &serde_json::Value) -> Result<Option<Clu
     let allow_insecure_internal_transports =
         get_bool(cluster, "allow_insecure_internal_transports")?.unwrap_or(false);
     let route_listen = get_optional_socket_addr(cluster, "route_listen")?;
+    let route_advertise = get_string(cluster, "route_advertise")?.map(str::to_string);
     let route_tls = get_internal_tls_config(cluster, "route_tls")?;
     let routes = get_string_array(cluster, "routes")?;
     let route_reconnect_ms = get_u64(cluster, "route_reconnect_ms")?.unwrap_or(500);
@@ -168,6 +269,7 @@ pub(super) fn get_cluster_config(value: &serde_json::Value) -> Result<Option<Clu
         raft_tls,
         allow_insecure_internal_transports,
         route_listen,
+        route_advertise,
         route_tls,
         routes,
         route_reconnect_ms,

@@ -5,6 +5,9 @@ use support::*;
 #[path = "client_server/client_server_tests.rs"]
 mod client_server_tests;
 
+#[path = "client_server/route_advertisement_tests.rs"]
+mod route_advertisement_tests;
+
 #[path = "client_server/authorization_middleware_tests.rs"]
 mod authorization_middleware_tests;
 

@@ -25,7 +25,21 @@ where
             .map_err(|_| BrokerError::msg("route writer closed"))?;
     }
     let writer_task = tokio::spawn(async move {
-        while let Some(frame) = receiver.recv().await {
+        let heartbeat_every = Duration::from_millis(ROUTE_FRAME_READ_TIMEOUT_MS / 2);
+        let mut heartbeat = tokio::time::interval_at(
+            tokio::time::Instant::now() + heartbeat_every,
+            heartbeat_every,
+        );
+        loop {
+            let frame = tokio::select! {
+                frame = receiver.recv() => {
+                    let Some(frame) = frame else {
+                        break;
+                    };
+                    frame
+                }
+                _ = heartbeat.tick() => RouteFrame::Ping,
+            };
             write_route_frame(&mut writer, &writer_auth_token, &frame).await?;
         }
         Ok::<(), BrokerError>(())
@@ -102,7 +116,7 @@ where
         }
     }
     if let Some(node_id) = peer_id {
-        mesh.remove_peer(node_id).await;
+        mesh.remove_peer(node_id, &sender).await;
     }
     writer_task.abort();
     Ok(())

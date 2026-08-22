@@ -15,6 +15,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates ./crates
+COPY third_party ./third_party
 
 FROM source AS build
 RUN mkdir -p /out/data/wal /out/data/raft \

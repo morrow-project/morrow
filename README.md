@@ -109,6 +109,7 @@ the broker WAL rather than entering metadata consensus:
     "raft_listen": "127.0.0.1:5221",
     "allow_insecure_internal_transports": true,
     "route_listen": "127.0.0.1:6221",
+    "route_advertise": "127.0.0.1:6221",
     "routes": [],
     "route_reconnect_ms": 500,
     "raft_dir": "./broker-wal/node1/raft",
@@ -139,9 +140,11 @@ plaintext sockets. `allow_insecure_internal_transports` is an explicit escape
 hatch for loopback-only tests such as the example above; do not enable it on a
 shared network.
 If `route_listen` is set, the node also starts an internal route listener.
-`routes` are seed route addresses; nodes gossip discovered peers over route
-connections after authenticating with `cluster.auth_token`, and dial until they
-form a full mesh. Route traffic is live-only:
+`route_advertise` is the routable address announced to peers; it may instead be
+derived from this node's `nodes[].route_addr`. Wildcard addresses are valid bind
+targets but are rejected as advertisements. `routes` are seed route addresses;
+nodes gossip discovered peers over route connections after authenticating with
+`cluster.auth_token`, and dial until they form a full mesh. Route traffic is live-only:
 transient subscriptions and `_INBOX.*` request/reply traffic can cross nodes,
 while durable stream data stays on partition replicas. Without
 `route_listen`, clients can still connect to any Raft node through the legacy

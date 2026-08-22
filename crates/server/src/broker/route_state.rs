@@ -21,7 +21,7 @@ pub(super) struct RouteTlsRuntime {
 pub(super) struct RouteMeshState {
     pub(super) node_id: u64,
     pub(super) route_listen: SocketAddr,
-    pub(super) route_addr: String,
+    pub(super) route_advertise: String,
     pub(super) client_addr: SocketAddr,
     pub(super) seeds: Vec<String>,
     pub(super) reconnect_ms: u64,

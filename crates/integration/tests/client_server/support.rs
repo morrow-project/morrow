@@ -157,6 +157,7 @@ impl ClusterHarness {
                     raft_tls: secure.then(|| internal_tls_config(node.node_id)),
                     allow_insecure_internal_transports: !secure,
                     route_listen: enable_routes.then_some(node.route_addr),
+                    route_advertise: enable_routes.then(|| node.route_addr.to_string()),
                     route_tls: secure.then(|| internal_tls_config(node.node_id)),
                     routes: if !enable_routes || node.node_id == 1 {
                         Vec::new()

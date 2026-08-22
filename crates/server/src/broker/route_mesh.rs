@@ -11,10 +11,10 @@ impl RouteMesh {
         let Some(route_listen) = cluster.route_listen else {
             return Ok(None);
         };
-        let route_addr = cluster
-            .self_node()
-            .and_then(|node| node.route_addr.clone())
-            .unwrap_or_else(|| route_listen.to_string());
+        let route_advertise = cluster
+            .advertised_route_addr()
+            .expect("validated route advertisement")
+            .to_string();
         let tls = cluster
             .route_tls
             .as_ref()
@@ -50,7 +50,7 @@ impl RouteMesh {
             inner: Arc::new(Mutex::new(RouteMeshState {
                 node_id: cluster.node_id,
                 route_listen,
-                route_addr,
+                route_advertise,
                 client_addr: config.listen,
                 seeds: cluster.routes.clone(),
                 reconnect_ms: cluster.route_reconnect_ms,
@@ -158,7 +158,7 @@ impl RouteMesh {
         addrs.dedup();
         addrs
             .into_iter()
-            .filter(|addr| *addr != state.route_addr)
+            .filter(|addr| *addr != state.route_advertise)
             .filter(|addr| {
                 !state
                     .peers
@@ -191,7 +191,7 @@ impl RouteMesh {
         let state = self.inner.lock().await;
         RouteFrame::Hello {
             node_id: state.node_id,
-            route_addr: state.route_addr.clone(),
+            route_addr: state.route_advertise.clone(),
             client_addr: state.client_addr,
         }
     }
@@ -205,7 +205,7 @@ impl RouteMesh {
                 .cloned()
                 .chain(std::iter::once(RoutePeerInfo {
                     node_id: state.node_id,
-                    route_addr: state.route_addr.clone(),
+                    route_addr: state.route_advertise.clone(),
                     client_addr: state.client_addr,
                 }))
                 .collect(),
@@ -227,7 +227,14 @@ impl RouteMesh {
         sender: mpsc::Sender<RouteFrame>,
     ) -> Option<bool> {
         let mut state = self.inner.lock().await;
-        if info.node_id == state.node_id || info.route_addr == state.route_addr {
+        if info.node_id == state.node_id
+            || info.route_addr == state.route_advertise
+            || !preferred_route_direction(state.node_id, info.node_id, direction)
+            || state
+                .known_peers
+                .values()
+                .any(|peer| peer.node_id != info.node_id && peer.route_addr == info.route_addr)
+        {
             return None;
         }
         let added = !state.known_peers.contains_key(&info.node_id);
@@ -249,18 +256,29 @@ impl RouteMesh {
         Some(added)
     }
 
-    pub(super) async fn remove_peer(&self, node_id: u64) {
+    pub(super) async fn remove_peer(&self, node_id: u64, sender: &mpsc::Sender<RouteFrame>) {
         let mut state = self.inner.lock().await;
-        state.peers.remove(&node_id);
+        if state
+            .peers
+            .get(&node_id)
+            .is_some_and(|peer| peer.sender.same_channel(sender))
+        {
+            state.peers.remove(&node_id);
+        }
     }
 
     pub(super) async fn merge_peers(&self, peers: Vec<RoutePeerInfo>) -> Vec<u64> {
         let mut state = self.inner.lock().await;
         let node_id = state.node_id;
-        let route_addr = state.route_addr.clone();
+        let route_advertise = state.route_advertise.clone();
         let mut added = Vec::new();
         for peer in peers {
-            if peer.node_id != node_id && peer.route_addr != route_addr {
+            if peer.node_id != node_id
+                && peer.route_addr != route_advertise
+                && !state.known_peers.values().any(|known| {
+                    known.node_id != peer.node_id && known.route_addr == peer.route_addr
+                })
+            {
                 if !state.known_peers.contains_key(&peer.node_id) {
                     added.push(peer.node_id);
                 }
@@ -456,4 +474,16 @@ impl RouteMesh {
             connected,
         }
     }
+}
+
+fn preferred_route_direction(
+    local_node_id: u64,
+    remote_node_id: u64,
+    direction: RouteDirection,
+) -> bool {
+    matches!(
+        (local_node_id.cmp(&remote_node_id), direction),
+        (std::cmp::Ordering::Less, RouteDirection::Inbound)
+            | (std::cmp::Ordering::Greater, RouteDirection::Outbound)
+    )
 }
