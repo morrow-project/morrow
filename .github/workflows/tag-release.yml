@@ -1,0 +1,74 @@
+name: Tag Morrow Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Merged workspace version to tag, such as 0.1.1
+        required: true
+        type: string
+
+permissions:
+  actions: write
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  tag:
+    name: Tag release ${{ inputs.version }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+          rustflags: ""
+
+      - name: Verify merged workspace version
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Release tags must use plain semantic versions such as 0.1.1; got ${VERSION}" >&2
+            exit 1
+          fi
+
+          cargo metadata --no-deps --format-version 1 --locked >/tmp/morrow-metadata.json
+          versions="$(jq -r '.packages[] | select(.name != "byte-unit") | .version' /tmp/morrow-metadata.json | sort -u)"
+          if [[ "$(printf '%s\n' "${versions}" | wc -l | tr -d ' ')" != "1" || "${versions}" != "${VERSION}" ]]; then
+            echo "Workspace versions do not all match ${VERSION}:" >&2
+            echo "${versions}" >&2
+            exit 1
+          fi
+
+          if git ls-remote --exit-code --tags origin "refs/tags/${VERSION}" >/dev/null 2>&1; then
+            echo "Release tag ${VERSION} already exists" >&2
+            exit 1
+          fi
+
+      - name: Create and push tag
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag --annotate "${VERSION}" --message "Release ${VERSION}"
+          git push origin "${VERSION}"
+
+      - name: Dispatch binary release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: gh workflow run release.yml --repo "${GITHUB_REPOSITORY}" --ref "${VERSION}"
