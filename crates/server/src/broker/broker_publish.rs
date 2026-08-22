@@ -1,7 +1,10 @@
 use super::*;
 
 impl Morrow {
-    async fn load_partition_record(&self, metadata: PublishRecord) -> Result<PublishRecord> {
+    pub(super) async fn load_partition_record(
+        &self,
+        metadata: PublishRecord,
+    ) -> Result<PublishRecord> {
         if metadata.stream.is_none() {
             return Ok(metadata);
         }

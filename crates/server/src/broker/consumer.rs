@@ -42,6 +42,7 @@ impl Consumer {
             members: HashMap::new(),
             pending,
             pending_attempts,
+            preparing: HashSet::new(),
             in_flight: in_flight
                 .into_iter()
                 .map(|(seq, attempt)| {

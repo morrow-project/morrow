@@ -300,6 +300,10 @@ impl DurableBrokerState {
                 .as_ref()
                 .map(|consumer| consumer.pending_attempts.clone())
                 .unwrap_or_default();
+            let preparing = existing
+                .as_ref()
+                .map(|consumer| consumer.preparing.clone())
+                .unwrap_or_default();
             let in_flight = existing
                 .as_ref()
                 .map(|consumer| consumer.in_flight.clone())
@@ -313,6 +317,7 @@ impl DurableBrokerState {
                     members,
                     pending,
                     pending_attempts,
+                    preparing,
                     in_flight,
                     acked,
                     delivered,

@@ -113,6 +113,7 @@ impl Morrow {
                     members: HashMap::new(),
                     pending: BTreeSet::new(),
                     pending_attempts: HashMap::new(),
+                    preparing: HashSet::new(),
                     in_flight: HashMap::new(),
                     acked: HashSet::new(),
                     delivered: 0,
@@ -290,23 +291,74 @@ impl Morrow {
         max_bytes: usize,
         max_encoded_bytes: usize,
     ) -> Result<PullBatch> {
-        let batch = {
-            let mut inner = self.inner.lock().await;
-            crate::broker_ensure!(
-                inner.consumers.contains_key(consumer_id),
-                "unknown consumer"
-            );
-            inner.prepare_pull_batch(
+        let mut deliveries = Vec::new();
+        let mut bytes = 0usize;
+        while deliveries.len() < max_messages {
+            let candidate = {
+                let mut inner = self.inner.lock().await;
+                crate::broker_ensure!(
+                    inner.consumers.contains_key(consumer_id),
+                    "unknown consumer"
+                );
+                inner.reserve_pull_candidate(
+                    consumer_id,
+                    &self.partition_logs,
+                    self.hooks.clock.now_ms(),
+                )
+            };
+            let Some((seq, attempt, deadline_ms, metadata)) = candidate else {
+                break;
+            };
+            let message = match self.load_partition_record(metadata).await {
+                Ok(message) => message,
+                Err(err) => {
+                    self.inner
+                        .lock()
+                        .await
+                        .release_pull_candidate(consumer_id, seq);
+                    return Err(err);
+                }
+            };
+            let next_bytes = bytes
+                .checked_add(message.payload.len())
+                .ok_or_else(|| BrokerError::msg("FETCH payload byte count overflow"))?;
+            let encoded = protocol::durable_message(
                 consumer_id,
-                max_messages,
-                max_bytes,
-                max_encoded_bytes,
-                &self.partition_logs,
-                self.hooks.clock.now_ms(),
-            )?
-        };
+                &message.subject,
+                message.reply_to.as_deref(),
+                &message
+                    .headers
+                    .iter()
+                    .map(|header| (header.name.as_str(), header.value.as_str()))
+                    .collect::<Vec<_>>(),
+                message.stream.as_deref().unwrap_or_default(),
+                message.partition.unwrap_or_default(),
+                message.offset.unwrap_or_default(),
+                message.key.as_deref(),
+                message.timestamp_ms,
+                attempt,
+                deadline_ms,
+                seq,
+                u64::MAX,
+                &message.payload,
+            )
+            .len();
+            if next_bytes > max_bytes || bytes.saturating_add(encoded) > max_encoded_bytes {
+                self.inner
+                    .lock()
+                    .await
+                    .release_pull_candidate(consumer_id, seq);
+                break;
+            }
+            let lease = {
+                let mut inner = self.inner.lock().await;
+                inner.commit_pull_delivery(consumer_id, seq, attempt, deadline_ms, &message)?
+            };
+            bytes = next_bytes;
+            deliveries.push(PullDelivery { message, lease });
+        }
         self.wal.flush_due().await?;
-        Ok(batch)
+        Ok(PullBatch { deliveries, bytes })
     }
 
     pub(super) async fn control_pull_delivery(

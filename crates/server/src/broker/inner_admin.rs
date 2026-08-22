@@ -147,6 +147,7 @@ impl DurableBrokerState {
                 members: HashMap::new(),
                 pending: BTreeSet::new(),
                 pending_attempts: HashMap::new(),
+                preparing: HashSet::new(),
                 in_flight: HashMap::new(),
                 acked: HashSet::new(),
                 delivered: 0,
