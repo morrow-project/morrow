@@ -132,7 +132,7 @@ jobs:
 
   docker:
     name: Publish Docker image
-    needs: tag
+    needs: [tag, build]
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -178,9 +178,9 @@ jobs:
             CARGO_PROFILE=release
             CARGO_PROFILE_DIR=release
 
-  publish:
-    name: Publish GitHub Release
-    needs: [tag, build, docker]
+  publish-binaries:
+    name: Publish binary release
+    needs: [tag, build]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
