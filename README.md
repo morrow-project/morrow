@@ -320,14 +320,14 @@ with message payloads or credentials.
 Build and run the broker from the repository root:
 
 ```bash
-cargo run --release -p server -- morrow.json
+cargo run --release -p server --bin morrow-server -- morrow.json
 ```
 
 If no config path is provided, the broker reads `morrow.json` from the current
 directory:
 
 ```bash
-cargo run --release -p server
+cargo run --release -p server --bin morrow-server
 ```
 
 The WAL directory is created automatically. Stop the broker with `Ctrl-C`; it

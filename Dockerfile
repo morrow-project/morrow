@@ -40,16 +40,16 @@ RUN mkdir -p /out/data/wal /out/data/raft \
 EOF
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/workspace/target \
-    cargo build --release --locked -p server --bin morrow \
-    && cp target/release/morrow /out/morrow
+    cargo build --release --locked -p server --bin morrow-server \
+    && cp target/release/morrow-server /out/morrow-server
 
 FROM ${RUNTIME_IMAGE} AS runtime
 WORKDIR /var/lib/morrow
-COPY --from=build /out/morrow /usr/local/bin/morrow
+COPY --from=build /out/morrow-server /usr/local/bin/morrow-server
 COPY --from=build /out/morrow.json /etc/morrow/morrow.json
 COPY --chown=65532:65532 --from=build /out/data /var/lib/morrow
 USER 65532:65532
 EXPOSE 4222
 VOLUME ["/var/lib/morrow"]
-ENTRYPOINT ["/usr/local/bin/morrow"]
+ENTRYPOINT ["/usr/local/bin/morrow-server"]
 CMD ["/etc/morrow/morrow.json"]
