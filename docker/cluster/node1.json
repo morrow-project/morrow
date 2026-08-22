@@ -1,7 +1,7 @@
 {
   "listen": "0.0.0.0:4222",
   "http_listen": "0.0.0.0:8222",
-  "admin_token": "change-me-admin-token",
+  "admin_token_file": "/run/secrets/broker_admin_token",
   "wal_dir": "/var/lib/broker/wal",
   "wal_segment_bytes": 67108864,
   "fsync_interval_ms": 5,
@@ -10,13 +10,18 @@
   "verbose": false,
   "tls": null,
   "auth": {
-    "enabled": false,
-    "clients": []
+    "enabled": true,
+    "clients": [
+      {
+        "client_id": "local-client",
+        "public_key_file": "/run/secrets/broker_client_public_key"
+      }
+    ]
   },
   "cluster": {
     "enabled": true,
     "node_id": 1,
-    "auth_token": "change-me-cluster-token",
+    "auth_token_file": "/run/secrets/broker_cluster_token",
     "raft_listen": "0.0.0.0:5222",
     "route_listen": "0.0.0.0:6222",
     "routes": [

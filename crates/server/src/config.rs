@@ -110,7 +110,7 @@ impl Config {
             .parse()
             .context("config field listen must be a socket address")?;
         let http_listen = get_http_listen(value)?;
-        let admin_token = get_string(value, "admin_token")?.map(str::to_string);
+        let admin_token = get_secret(value, "admin_token", "admin_token_file")?;
         let wal_dir = PathBuf::from(get_string(value, "wal_dir")?.unwrap_or("./broker-wal"));
         let wal_segment_bytes =
             get_u64(value, "wal_segment_bytes")?.unwrap_or(crate::wal::DEFAULT_WAL_SEGMENT_BYTES);
@@ -329,9 +329,12 @@ fn get_auth_config(value: &serde_json::Value) -> Result<AuthConfig> {
                         && !client_id.starts_with('_'),
                     "config field auth.clients[].client_id is invalid"
                 );
-                let public_key = get_string(value, "public_key")?.ok_or_else(|| {
-                    BrokerError::msg("config field auth.clients[].public_key is required")
-                })?;
+                let public_key =
+                    get_secret(value, "public_key", "public_key_file")?.ok_or_else(|| {
+                        BrokerError::msg(
+                            "config field auth.clients[].public_key or public_key_file is required",
+                        )
+                    })?;
                 let permissions = get_auth_permissions(value)?;
                 clients.insert(
                     client_id.to_string(),
@@ -445,6 +448,37 @@ fn get_bounded_usize(value: &serde_json::Value, key: &str, default: usize) -> Re
         })
         .transpose()
         .map(|value| value.unwrap_or(default))
+}
+
+fn get_secret(
+    value: &serde_json::Value,
+    inline_key: &str,
+    file_key: &str,
+) -> Result<Option<String>> {
+    let inline = get_string(value, inline_key)?;
+    let file = get_string(value, file_key)?;
+    crate::broker_ensure!(
+        inline.is_none() || file.is_none(),
+        "config fields {inline_key} and {file_key} are mutually exclusive"
+    );
+    let secret = match (inline, file) {
+        (Some(secret), None) => Some(secret.to_string()),
+        (None, Some(path)) => Some(
+            std::fs::read_to_string(path)
+                .with_context(|| format!("reading secret file for config field {file_key}"))?
+                .trim()
+                .to_string(),
+        ),
+        (None, None) => None,
+        (Some(_), Some(_)) => unreachable!(),
+    };
+    if let Some(secret) = &secret {
+        crate::broker_ensure!(
+            !secret.is_empty(),
+            "config field {inline_key} must not be empty"
+        );
+    }
+    Ok(secret)
 }
 fn get_bool(value: &serde_json::Value, key: &str) -> Result<Option<bool>> {
     match value.get(key) {

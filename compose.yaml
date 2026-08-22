@@ -4,8 +4,17 @@ services:
       context: .
     command: ["/etc/broker/cluster/node1.json"]
     ports:
-      - "4221:4222"
-      - "8221:8222"
+      - "127.0.0.1:4221:4222"
+      - "127.0.0.1:8221:8222"
+    secrets:
+      - broker_admin_token
+      - broker_cluster_token
+      - broker_client_public_key
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     volumes:
       - ./docker/cluster/node1.json:/etc/broker/cluster/node1.json:ro
       - broker-node-1-data:/var/lib/broker
@@ -14,8 +23,17 @@ services:
       context: .
     command: ["/etc/broker/cluster/node2.json"]
     ports:
-      - "4222:4222"
-      - "8222:8222"
+      - "127.0.0.1:4222:4222"
+      - "127.0.0.1:8222:8222"
+    secrets:
+      - broker_admin_token
+      - broker_cluster_token
+      - broker_client_public_key
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     volumes:
       - ./docker/cluster/node2.json:/etc/broker/cluster/node2.json:ro
       - broker-node-2-data:/var/lib/broker
@@ -27,8 +45,17 @@ services:
       context: .
     command: ["/etc/broker/cluster/node3.json"]
     ports:
-      - "4223:4222"
-      - "8223:8222"
+      - "127.0.0.1:4223:4222"
+      - "127.0.0.1:8223:8222"
+    secrets:
+      - broker_admin_token
+      - broker_cluster_token
+      - broker_client_public_key
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     volumes:
       - ./docker/cluster/node3.json:/etc/broker/cluster/node3.json:ro
       - broker-node-3-data:/var/lib/broker
@@ -39,3 +66,11 @@ volumes:
   broker-node-1-data:
   broker-node-2-data:
   broker-node-3-data:
+
+secrets:
+  broker_admin_token:
+    file: ${BROKER_ADMIN_TOKEN_FILE:-./.secrets/broker-admin-token}
+  broker_cluster_token:
+    file: ${BROKER_CLUSTER_TOKEN_FILE:-./.secrets/broker-cluster-token}
+  broker_client_public_key:
+    file: ${BROKER_CLIENT_PUBLIC_KEY_FILE:-./.secrets/broker-client-public-key}

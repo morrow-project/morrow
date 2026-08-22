@@ -82,12 +82,12 @@ the broker WAL rather than entering metadata consensus:
 {
   "listen": "127.0.0.1:4221",
   "http_listen": "127.0.0.1:8221",
-  "admin_token": "change-me-admin-token",
+  "admin_token_file": "/run/secrets/broker_admin_token",
   "wal_dir": "./broker-wal/node1",
   "cluster": {
     "enabled": true,
     "node_id": 1,
-    "auth_token": "change-me-cluster-token",
+    "auth_token_file": "/run/secrets/broker_cluster_token",
     "raft_listen": "127.0.0.1:5221",
     "route_listen": "127.0.0.1:6221",
     "routes": [],
@@ -119,7 +119,7 @@ while durable stream data stays on partition replicas. Without
 `route_listen`, clients can still connect to any Raft node through the legacy
 follower proxy path.
 
-When `http_listen` is set, `admin_token` is required and the broker exposes JSON
+When `http_listen` is set, `admin_token` or `admin_token_file` is required and the broker exposes JSON
 admin endpoints protected by `Authorization: Bearer <admin_token>`. Bind this
 listener to loopback or a trusted private interface.
 `GET /cluster` reports cluster size, status, this node's role, leader ID, static
@@ -131,18 +131,54 @@ counters.
 
 ## Docker Compose Cluster
 
-`compose.yaml` starts a three-node broker cluster using the local Dockerfile.
-Each node mounts a read-only config from `docker/cluster/` and gets its own
-named data volume:
+`compose.yaml` is an explicitly local-only development profile. It starts a
+three-node broker cluster using the local Dockerfile, enables client
+challenge-response authentication, mounts credentials as Docker Compose
+secrets, and binds every published port to `127.0.0.1`. It does not enable TLS;
+do not use this profile as a production deployment.
+
+Create fresh local credentials before the first start. The Ed25519 DER file and
+raw private seed stay under the ignored `.secrets` directory and are never
+mounted into a broker container:
+
+```bash
+mkdir -p .secrets
+openssl rand -hex 32 > .secrets/broker-admin-token
+openssl rand -hex 32 > .secrets/broker-cluster-token
+openssl genpkey -algorithm ED25519 -outform DER -out .secrets/local-client-key.der
+tail -c 32 .secrets/local-client-key.der | xxd -p -c 64 > .secrets/local-client-seed
+openssl pkey -inform DER -in .secrets/local-client-key.der -pubout -outform DER \
+  | tail -c 32 | xxd -p -c 64 > .secrets/broker-client-public-key
+docker compose config
+docker compose up --build -d
+docker compose ps
+```
+
+The default secret paths can be replaced with `BROKER_ADMIN_TOKEN_FILE`,
+`BROKER_CLUSTER_TOKEN_FILE`, and `BROKER_CLIENT_PUBLIC_KEY_FILE`. Startup fails
+if a mounted file is missing or empty. Compose passes the same cluster secret to
+all three nodes without placing its contents in rendered Compose output.
+
+Each node mounts a read-only config from `docker/cluster/` and gets its own named
+data volume:
 
 - `broker-node-1-data`
 - `broker-node-2-data`
 - `broker-node-3-data`
 
 Inside each volume, WAL files live under `/var/lib/broker/wal` and Raft data
-lives under `/var/lib/broker/raft`. Client ports are published as `4221`,
-`4222`, and `4223`; admin ports are published as `8221`, `8222`, and `8223`.
-The example admin bearer token is `change-me-admin-token`.
+lives under `/var/lib/broker/raft`. Client ports are visible only on loopback as
+`4221`, `4222`, and `4223`; admin ports are visible only on loopback as `8221`,
+`8222`, and `8223`. Raft port `5222` and route port `6222` are internal-only and
+are not published to the host.
+
+An unauthenticated client can read `INFO` but its `CONNECT` is rejected. Admin
+requests without the bearer token return `401 Unauthorized`. For example:
+
+```bash
+printf 'CONNECT {}\r\n' | nc 127.0.0.1 4221
+curl -i http://127.0.0.1:8221/cluster
+```
 
 ## Release Builds
 

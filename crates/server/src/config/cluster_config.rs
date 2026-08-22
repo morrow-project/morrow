@@ -16,9 +16,9 @@ pub(super) fn get_cluster_config(value: &serde_json::Value) -> Result<Option<Clu
     }
     let node_id = get_u64(cluster, "node_id")?
         .ok_or_else(|| BrokerError::msg("config field cluster.node_id is required"))?;
-    let auth_token = get_string(cluster, "auth_token")?
-        .ok_or_else(|| BrokerError::msg("config field cluster.auth_token is required"))?
-        .to_string();
+    let auth_token = get_secret(cluster, "auth_token", "auth_token_file")?.ok_or_else(|| {
+        BrokerError::msg("config field cluster.auth_token or auth_token_file is required")
+    })?;
     let raft_listen = get_string(cluster, "raft_listen")?
         .ok_or_else(|| BrokerError::msg("config field cluster.raft_listen is required"))?
         .parse()

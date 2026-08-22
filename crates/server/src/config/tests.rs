@@ -104,6 +104,55 @@ fn parses_tls_config_without_validation() {
 }
 
 #[test]
+fn reads_admin_and_client_public_key_from_secret_files() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let admin = dir.path().join("admin-token");
+    let public_key = dir.path().join("client-public-key");
+    std::fs::write(&admin, "admin-secret\n").unwrap();
+    std::fs::write(&public_key, format!("{}\n", "ab".repeat(32))).unwrap();
+    let config = Config::from_json(&serde_json::json!({
+        "listen": "127.0.0.1:0",
+        "http_listen": "127.0.0.1:0",
+        "admin_token_file": admin,
+        "wal_dir": dir.path().join("wal"),
+        "auth": {
+            "enabled": true,
+            "clients": [{
+                "client_id": "local-client",
+                "public_key_file": public_key,
+            }]
+        }
+    }))
+    .unwrap();
+
+    assert_eq!(config.admin_token.as_deref(), Some("admin-secret"));
+    assert_eq!(
+        config.auth.clients["local-client"].public_key,
+        "ab".repeat(32)
+    );
+}
+
+#[test]
+fn rejects_missing_or_ambiguous_secret_files() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let missing = Config::from_json(&serde_json::json!({
+        "wal_dir": dir.path().join("missing-wal"),
+        "http_listen": "127.0.0.1:0",
+        "admin_token_file": dir.path().join("missing-token"),
+    }))
+    .unwrap_err();
+    assert!(missing.to_string().contains("reading secret file"));
+
+    let ambiguous = Config::from_json(&serde_json::json!({
+        "wal_dir": dir.path().join("ambiguous-wal"),
+        "admin_token": "inline",
+        "admin_token_file": dir.path().join("token"),
+    }))
+    .unwrap_err();
+    assert!(ambiguous.to_string().contains("mutually exclusive"));
+}
+
+#[test]
 fn parses_cluster_config() {
     let value = serde_json::json!({
         "wal_dir": "./target/test-wal-cluster-config",
