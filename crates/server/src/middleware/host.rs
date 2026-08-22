@@ -5,12 +5,16 @@ use wasmtime::{Caller, Extern, Linker, StoreLimits, StoreLimitsBuilder};
 pub(super) struct HostState {
     pub manifest: Arc<MiddlewareManifest>,
     pub stage: MiddlewareStage,
-    pub message: MiddlewareMessage,
     pub emitted: Vec<EmittedMessage>,
     pub denied: Option<String>,
     pub allocated: usize,
     pub initial_size: usize,
     pub limits: StoreLimits,
+    message: MiddlewareMessage,
+    subject: Option<String>,
+    key: Option<Vec<u8>>,
+    headers: Option<Vec<(String, String)>>,
+    payload: Option<Vec<u8>>,
 }
 
 impl HostState {
@@ -32,7 +36,66 @@ impl HostState {
             allocated: 0,
             initial_size,
             limits,
+            subject: None,
+            key: None,
+            headers: None,
+            payload: None,
         }
+    }
+
+    pub(super) fn subject(&self) -> &str {
+        self.subject.as_deref().unwrap_or(&self.message.subject)
+    }
+
+    pub(super) fn key(&self) -> Option<&[u8]> {
+        self.key.as_deref().or(self.message.key.as_deref())
+    }
+
+    pub(super) fn headers(&self) -> &[(String, String)] {
+        self.headers.as_deref().unwrap_or(&self.message.headers)
+    }
+
+    pub(super) fn payload(&self) -> &[u8] {
+        self.payload.as_deref().unwrap_or(&self.message.payload)
+    }
+
+    pub(super) fn message_size(&self) -> usize {
+        self.subject().len()
+            + self.key().map_or(0, <[u8]>::len)
+            + self
+                .headers()
+                .iter()
+                .map(|(name, value)| name.len() + value.len())
+                .sum::<usize>()
+            + self.payload().len()
+            + self.message.reply_to.as_ref().map_or(0, String::len)
+    }
+
+    pub(super) fn finish(
+        mut self,
+    ) -> (
+        MiddlewareMessage,
+        Vec<EmittedMessage>,
+        Option<String>,
+        usize,
+    ) {
+        if let Some(subject) = self.subject {
+            self.message.subject = subject;
+        }
+        if let Some(key) = self.key {
+            self.message.key = Some(key);
+        }
+        if let Some(headers) = self.headers {
+            self.message.headers = headers;
+        }
+        if let Some(payload) = self.payload {
+            self.message.payload = payload;
+        }
+        (self.message, self.emitted, self.denied, self.initial_size)
+    }
+
+    pub(super) fn original(self) -> MiddlewareMessage {
+        self.message
     }
 
     fn require(&mut self, capability: Capability) -> bool {
@@ -64,13 +127,13 @@ pub(super) fn add_host_functions(linker: &mut Linker<HostState>) -> wasmtime::Re
                 return -1;
             }
             let bytes = match field {
-                0 => caller.data().message.subject.as_bytes().to_vec(),
-                1 => caller.data().message.key.clone().unwrap_or_default(),
-                2 => match serde_json::to_vec(&caller.data().message.headers) {
+                0 => caller.data().subject().as_bytes().to_vec(),
+                1 => caller.data().key().unwrap_or_default().to_vec(),
+                2 => match serde_json::to_vec(caller.data().headers()) {
                     Ok(headers) => headers,
                     Err(_) => return -1,
                 },
-                3 => caller.data().message.payload.clone(),
+                3 => caller.data().payload().to_vec(),
                 4 => caller
                     .data()
                     .message
@@ -115,10 +178,10 @@ pub(super) fn add_host_functions(linker: &mut Linker<HostState>) -> wasmtime::Re
                     String::from_utf8(bytes)
                         .ok()
                         .filter(|subject| protocol::subject::validate_subject(subject))
-                        .map(|subject| state.message.subject = subject)
+                        .map(|subject| state.subject = Some(subject))
                 }
                 1 if state.require(Capability::WriteKey) && state.stage.may_mutate_subject() => {
-                    state.message.key = Some(bytes);
+                    state.key = Some(bytes);
                     Some(())
                 }
                 2 if state.require(Capability::WriteHeaders)
@@ -126,12 +189,12 @@ pub(super) fn add_host_functions(linker: &mut Linker<HostState>) -> wasmtime::Re
                 {
                     serde_json::from_slice(&bytes)
                         .ok()
-                        .map(|headers| state.message.headers = headers)
+                        .map(|headers| state.headers = Some(headers))
                 }
                 3 if state.require(Capability::WritePayload)
                     && state.stage.may_mutate_persisted_fields() =>
                 {
-                    state.message.payload = bytes;
+                    state.payload = Some(bytes);
                     Some(())
                 }
                 _ => None,

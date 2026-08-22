@@ -299,6 +299,123 @@ fn hot_upgrade_and_rollback_switch_complete_generations() {
 }
 
 #[test]
+fn pooled_executions_do_not_reuse_guest_or_host_state() {
+    let runtime = MiddlewareRuntime::new().unwrap();
+    let mut isolated = manifest([Capability::SecondaryPublish, Capability::Clock]);
+    isolated.budget.max_emitted_messages = 1;
+    runtime
+        .install(vec![(
+            isolated,
+            wasm(
+                "(module
+                    (import \"broker\" \"emit\" (func $emit (param i32 i32 i32 i32) (result i32)))
+                    (import \"broker\" \"host-call\" (func $host (param i32) (result i32)))
+                    (memory (export \"memory\") 1)
+                    (data (i32.const 8) \"events.out\")
+                    (func (export \"process\") (param i32) (result i32)
+                      i32.const 0 i32.load8_u if unreachable end
+                      i32.const 0 i32.const 1 i32.store8
+                      i32.const 3 call $host drop
+                      i32.const 8 i32.const 10 i32.const 0 i32.const 1 call $emit drop
+                      i32.const 0))",
+            ),
+        )])
+        .unwrap();
+
+    for _ in 0..3 {
+        let outcome = runtime
+            .process(MiddlewareStage::Ingress, message(), 0)
+            .unwrap();
+        assert_eq!(outcome.emitted.len(), 1);
+        assert_eq!(outcome.emitted[0].subject, "events.out");
+    }
+
+    runtime
+        .install(vec![(
+            manifest([]),
+            wasm(
+                "(module
+                    (import \"broker\" \"host-call\" (func $host (param i32) (result i32)))
+                    (func (export \"process\") (param i32) (result i32)
+                      i32.const 3 call $host drop i32.const 0))",
+            ),
+        )])
+        .unwrap();
+    assert!(
+        runtime
+            .process(MiddlewareStage::Ingress, message(), 0)
+            .unwrap_err()
+            .to_string()
+            .contains("undeclared capability")
+    );
+}
+
+#[test]
+fn bounded_execution_pool_reports_backpressure() {
+    let runtime = MiddlewareRuntime::with_pool_size_for_test(1).unwrap();
+    runtime
+        .install(vec![(
+            manifest([]),
+            wasm("(module (func (export \"process\") (param i32) (result i32) i32.const 0))"),
+        )])
+        .unwrap();
+    let occupied = runtime.occupy_execution_slot_for_test().unwrap();
+
+    let error = runtime
+        .process(MiddlewareStage::Ingress, message(), 0)
+        .unwrap_err();
+    assert_eq!(error.to_string(), "middleware execution pool is busy");
+
+    drop(occupied);
+    assert_eq!(
+        runtime
+            .process(MiddlewareStage::Ingress, message(), 0)
+            .unwrap()
+            .decision,
+        MiddlewareDecision::Continue
+    );
+}
+
+#[test]
+fn process_signature_is_validated_at_install_time() {
+    let runtime = MiddlewareRuntime::new().unwrap();
+    let error = runtime
+        .install(vec![(
+            manifest([]),
+            wasm("(module (func (export \"process\") (result i64) i64.const 0))"),
+        )])
+        .unwrap_err();
+    assert!(error.to_string().contains("process(i32) -> i32"));
+}
+
+#[test]
+fn failed_execution_discards_staged_message_mutations() {
+    let runtime = MiddlewareRuntime::new().unwrap();
+    let mut fail_open = manifest([Capability::WritePayload]);
+    fail_open.failure_policy = FailurePolicy::FailOpen;
+    runtime
+        .install(vec![(
+            fail_open,
+            wasm(
+                "(module
+                    (import \"broker\" \"set-field\" (func $set (param i32 i32 i32) (result i32)))
+                    (memory (export \"memory\") 1)
+                    (data (i32.const 0) \"changed\")
+                    (func (export \"process\") (param i32) (result i32)
+                      i32.const 3 i32.const 0 i32.const 7 call $set drop
+                      unreachable))",
+            ),
+        )])
+        .unwrap();
+
+    let outcome = runtime
+        .process(MiddlewareStage::Ingress, message(), 0)
+        .unwrap();
+    assert_eq!(outcome.message.payload, b"hello");
+    assert!(outcome.emitted.is_empty());
+}
+
+#[test]
 #[ignore = "manual no-op middleware benchmark"]
 fn benchmark_noop_middleware_overhead() {
     let runtime = MiddlewareRuntime::new().unwrap();
@@ -308,23 +425,50 @@ fn benchmark_noop_middleware_overhead() {
             wasm("(module (func (export \"process\") (param i32) (result i32) i32.const 0))"),
         )])
         .unwrap();
-    let started = std::time::Instant::now();
-    let mut latencies = Vec::with_capacity(10_000);
-    for _ in 0..10_000 {
-        let call_started = std::time::Instant::now();
-        std::hint::black_box(
-            runtime
-                .process(MiddlewareStage::Ingress, message(), 0)
-                .unwrap(),
-        );
-        latencies.push(call_started.elapsed());
+    fn measure(mut call: impl FnMut(), iterations: usize) -> (f64, [std::time::Duration; 3]) {
+        let started = std::time::Instant::now();
+        let mut latencies = Vec::with_capacity(iterations);
+        for _ in 0..iterations {
+            let call_started = std::time::Instant::now();
+            call();
+            latencies.push(call_started.elapsed());
+        }
+        let elapsed = started.elapsed();
+        latencies.sort();
+        (
+            iterations as f64 / elapsed.as_secs_f64(),
+            [
+                latencies[iterations * 50 / 100],
+                latencies[iterations * 95 / 100],
+                latencies[iterations * 99 / 100],
+            ],
+        )
     }
-    let elapsed = started.elapsed();
-    latencies.sort();
+
+    let iterations = 10_000;
+    let (before_throughput, before) = measure(
+        || {
+            std::hint::black_box(
+                runtime
+                    .process_unprepared_for_test(MiddlewareStage::Ingress, message())
+                    .unwrap(),
+            );
+        },
+        iterations,
+    );
+    let (after_throughput, after) = measure(
+        || {
+            std::hint::black_box(
+                runtime
+                    .process(MiddlewareStage::Ingress, message(), 0)
+                    .unwrap(),
+            );
+        },
+        iterations,
+    );
     eprintln!(
-        "noop_10k={elapsed:?} throughput_per_second={:.0} p50={:?} p99={:?}",
-        10_000.0 / elapsed.as_secs_f64(),
-        latencies[5_000],
-        latencies[9_900],
+        "before throughput={before_throughput:.0}/s p50={:?} p95={:?} p99={:?}; \
+         after throughput={after_throughput:.0}/s p50={:?} p95={:?} p99={:?}",
+        before[0], before[1], before[2], after[0], after[1], after[2],
     );
 }
