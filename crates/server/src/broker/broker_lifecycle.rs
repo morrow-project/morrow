@@ -150,7 +150,8 @@ impl Broker {
                 None
             }
         };
-        let route_mesh = RouteMesh::from_config(&config)?;
+        let quotas = Arc::new(crate::quota::QuotaRuntime::new(&config.quotas));
+        let route_mesh = RouteMesh::from_config(&config, quotas.clone())?;
         Ok(Self {
             inner: Arc::new(Mutex::new(Inner {
                 wal,
@@ -168,6 +169,7 @@ impl Broker {
             config,
             tls_acceptor,
             admin_tls_acceptor,
+            quotas,
             cluster: Arc::new(Mutex::new(cluster)),
             route_mesh,
             middleware: hooks.middleware.clone(),
@@ -333,6 +335,25 @@ impl Broker {
         }
     }
 
+    pub(super) async fn quotas_response(&self) -> QuotasResponse {
+        let inner = self.inner.lock().await;
+        QuotasResponse {
+            sockets: self.quotas.snapshot(),
+            transient_subscriptions: StateQuotaUsage {
+                used: inner.transient_subscriptions.len(),
+                limit: self.config.quotas.max_transient_subscriptions,
+            },
+            durable_consumers: StateQuotaUsage {
+                used: inner.consumers.len(),
+                limit: self.config.quotas.max_durable_consumers,
+            },
+            outbound_bytes_per_connection_limit: self
+                .config
+                .quotas
+                .max_outbound_bytes_per_connection,
+        }
+    }
+
     #[cfg(test)]
     pub(crate) async fn tick_redelivery_for_test(&self) -> Result<()> {
         self.expire_and_redeliver().await
@@ -358,8 +379,18 @@ impl Broker {
     }
 
     pub(super) fn spawn_accepted(&self, stream: TcpStream) {
+        let Some(permit) = self.quotas.try_client() else {
+            tokio::spawn(async move {
+                let mut stream = stream;
+                let _ = stream
+                    .write_all(&protocol::err("connection quota exceeded"))
+                    .await;
+            });
+            return;
+        };
         let broker = self.clone();
         tokio::spawn(async move {
+            let _permit = permit;
             if let Err(err) = broker.handle_accepted(stream).await {
                 error!(error = ?err, "client error");
             }
@@ -436,7 +467,12 @@ impl Broker {
     {
         let id = self.next_connection_id.fetch_add(1, Ordering::Relaxed);
         let (reader, mut writer) = tokio::io::split(stream);
-        let (sender, mut receiver) = mpsc::channel::<Vec<u8>>(256);
+        let (sender, mut receiver) = mpsc::channel::<OutboundFrame>(256);
+        let sender = OutboundQueue::new(
+            sender,
+            self.config.quotas.max_outbound_bytes_per_connection,
+            self.quotas.clone(),
+        );
         self.add_client(id, sender, remote_addr).await?;
         let nonce = {
             let inner = self.inner.lock().await;
@@ -446,20 +482,25 @@ impl Broker {
                 .and_then(|client| client.auth_nonce.clone())
         };
 
-        writer
+        if let Err(err) = writer
             .write_all(&protocol::info_line(
                 self.config.max_payload,
                 nonce.as_deref(),
             ))
-            .await?;
+            .await
+        {
+            self.remove_client(id).await?;
+            return Err(err.into());
+        }
         let writer_task = tokio::spawn(async move {
             while let Some(frame) = receiver.recv().await {
-                writer.write_all(&frame).await?;
+                writer.write_all(frame.as_bytes()).await?;
             }
             Ok::<(), BrokerError>(())
         });
 
         let mut reader = BufReader::new(reader);
+        let mut session_result = Ok(());
         loop {
             let read = async {
                 protocol::read_command(
@@ -470,12 +511,22 @@ impl Broker {
                 .await
             };
             let configured = self.client_is_configured(id).await;
-            let command = if configured {
-                read.await
+            let timeout_ms = if configured {
+                self.config.quotas.client_idle_timeout_ms
             } else {
-                tokio::time::timeout(Duration::from_millis(UNAUTHENTICATED_READ_TIMEOUT_MS), read)
-                    .await
-                    .map_err(|_| BrokerError::msg("unauthenticated read timed out"))?
+                UNAUTHENTICATED_READ_TIMEOUT_MS
+            };
+            let command = match tokio::time::timeout(Duration::from_millis(timeout_ms), read).await
+            {
+                Ok(command) => command,
+                Err(_) => {
+                    session_result = Err(BrokerError::msg(if configured {
+                        "client idle read timed out"
+                    } else {
+                        "unauthenticated read timed out"
+                    }));
+                    break;
+                }
             };
             match command {
                 Ok(Some(command)) => {
@@ -493,7 +544,7 @@ impl Broker {
 
         self.remove_client(id).await?;
         writer_task.abort();
-        Ok(())
+        session_result
     }
 
     pub(super) async fn client_is_configured(&self, id: u64) -> bool {

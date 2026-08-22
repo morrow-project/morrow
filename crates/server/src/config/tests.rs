@@ -105,6 +105,36 @@ fn parses_tls_config_without_validation() {
 }
 
 #[test]
+fn parses_resource_quotas() {
+    let config = Config::from_json(&serde_json::json!({
+        "wal_dir": "./target/test-wal-quotas",
+        "quotas": {
+            "max_connections": 7,
+            "max_connections_per_identity": 2,
+            "max_outbound_bytes_per_connection": 4096,
+            "client_idle_timeout_ms": 50,
+            "http_header_timeout_ms": 25
+        }
+    }))
+    .unwrap();
+    assert_eq!(config.quotas.max_connections, 7);
+    assert_eq!(config.quotas.max_connections_per_identity, 2);
+    assert_eq!(config.quotas.max_outbound_bytes_per_connection, 4096);
+    assert_eq!(config.quotas.client_idle_timeout_ms, 50);
+    assert_eq!(config.quotas.http_header_timeout_ms, 25);
+}
+
+#[test]
+fn rejects_zero_resource_quota() {
+    let err = Config::from_json(&serde_json::json!({
+        "wal_dir": "./target/test-wal-zero-quota",
+        "quotas": {"max_route_connections": 0}
+    }))
+    .unwrap_err();
+    assert!(err.to_string().contains("quotas.max_route_connections"));
+}
+
+#[test]
 fn reads_admin_and_client_public_key_from_secret_files() {
     let dir = tempfile::TempDir::new().unwrap();
     let admin = dir.path().join("admin-token");

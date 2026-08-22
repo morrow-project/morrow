@@ -37,18 +37,23 @@ pub(super) async fn serve_raft(
     auth_token: String,
     partition_data: SharedReplicaData,
     tls: Option<RaftTlsRuntime>,
+    quotas: Arc<crate::quota::QuotaRuntime>,
 ) -> Result<()> {
     let listener = TcpListener::bind(listen)
         .await
         .with_context(|| format!("binding Raft listener {listen}"))?;
     loop {
         let (stream, _) = listener.accept().await.context("accepting Raft RPC")?;
+        let Some(permit) = quotas.try_raft() else {
+            continue;
+        };
         let raft = raft.clone();
         let state_machine = state_machine.clone();
         let auth_token = auth_token.clone();
         let partition_data = partition_data.clone();
         let tls = tls.clone();
         tokio::spawn(async move {
+            let _permit = permit;
             let result = if let Some(tls) = tls {
                 match tokio::time::timeout(
                     Duration::from_millis(tls.handshake_timeout_ms),

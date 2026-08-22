@@ -26,6 +26,20 @@ impl Scenario {
         }
     }
 
+    fn new_with_quotas(quotas: crate::config::ResourceQuotaConfig) -> Self {
+        let dir = TempDir::new().unwrap();
+        let clock = Arc::new(ManualClock::new(1_000));
+        let mut config = test_config(dir.path());
+        config.quotas = quotas;
+        let broker = deterministic_broker(config, clock.clone(), None);
+        Self {
+            _dir: dir,
+            clock,
+            broker,
+            fake_cluster: None,
+        }
+    }
+
     fn new_with_wal_segment_bytes(wal_segment_bytes: u64) -> Self {
         let dir = TempDir::new().unwrap();
         let clock = Arc::new(ManualClock::new(1_000));
@@ -423,6 +437,7 @@ fn test_config(dir: &Path) -> Config {
         http_listen: None,
         admin_token: Some("test-admin-token".to_string()),
         admin_tls: None,
+        quotas: Default::default(),
         wal_dir: dir.to_path_buf(),
         wal_segment_bytes: crate::wal::DEFAULT_WAL_SEGMENT_BYTES,
         fsync_interval_ms: 1,
@@ -439,6 +454,20 @@ fn test_config(dir: &Path) -> Config {
         cluster: None,
         streams: test_streams(),
     }
+}
+fn test_outbound_queue(
+    broker: &Broker,
+    capacity: usize,
+) -> (OutboundQueue, mpsc::Receiver<OutboundFrame>) {
+    let (sender, receiver) = mpsc::channel(capacity);
+    (
+        OutboundQueue::new(
+            sender,
+            broker.config.quotas.max_outbound_bytes_per_connection,
+            broker.quotas.clone(),
+        ),
+        receiver,
+    )
 }
 fn test_streams() -> crate::stream::StreamCatalog {
     crate::stream::StreamCatalog::new(
@@ -549,6 +578,7 @@ mod flow_control_tests;
 mod middleware_tests;
 mod pull_tests;
 mod qos_tests;
+mod quota_tests;
 mod retention_limit_tests;
 mod semantic_tests;
 mod stream_retention_tests;

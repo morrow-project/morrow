@@ -288,6 +288,7 @@ impl Harness {
             http_listen: None,
             admin_token: None,
             admin_tls: None,
+            quotas: Default::default(),
             wal_dir: wal_dir.path().to_path_buf(),
             wal_segment_bytes: server::wal::DEFAULT_WAL_SEGMENT_BYTES,
             fsync_interval_ms: 1,

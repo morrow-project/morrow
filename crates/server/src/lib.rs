@@ -5,6 +5,7 @@ pub mod error;
 pub mod middleware;
 pub mod partition_log;
 pub mod partition_replication;
+pub(crate) mod quota;
 pub mod raft;
 pub(crate) mod security;
 pub mod stream;

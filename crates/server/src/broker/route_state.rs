@@ -6,6 +6,7 @@ pub(super) struct RouteMesh {
     pub(super) auth_token: String,
     pub(super) tls: Option<RouteTlsRuntime>,
     pub(super) configured_route_nodes: Arc<HashMap<String, u64>>,
+    pub(super) quotas: Arc<crate::quota::QuotaRuntime>,
 }
 
 #[derive(Clone)]

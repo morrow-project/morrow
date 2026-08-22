@@ -119,10 +119,14 @@ impl Broker {
     pub(super) async fn add_client(
         &self,
         id: u64,
-        sender: mpsc::Sender<Vec<u8>>,
+        sender: OutboundQueue,
         remote_addr: Option<SocketAddr>,
     ) -> Result<()> {
         let mut inner = self.inner.lock().await;
+        if inner.clients.len() >= self.config.quotas.max_connections {
+            self.quotas.reject_state();
+            crate::broker_bail!("connection quota exceeded");
+        }
         inner.clients.insert(
             id,
             Client {
@@ -176,13 +180,18 @@ impl Broker {
             "CONNECT max_in_flight exceeds server limit {}",
             self.config.max_in_flight
         );
+        let protocol_version = protocol_version.unwrap_or(1);
+        crate::broker_ensure!(
+            matches!(protocol_version, 1 | 2),
+            "unsupported protocol version {protocol_version}; supported versions are 1 and 2"
+        );
         let mut inner = self.inner.lock().await;
         let client = inner
             .clients
-            .get_mut(&id)
+            .get(&id)
             .ok_or_else(|| BrokerError::msg("unknown connection"))?;
         crate::broker_ensure!(!client.configured, "CONNECT already received");
-        let durable_id = if self.config.auth.enabled {
+        let (durable_id, authenticated) = if self.config.auth.enabled {
             let nonce = client
                 .auth_nonce
                 .as_deref()
@@ -203,21 +212,30 @@ impl Broker {
                     "CONNECT durable_id must match authenticated client_id"
                 );
             }
-            client.authenticated = true;
-            Some(client_id)
+            (Some(client_id), true)
         } else {
-            durable_id
+            (durable_id, false)
         };
+        if let Some(identity) = durable_id.as_deref() {
+            let connections = inner
+                .clients
+                .values()
+                .filter(|client| {
+                    client.configured && client.durable_id.as_deref() == Some(identity)
+                })
+                .count();
+            if connections >= self.config.quotas.max_connections_per_identity {
+                self.quotas.reject_state();
+                crate::broker_bail!("connection quota exceeded for identity");
+            }
+        }
+        let client = inner.clients.get_mut(&id).expect("checked client exists");
+        client.authenticated = authenticated;
         client.verbose = verbose || self.config.verbose;
         client.durable_id = durable_id;
         client.ack_timeout_ms = ack_timeout_ms;
         client.max_in_flight = max_in_flight;
-        client.protocol_version = protocol_version.unwrap_or(1);
-        crate::broker_ensure!(
-            matches!(client.protocol_version, 1 | 2),
-            "unsupported protocol version {}; supported versions are 1 and 2",
-            client.protocol_version
-        );
+        client.protocol_version = protocol_version;
         client.configured = true;
         Ok(())
     }
@@ -243,11 +261,19 @@ impl Broker {
 
         let durable_record = {
             let mut inner = self.inner.lock().await;
-            let client = inner
-                .clients
-                .get(&connection_id)
-                .ok_or_else(|| BrokerError::msg("unknown connection"))?;
-            if is_inbox_subscription(&sub_subject) || client.durable_id.is_none() {
+            let (durable_id, ack_timeout_ms, max_in_flight, protocol_version) = {
+                let client = inner
+                    .clients
+                    .get(&connection_id)
+                    .ok_or_else(|| BrokerError::msg("unknown connection"))?;
+                (
+                    client.durable_id.clone(),
+                    client.ack_timeout_ms,
+                    client.max_in_flight,
+                    client.protocol_version,
+                )
+            };
+            if is_inbox_subscription(&sub_subject) || durable_id.is_none() {
                 crate::broker_ensure!(
                     start == protocol::StartPosition::Latest,
                     "transient subscriptions only support @latest"
@@ -257,6 +283,35 @@ impl Broker {
                     "transient subscriptions do not support queue groups"
                 );
                 let key = (connection_id, sid.clone());
+                if !inner.transient_subscriptions.contains_key(&key) {
+                    let identity_count = if let Some(identity) = durable_id.as_deref() {
+                        inner
+                            .transient_subscriptions
+                            .keys()
+                            .filter(|(client_id, _)| {
+                                inner
+                                    .clients
+                                    .get(client_id)
+                                    .and_then(|client| client.durable_id.as_deref())
+                                    == Some(identity)
+                            })
+                            .count()
+                    } else {
+                        inner
+                            .transient_subscriptions
+                            .keys()
+                            .filter(|(client_id, _)| *client_id == connection_id)
+                            .count()
+                    };
+                    if inner.transient_subscriptions.len()
+                        >= self.config.quotas.max_transient_subscriptions
+                        || identity_count
+                            >= self.config.quotas.max_transient_subscriptions_per_identity
+                    {
+                        self.quotas.reject_state();
+                        crate::broker_bail!("transient subscription quota exceeded");
+                    }
+                }
                 if let Some(existing) = inner.transient_subscriptions.get(&key) {
                     let existing_subject = existing.subject.clone();
                     inner
@@ -276,17 +331,39 @@ impl Broker {
                 );
                 None
             } else {
-                if let Some(durable_id) = &client.durable_id {
+                if let Some(durable_id) = &durable_id {
                     let consumer_id = consumer_id(durable_id, queue.as_deref(), &sub_subject, &sid);
+                    if !inner.consumers.contains_key(&consumer_id) {
+                        let identity_consumers = inner
+                            .consumers
+                            .values()
+                            .filter(|consumer| {
+                                consumer.members.keys().any(|member_id| {
+                                    inner
+                                        .clients
+                                        .get(member_id)
+                                        .and_then(|client| client.durable_id.as_deref())
+                                        == Some(durable_id.as_str())
+                                })
+                            })
+                            .count();
+                        if inner.consumers.len() >= self.config.quotas.max_durable_consumers
+                            || identity_consumers
+                                >= self.config.quotas.max_durable_consumers_per_identity
+                        {
+                            self.quotas.reject_state();
+                            crate::broker_bail!("durable consumer quota exceeded");
+                        }
+                    }
                     let record = ConsumerRecord {
                         consumer_id: consumer_id.clone(),
                         filter_subject: sub_subject,
                         queue_group: queue,
-                        ack_timeout_ms: client.ack_timeout_ms,
-                        max_in_flight: client.max_in_flight,
+                        ack_timeout_ms,
+                        max_in_flight,
                         start_position: start,
                     };
-                    Some((consumer_id, record, sid, client.protocol_version))
+                    Some((consumer_id, record, sid, protocol_version))
                 } else {
                     crate::broker_bail!("CONNECT durable_id is required before SUB")
                 }

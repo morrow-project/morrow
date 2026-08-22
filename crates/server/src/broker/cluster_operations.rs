@@ -10,6 +10,7 @@ impl Broker {
             self.tls_acceptor.is_some(),
             &self.config.streams,
             self.config.wal_segment_bytes,
+            self.quotas.clone(),
         )
         .await?;
         runtime.spawn_listener(cluster_config.raft_listen);

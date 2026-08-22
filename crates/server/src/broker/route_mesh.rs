@@ -1,7 +1,10 @@
 use super::*;
 
 impl RouteMesh {
-    pub(super) fn from_config(config: &Config) -> Result<Option<Self>> {
+    pub(super) fn from_config(
+        config: &Config,
+        quotas: Arc<crate::quota::QuotaRuntime>,
+    ) -> Result<Option<Self>> {
         let Some(cluster) = config.cluster.as_ref() else {
             return Ok(None);
         };
@@ -58,6 +61,7 @@ impl RouteMesh {
             auth_token: cluster.auth_token.clone(),
             tls,
             configured_route_nodes,
+            quotas,
         }))
     }
 
@@ -76,10 +80,14 @@ impl RouteMesh {
             loop {
                 match listener.accept().await {
                     Ok((stream, _)) => {
+                        let Some(permit) = accept_mesh.quotas.try_route() else {
+                            continue;
+                        };
                         let mesh = accept_mesh.clone();
                         let broker = accept_broker.clone();
                         let auth_token = accept_auth_token.clone();
                         tokio::spawn(async move {
+                            let _permit = permit;
                             let result =
                                 accept_route_stream(mesh, broker, stream, auth_token).await;
                             if let Err(err) = result {
@@ -103,12 +111,16 @@ impl RouteMesh {
                 interval.tick().await;
                 let addrs = dial_mesh.dial_candidates().await;
                 for (addr, expected_node_id) in addrs {
+                    let Some(permit) = dial_mesh.quotas.try_route() else {
+                        break;
+                    };
                     match TcpStream::connect(&addr).await {
                         Ok(stream) => {
                             let mesh = dial_mesh.clone();
                             let broker = dial_broker.clone();
                             let auth_token = dial_auth_token.clone();
                             tokio::spawn(async move {
+                                let _permit = permit;
                                 let result = connect_route_stream(
                                     mesh,
                                     broker,

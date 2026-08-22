@@ -13,8 +13,8 @@ async fn auth_enabled_generates_fresh_nonce_per_connection() {
         },
     );
     let broker = Broker::open(config).unwrap();
-    let (tx1, _rx1) = mpsc::channel(8);
-    let (tx2, _rx2) = mpsc::channel(8);
+    let (tx1, _rx1) = test_outbound_queue(&broker, 8);
+    let (tx2, _rx2) = test_outbound_queue(&broker, 8);
 
     broker.add_client(1, tx1, None).await.unwrap();
     broker.add_client(2, tx2, None).await.unwrap();

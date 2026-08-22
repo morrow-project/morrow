@@ -14,7 +14,7 @@ pub(super) struct Inner {
 }
 
 pub(super) struct Client {
-    pub(super) sender: mpsc::Sender<Vec<u8>>,
+    pub(super) sender: OutboundQueue,
     pub(super) remote_addr: Option<SocketAddr>,
     pub(super) connected_at_ms: u64,
     pub(super) configured: bool,
@@ -62,8 +62,71 @@ pub(super) struct TransientSubscription {
 }
 
 pub(super) struct Delivery {
-    pub(super) sender: mpsc::Sender<Vec<u8>>,
+    pub(super) sender: OutboundQueue,
     pub(super) frame: Vec<u8>,
+}
+
+#[derive(Clone)]
+pub(super) struct OutboundQueue {
+    sender: mpsc::Sender<OutboundFrame>,
+    queued_bytes: Arc<AtomicUsize>,
+    limit: usize,
+    quotas: Arc<crate::quota::QuotaRuntime>,
+}
+
+pub(super) struct OutboundFrame {
+    bytes: Vec<u8>,
+    queued_bytes: Arc<AtomicUsize>,
+}
+
+impl OutboundQueue {
+    pub(super) fn new(
+        sender: mpsc::Sender<OutboundFrame>,
+        limit: usize,
+        quotas: Arc<crate::quota::QuotaRuntime>,
+    ) -> Self {
+        Self {
+            sender,
+            queued_bytes: Arc::new(AtomicUsize::new(0)),
+            limit,
+            quotas,
+        }
+    }
+
+    pub(super) async fn send(&self, bytes: Vec<u8>) -> std::result::Result<(), ()> {
+        let len = bytes.len();
+        let reserved =
+            self.queued_bytes
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |queued| {
+                    queued.checked_add(len).filter(|next| *next <= self.limit)
+                });
+        if reserved.is_err() {
+            self.quotas.reject_outbound();
+            return Err(());
+        }
+        let frame = OutboundFrame {
+            bytes,
+            queued_bytes: self.queued_bytes.clone(),
+        };
+        if self.sender.try_send(frame).is_err() {
+            self.quotas.reject_outbound();
+            return Err(());
+        }
+        Ok(())
+    }
+}
+
+impl OutboundFrame {
+    pub(super) fn as_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+impl Drop for OutboundFrame {
+    fn drop(&mut self) {
+        self.queued_bytes
+            .fetch_sub(self.bytes.len(), Ordering::Relaxed);
+    }
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -102,6 +165,20 @@ pub(super) struct ClusterPeerResponse {
 pub(super) struct ConnectionsResponse {
     pub(super) count: usize,
     pub(super) connections: Vec<ConnectionResponse>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub(super) struct QuotasResponse {
+    pub(super) sockets: crate::quota::QuotaSnapshot,
+    pub(super) transient_subscriptions: StateQuotaUsage,
+    pub(super) durable_consumers: StateQuotaUsage,
+    pub(super) outbound_bytes_per_connection_limit: usize,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub(super) struct StateQuotaUsage {
+    pub(super) used: usize,
+    pub(super) limit: usize,
 }
 
 #[derive(Debug, serde::Serialize)]

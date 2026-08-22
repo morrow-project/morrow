@@ -21,6 +21,20 @@ cp broker.json.example broker.json
   "listen": "127.0.0.1:4222",
   "http_listen": null,
   "admin_token": null,
+  "quotas": {
+    "max_connections": 10000,
+    "max_connections_per_identity": 100,
+    "max_transient_subscriptions": 100000,
+    "max_transient_subscriptions_per_identity": 1000,
+    "max_durable_consumers": 100000,
+    "max_durable_consumers_per_identity": 1000,
+    "max_outbound_bytes_per_connection": 16777216,
+    "max_http_connections": 128,
+    "max_raft_connections": 1024,
+    "max_route_connections": 1024,
+    "client_idle_timeout_ms": 300000,
+    "http_header_timeout_ms": 5000
+  },
   "wal_dir": "./broker-wal",
   "wal_segment_bytes": 67108864,
   "fsync_interval_ms": 5,
@@ -47,6 +61,9 @@ Fields:
 - `http_listen`: optional HTTP status listener address.
 - `admin_token`: bearer token required when `http_listen` is set.
 - `admin_tls`: optional TLS config dedicated to the administrative listener.
+- `quotas`: global and per-identity state limits, per-listener socket limits,
+  per-client queued-output bytes, and client/admin read deadlines. A rejected
+  client command receives `-ERR`; listener overloads are closed immediately.
 - `wal_dir`: directory for the broker WAL.
 - `wal_segment_bytes`: WAL segment rotation threshold.
 - `fsync_interval_ms`: maximum batching interval before fsync.
@@ -139,7 +156,8 @@ Raft peers, partition leaders/high-watermarks, and route topology. `GET /connect
 connections. `GET /subscriptions` reports durable consumers and transient
 subscriptions. `GET /wal` reports active segment metadata, retained state
 counts, replay/checkpoint/fsync timings, and rotation/checkpoint/truncation
-counters.
+counters. `GET /quotas` reports socket usage and limits, current durable and
+transient state usage, and cumulative socket, state, and outbound rejections.
 
 ## Docker Compose Cluster
 

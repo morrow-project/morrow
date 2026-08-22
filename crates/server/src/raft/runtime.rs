@@ -12,6 +12,7 @@ pub struct RaftRuntime {
     configured_streams: Vec<crate::stream::StreamDefinition>,
     security_references: BTreeSet<String>,
     raft_tls: Option<RaftTlsRuntime>,
+    quotas: Arc<crate::quota::QuotaRuntime>,
 }
 #[derive(Debug, Clone)]
 pub struct ClusterNode {
@@ -28,11 +29,12 @@ pub(super) struct RaftTlsRuntime {
     pub(super) handshake_timeout_ms: u64,
 }
 impl RaftRuntime {
-    pub async fn open(
+    pub(crate) async fn open(
         config: &ClusterConfig,
         tls_enabled: bool,
         streams: &crate::stream::StreamCatalog,
         segment_bytes: u64,
+        quotas: Arc<crate::quota::QuotaRuntime>,
     ) -> Result<Self> {
         std::fs::create_dir_all(&config.raft_dir)
             .with_context(|| format!("creating Raft directory {}", config.raft_dir.display()))?;
@@ -149,6 +151,7 @@ impl RaftRuntime {
             configured_streams: streams.definitions().to_vec(),
             security_references: ["cluster-auth-token".to_string()].into_iter().collect(),
             raft_tls,
+            quotas,
         })
     }
 
@@ -158,9 +161,18 @@ impl RaftRuntime {
         let auth_token = self.auth_token.clone();
         let partition_data = self.partition_data.clone();
         let tls = self.raft_tls.clone();
+        let quotas = self.quotas.clone();
         tokio::spawn(async move {
-            if let Err(err) =
-                serve_raft(raft, state_machine, listen, auth_token, partition_data, tls).await
+            if let Err(err) = serve_raft(
+                raft,
+                state_machine,
+                listen,
+                auth_token,
+                partition_data,
+                tls,
+                quotas,
+            )
+            .await
             {
                 error!(error = ?err, "raft transport error");
             }

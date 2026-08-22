@@ -19,6 +19,7 @@ pub struct Config {
     pub http_listen: Option<SocketAddr>,
     pub admin_token: Option<String>,
     pub admin_tls: Option<TlsConfig>,
+    pub quotas: ResourceQuotaConfig,
     pub wal_dir: PathBuf,
     pub wal_segment_bytes: u64,
     pub fsync_interval_ms: u64,
@@ -47,6 +48,21 @@ pub struct InternalTlsConfig {
     pub key_file: PathBuf,
     pub ca_cert_file: PathBuf,
     pub handshake_timeout_ms: u64,
+}
+#[derive(Debug, Clone)]
+pub struct ResourceQuotaConfig {
+    pub max_connections: usize,
+    pub max_connections_per_identity: usize,
+    pub max_transient_subscriptions: usize,
+    pub max_transient_subscriptions_per_identity: usize,
+    pub max_durable_consumers: usize,
+    pub max_durable_consumers_per_identity: usize,
+    pub max_outbound_bytes_per_connection: usize,
+    pub max_http_connections: usize,
+    pub max_raft_connections: usize,
+    pub max_route_connections: usize,
+    pub client_idle_timeout_ms: u64,
+    pub http_header_timeout_ms: u64,
 }
 #[derive(Debug, Clone, Default)]
 pub struct AuthConfig {
@@ -126,6 +142,7 @@ impl Config {
         let http_listen = get_http_listen(value)?;
         let admin_token = get_secret(value, "admin_token", "admin_token_file")?;
         let admin_tls = get_named_tls_config(value, "admin_tls")?;
+        let quotas = get_resource_quotas(value)?;
         let wal_dir = PathBuf::from(get_string(value, "wal_dir")?.unwrap_or("./broker-wal"));
         let wal_segment_bytes =
             get_u64(value, "wal_segment_bytes")?.unwrap_or(crate::wal::DEFAULT_WAL_SEGMENT_BYTES);
@@ -154,6 +171,7 @@ impl Config {
             http_listen,
             admin_token,
             admin_tls,
+            quotas,
             wal_dir,
             wal_segment_bytes,
             fsync_interval_ms,
@@ -495,6 +513,10 @@ fn get_http_listen(value: &serde_json::Value) -> Result<Option<SocketAddr>> {
 #[path = "config/cluster_config.rs"]
 mod cluster_config;
 use cluster_config::get_cluster_config;
+
+#[path = "config/quota_config.rs"]
+mod quota_config;
+use quota_config::get_resource_quotas;
 
 impl From<OsString> for BrokerError {
     fn from(value: OsString) -> Self {

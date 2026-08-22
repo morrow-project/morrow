@@ -22,8 +22,12 @@ impl Broker {
                 .accept()
                 .await
                 .context("accepting HTTP status connection")?;
+            let Some(permit) = self.quotas.try_http() else {
+                continue;
+            };
             let broker = self.clone();
             tokio::spawn(async move {
+                let _permit = permit;
                 let result = broker.accept_http_status(stream).await;
                 if let Err(err) = result {
                     error!(error = ?err, "http status connection error");
@@ -66,18 +70,30 @@ impl Broker {
     {
         let mut request = Vec::new();
         let mut buf = [0_u8; 1024];
-        loop {
-            let read = stream
-                .read(&mut buf)
-                .await
-                .context("reading HTTP status request")?;
-            if read == 0 {
-                return Ok(());
-            }
-            request.extend_from_slice(&buf[..read]);
-            if request.windows(4).any(|window| window == b"\r\n\r\n") || request.len() >= 8 * 1024 {
-                break;
-            }
+        let complete = tokio::time::timeout(
+            Duration::from_millis(self.config.quotas.http_header_timeout_ms),
+            async {
+                loop {
+                    let read = stream
+                        .read(&mut buf)
+                        .await
+                        .context("reading HTTP status request")?;
+                    if read == 0 {
+                        return Ok::<bool, BrokerError>(false);
+                    }
+                    request.extend_from_slice(&buf[..read]);
+                    if request.windows(4).any(|window| window == b"\r\n\r\n")
+                        || request.len() >= 8 * 1024
+                    {
+                        return Ok::<bool, BrokerError>(true);
+                    }
+                }
+            },
+        )
+        .await
+        .map_err(|_| BrokerError::msg("admin HTTP header read timed out"))??;
+        if !complete {
+            return Ok(());
         }
         let request_line = request
             .split(|byte| *byte == b'\n')
@@ -97,6 +113,7 @@ impl Broker {
         match path {
             "/cluster" => self.write_cluster_response(&mut stream).await,
             "/connections" => self.write_connections_response(&mut stream).await,
+            "/quotas" => self.write_quotas_response(&mut stream).await,
             "/subscriptions" => self.write_subscriptions_response(&mut stream).await,
             "/streams" => self.write_streams_response(&mut stream).await,
             "/wal" => self.write_wal_response(&mut stream).await,
@@ -116,6 +133,12 @@ impl Broker {
     ) -> Result<()> {
         let body = serde_json::to_vec(&self.connections_response().await)
             .context("serializing HTTP connections response")?;
+        write_http_response(stream, "200 OK", "application/json", &body).await
+    }
+
+    async fn write_quotas_response<W: AsyncWrite + Unpin>(&self, stream: &mut W) -> Result<()> {
+        let body = serde_json::to_vec(&self.quotas_response().await)
+            .context("serializing HTTP quota response")?;
         write_http_response(stream, "200 OK", "application/json", &body).await
     }
 

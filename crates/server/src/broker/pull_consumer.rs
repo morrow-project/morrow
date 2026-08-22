@@ -36,6 +36,26 @@ impl Broker {
             .await?;
         let (consumer_id, ack_timeout_ms, max_in_flight) =
             self.pull_consumer_context(connection_id, &name).await?;
+        {
+            let inner = self.inner.lock().await;
+            let identity = inner
+                .clients
+                .get(&connection_id)
+                .and_then(|client| client.durable_id.as_deref())
+                .ok_or_else(|| BrokerError::msg("durable identity required"))?;
+            let prefix = format!("pull-{}-", hex(identity.as_bytes()));
+            let identity_consumers = inner
+                .consumers
+                .keys()
+                .filter(|consumer_id| consumer_id.starts_with(&prefix))
+                .count();
+            if inner.consumers.len() >= self.config.quotas.max_durable_consumers
+                || identity_consumers >= self.config.quotas.max_durable_consumers_per_identity
+            {
+                self.quotas.reject_state();
+                crate::broker_bail!("durable consumer quota exceeded");
+            }
+        }
         let record = ConsumerRecord {
             consumer_id: consumer_id.clone(),
             filter_subject,
