@@ -273,6 +273,7 @@ impl Broker {
                 self.hooks.clock.now_ms(),
             )?;
             let committed_record = PublishRecord::from(envelope.clone());
+            self.pull_waiters.notify_subject(&committed_record.subject);
             self.run_after_commit_middleware(publisher_id, &committed_record)
                 .await?;
             if let Some(ack) = ack.filter(|_| !accepted_ack) {
@@ -349,6 +350,7 @@ impl Broker {
             record
         };
 
+        self.pull_waiters.notify_subject(&record.subject);
         self.run_after_commit_middleware(publisher_id, &record)
             .await?;
 
@@ -466,6 +468,9 @@ impl Broker {
         }
         drop(inner);
         self.wal.flush_due().await?;
+        if valid {
+            self.pull_waiters.notify_consumer(&ack.consumer_id);
+        }
         if let Some(record) = acknowledged_record {
             let record = self.load_partition_record(record).await?;
             let outcome = self
@@ -550,6 +555,7 @@ impl Broker {
     }
 
     pub(super) async fn remove_client(&self, connection_id: u64) -> Result<()> {
+        self.pull_waiters.cancel_connection(connection_id);
         self.connections.lock().await.clients.remove(&connection_id);
         let mut transient = self.transient.lock().await;
         let removed = transient

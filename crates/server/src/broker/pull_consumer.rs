@@ -157,6 +157,7 @@ impl Broker {
             drop(inner);
             self.wal.flush_due().await?;
         }
+        self.pull_waiters.cancel_consumer(&consumer_id);
         self.send_to(connection_id, protocol::consumer_ok("DELETE", &name))
             .await
     }
@@ -186,10 +187,14 @@ impl Broker {
         );
         let (consumer_id, _, max_in_flight) =
             self.pull_consumer_context(connection_id, &name).await?;
-        crate::broker_ensure!(
-            self.inner.lock().await.consumers.contains_key(&consumer_id),
-            "unknown consumer"
-        );
+        let filter_subject = self
+            .inner
+            .lock()
+            .await
+            .consumers
+            .get(&consumer_id)
+            .map(|consumer| consumer.record.filter_subject.clone())
+            .ok_or_else(|| BrokerError::msg("unknown consumer"))?;
         crate::broker_ensure!(
             max_messages <= max_in_flight,
             "FETCH max messages exceeds consumer max_in_flight"
@@ -201,32 +206,51 @@ impl Broker {
             .checked_sub(header_bytes)
             .ok_or_else(|| BrokerError::msg("FETCH encoded batch exceeds server limit"))?;
 
-        let mut batch = self
-            .fetch_pull_once(
-                &consumer_id,
-                max_messages,
-                max_bytes,
-                encoded_delivery_bytes,
-            )
-            .await?;
-        if batch.deliveries.is_empty() && max_wait_ms > 0 {
-            let deadline = tokio::time::Instant::now() + Duration::from_millis(max_wait_ms);
-            while batch.deliveries.is_empty() {
-                let now = tokio::time::Instant::now();
-                if now >= deadline {
-                    break;
-                }
-                tokio::time::sleep((deadline - now).min(Duration::from_millis(10))).await;
-                batch = self
-                    .fetch_pull_once(
-                        &consumer_id,
-                        max_messages,
-                        max_bytes,
-                        encoded_delivery_bytes,
-                    )
-                    .await?;
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(max_wait_ms);
+        let waiter = (max_wait_ms > 0)
+            .then(|| {
+                self.pull_waiters
+                    .register(connection_id, &consumer_id, &filter_subject)
+            })
+            .transpose()?;
+        let batch = loop {
+            let availability = waiter
+                .as_ref()
+                .map(|waiter| waiter.availability().notified());
+            tokio::pin!(availability);
+            if let Some(notification) = availability.as_mut().as_pin_mut() {
+                notification.enable();
             }
-        }
+            let cancellation = waiter
+                .as_ref()
+                .map(|waiter| waiter.cancellation().notified());
+            tokio::pin!(cancellation);
+            if let Some(notification) = cancellation.as_mut().as_pin_mut() {
+                notification.enable();
+            }
+
+            #[cfg(test)]
+            self.pull_waiters.record_fetch_check();
+            let batch = self
+                .fetch_pull_once(
+                    &consumer_id,
+                    max_messages,
+                    max_bytes,
+                    encoded_delivery_bytes,
+                )
+                .await?;
+            if !batch.deliveries.is_empty() || waiter.is_none() {
+                break batch;
+            }
+            if waiter.as_ref().unwrap().is_cancelled() {
+                crate::broker_bail!("FETCH cancelled");
+            }
+            tokio::select! {
+                _ = tokio::time::sleep_until(deadline) => break batch,
+                _ = availability.as_mut().as_pin_mut().unwrap() => {}
+                _ = cancellation.as_mut().as_pin_mut().unwrap() => {}
+            }
+        };
         let mut frame = protocol::batch(&name, batch.deliveries.len(), batch.bytes);
         for delivery in batch.deliveries {
             let message = delivery.message;
@@ -267,14 +291,21 @@ impl Broker {
         max_bytes: usize,
         max_encoded_bytes: usize,
     ) -> Result<PullBatch> {
-        let batch = self.inner.lock().await.prepare_pull_batch(
-            consumer_id,
-            max_messages,
-            max_bytes,
-            max_encoded_bytes,
-            &self.partition_logs,
-            self.hooks.clock.now_ms(),
-        )?;
+        let batch = {
+            let mut inner = self.inner.lock().await;
+            crate::broker_ensure!(
+                inner.consumers.contains_key(consumer_id),
+                "unknown consumer"
+            );
+            inner.prepare_pull_batch(
+                consumer_id,
+                max_messages,
+                max_bytes,
+                max_encoded_bytes,
+                &self.partition_logs,
+                self.hooks.clock.now_ms(),
+            )?
+        };
         self.wal.flush_due().await?;
         Ok(batch)
     }
@@ -465,6 +496,7 @@ impl Broker {
         member.credit_bytes = member.credit_bytes.saturating_add(bytes).min(max_bytes);
         inner.mark_consumer_ready(&consumer_id);
         drop(inner);
+        self.pull_waiters.notify_consumer(&consumer_id);
         self.deliver_pending().await?;
         self.send_verbose_ok(connection_id).await
     }

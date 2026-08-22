@@ -19,6 +19,7 @@ pub struct Broker {
     pub(super) cluster_delta_gate: Arc<Mutex<()>>,
     pub(super) cluster_application_metrics: Arc<ClusterApplicationMetrics>,
     pub(super) redelivery_notify: Arc<Notify>,
+    pub(super) pull_waiters: PullWaiterRegistry,
     pub(super) compaction_running: Arc<AtomicBool>,
     pub(super) route_mesh: Option<RouteMesh>,
     pub(super) middleware: MiddlewareRuntime,

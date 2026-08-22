@@ -53,8 +53,18 @@ impl Broker {
                 max_bytes,
                 max_wait_ms,
             } => {
-                self.fetch_pull(connection_id, name, max_messages, max_bytes, max_wait_ms)
-                    .await
+                let broker = self.clone();
+                tokio::spawn(async move {
+                    if let Err(error) = broker
+                        .fetch_pull(connection_id, name, max_messages, max_bytes, max_wait_ms)
+                        .await
+                    {
+                        let _ = broker
+                            .send_to(connection_id, protocol::err(&error.to_string()))
+                            .await;
+                    }
+                });
+                Ok(())
             }
             Command::Ack {
                 name,

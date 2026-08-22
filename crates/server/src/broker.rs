@@ -76,6 +76,7 @@ mod middleware_hooks;
 mod producer_ack;
 mod pull_consumer;
 mod pull_delivery;
+mod pull_waiters;
 mod redelivery;
 mod retention;
 mod route_mesh;
@@ -90,8 +91,8 @@ pub use self::broker::Broker;
 use self::{
     cluster_runtime::*, compaction::*, consumer::*, fake_cluster::*, fake_cluster_types::*,
     hooks::*, http::*, inner_admin::*, inner_delivery::*, manual_clock::*, pull_consumer::*,
-    retention::*, route_mesh::*, route_state::*, route_tls::*, state::*, subject_helpers::*,
-    wal_runtime::*,
+    pull_waiters::*, retention::*, route_mesh::*, route_state::*, route_tls::*, state::*,
+    subject_helpers::*, wal_runtime::*,
 };
 
 #[cfg(test)]

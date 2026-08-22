@@ -177,6 +177,7 @@ impl Broker {
             cluster_delta_gate: Arc::new(Mutex::new(())),
             cluster_application_metrics: Arc::new(ClusterApplicationMetrics::default()),
             redelivery_notify: Arc::new(Notify::new()),
+            pull_waiters: PullWaiterRegistry::default(),
             compaction_running: Arc::new(AtomicBool::new(false)),
             route_mesh,
             middleware: hooks.middleware.clone(),
@@ -235,6 +236,7 @@ impl Broker {
     }
 
     pub async fn shutdown(&self) -> Result<()> {
+        self.pull_waiters.shutdown();
         let _shutdown = self.storage_gate.write().await;
         let inner = self.inner.lock().await;
         let partition_logs = self.partition_logs.clone();

@@ -30,11 +30,14 @@ impl Broker {
             cluster.enforce_retention(now)?;
             self.sync_cluster_deltas(&cluster).await?;
         }
-        {
+        let expired = {
             let _storage_operation = self.storage_gate.read().await;
             let mut inner = self.inner.lock().await;
             inner.enforce_stream_retention(&self.partition_logs, &self.config.streams, now)?;
-            inner.expire_due_leases(now, MAX_EXPIRED_LEASES_PER_TICK);
+            inner.expire_due_leases(now, MAX_EXPIRED_LEASES_PER_TICK)
+        };
+        if expired > 0 {
+            self.pull_waiters.notify_all();
         }
         self.deliver_pending().await
     }
