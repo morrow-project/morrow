@@ -7,9 +7,13 @@ pub(super) use server::{
     },
 };
 pub(super) use std::{
+    collections::HashSet,
     net::SocketAddr,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Mutex, OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 pub(super) use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -345,8 +349,19 @@ impl ClusterHarness {
     }
 }
 pub(super) async fn free_addr() -> SocketAddr {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    listener.local_addr().unwrap()
+    static RESERVED_PORTS: OnceLock<Mutex<HashSet<u16>>> = OnceLock::new();
+    let reserved_ports = RESERVED_PORTS.get_or_init(|| Mutex::new(HashSet::new()));
+
+    loop {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+
+        let mut reserved_ports = reserved_ports.lock().unwrap();
+        if reserved_ports.insert(addr.port()) {
+            return addr;
+        }
+    }
 }
 pub(super) async fn cluster_json(addr: SocketAddr) -> Option<serde_json::Value> {
     admin_json(addr, "/cluster").await
