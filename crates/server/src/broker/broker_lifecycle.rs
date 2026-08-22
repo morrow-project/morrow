@@ -106,6 +106,11 @@ impl Broker {
             .as_ref()
             .map(crate::tls::load_acceptor)
             .transpose()?;
+        let admin_tls_acceptor = config
+            .admin_tls
+            .as_ref()
+            .map(crate::tls::load_acceptor)
+            .transpose()?;
         let consumers: HashMap<_, _> = replay
             .consumers
             .into_iter()
@@ -145,7 +150,7 @@ impl Broker {
                 None
             }
         };
-        let route_mesh = RouteMesh::from_config(&config);
+        let route_mesh = RouteMesh::from_config(&config)?;
         Ok(Self {
             inner: Arc::new(Mutex::new(Inner {
                 wal,
@@ -162,6 +167,7 @@ impl Broker {
             next_connection_id: Arc::new(AtomicU64::new(1)),
             config,
             tls_acceptor,
+            admin_tls_acceptor,
             cluster: Arc::new(Mutex::new(cluster)),
             route_mesh,
             middleware: hooks.middleware.clone(),
@@ -324,97 +330,6 @@ impl Broker {
             peers,
             partitions,
             routes,
-        }
-    }
-
-    pub(super) fn spawn_http_status_listener(&self) {
-        let Some(listen) = self.config.http_listen else {
-            return;
-        };
-        let broker = self.clone();
-        tokio::spawn(async move {
-            if let Err(err) = broker.serve_http_status(listen).await {
-                error!(error = ?err, "http status error");
-            }
-        });
-    }
-
-    pub(super) async fn serve_http_status(&self, listen: SocketAddr) -> Result<()> {
-        let listener = TcpListener::bind(listen)
-            .await
-            .with_context(|| format!("binding HTTP status listener {listen}"))?;
-        loop {
-            let (stream, _) = listener
-                .accept()
-                .await
-                .context("accepting HTTP status connection")?;
-            let broker = self.clone();
-            tokio::spawn(async move {
-                if let Err(err) = broker.handle_http_status(stream).await {
-                    error!(error = ?err, "http status connection error");
-                }
-            });
-        }
-    }
-
-    pub(super) async fn handle_http_status(&self, mut stream: TcpStream) -> Result<()> {
-        let mut request = Vec::new();
-        let mut buf = [0_u8; 1024];
-        loop {
-            let read = stream
-                .read(&mut buf)
-                .await
-                .context("reading HTTP status request")?;
-            if read == 0 {
-                return Ok(());
-            }
-            request.extend_from_slice(&buf[..read]);
-            if request.windows(4).any(|window| window == b"\r\n\r\n") || request.len() >= 8 * 1024 {
-                break;
-            }
-        }
-        let request_line = request
-            .split(|byte| *byte == b'\n')
-            .next()
-            .and_then(|line| std::str::from_utf8(line).ok())
-            .map(str::trim_end)
-            .unwrap_or("");
-        let Some(path) = http_request_path(request_line) else {
-            return write_http_not_found(&mut stream).await;
-        };
-        let Some(admin_token) = self.config.admin_token.as_deref() else {
-            return write_http_unauthorized(&mut stream).await;
-        };
-        if !http_authorized(&request, admin_token) {
-            return write_http_unauthorized(&mut stream).await;
-        }
-        match path {
-            "/cluster" => {
-                let body = serde_json::to_vec(&self.cluster_response().await)
-                    .context("serializing HTTP cluster response")?;
-                write_http_response(&mut stream, "200 OK", "application/json", &body).await
-            }
-            "/connections" => {
-                let body = serde_json::to_vec(&self.connections_response().await)
-                    .context("serializing HTTP connections response")?;
-                write_http_response(&mut stream, "200 OK", "application/json", &body).await
-            }
-            "/subscriptions" => {
-                let body = serde_json::to_vec(&self.subscriptions_response().await)
-                    .context("serializing HTTP subscriptions response")?;
-                write_http_response(&mut stream, "200 OK", "application/json", &body).await
-            }
-            "/streams" => {
-                let body = serde_json::to_vec(&self.streams_response().await)
-                    .context("serializing HTTP streams response")?;
-                write_http_response(&mut stream, "200 OK", "application/json", &body).await
-            }
-            "/wal" => {
-                let body = serde_json::to_vec(&self.wal_status_response().await)
-                    .context("serializing HTTP WAL response")?;
-                write_http_response(&mut stream, "200 OK", "application/json", &body).await
-            }
-            _ => write_http_not_found(&mut stream).await,
         }
     }
 

@@ -82,6 +82,7 @@ fn assignment() -> HashMap<String, PartitionAssignmentMetadata> {
 #[tokio::test]
 async fn raft_request_rejects_invalid_auth_token() {
     let request = AuthenticatedRaftRequest {
+        node_id: 1,
         auth_token: "wrong-token".into(),
         request: RaftRequest::FullSnapshot {
             vote: Vote::new_committed(1, 1),
@@ -97,10 +98,38 @@ async fn raft_request_rejects_invalid_auth_token() {
     write_frame(&mut frame, &request).await.unwrap();
     let mut reader = &frame[..];
 
-    let err = read_authenticated_request(&mut reader, "right-token")
+    let err = read_authenticated_request(&mut reader, "right-token", None)
         .await
         .unwrap_err();
     assert!(err.to_string().contains("invalid Raft auth token"));
+}
+
+#[tokio::test]
+async fn raft_request_rejects_node_id_that_differs_from_certificate() {
+    let request = AuthenticatedRaftRequest {
+        node_id: 1,
+        auth_token: "right-token".into(),
+        request: RaftRequest::FullSnapshot {
+            vote: Vote::new_committed(1, 1),
+            meta: SnapshotMeta {
+                last_log_id: None,
+                last_membership: StoredMembership::new(None, Membership::new(vec![], nodes())),
+                snapshot_id: "test".into(),
+            },
+            data: Vec::new(),
+        },
+    };
+    let mut frame = Vec::new();
+    write_frame(&mut frame, &request).await.unwrap();
+    let mut reader = &frame[..];
+
+    let err = read_authenticated_request(&mut reader, "right-token", Some(2))
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("Raft request node ID does not match peer certificate")
+    );
 }
 
 #[test]

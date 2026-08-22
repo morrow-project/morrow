@@ -10,6 +10,11 @@ services:
       - broker_admin_token
       - broker_cluster_token
       - broker_client_public_key
+      - broker_tls_ca
+      - broker_node_1_cert
+      - broker_node_1_key
+      - broker_node_2_cert
+      - broker_node_3_cert
     read_only: true
     security_opt:
       - no-new-privileges:true
@@ -29,6 +34,11 @@ services:
       - broker_admin_token
       - broker_cluster_token
       - broker_client_public_key
+      - broker_tls_ca
+      - broker_node_1_cert
+      - broker_node_2_cert
+      - broker_node_2_key
+      - broker_node_3_cert
     read_only: true
     security_opt:
       - no-new-privileges:true
@@ -51,6 +61,11 @@ services:
       - broker_admin_token
       - broker_cluster_token
       - broker_client_public_key
+      - broker_tls_ca
+      - broker_node_1_cert
+      - broker_node_2_cert
+      - broker_node_3_cert
+      - broker_node_3_key
     read_only: true
     security_opt:
       - no-new-privileges:true
@@ -74,3 +89,17 @@ secrets:
     file: ${BROKER_CLUSTER_TOKEN_FILE:-./.secrets/broker-cluster-token}
   broker_client_public_key:
     file: ${BROKER_CLIENT_PUBLIC_KEY_FILE:-./.secrets/broker-client-public-key}
+  broker_tls_ca:
+    file: ${BROKER_TLS_CA_FILE:-./.secrets/broker-ca-cert.pem}
+  broker_node_1_cert:
+    file: ${BROKER_NODE_1_CERT_FILE:-./.secrets/broker-node-1-cert.pem}
+  broker_node_1_key:
+    file: ${BROKER_NODE_1_KEY_FILE:-./.secrets/broker-node-1-key.pem}
+  broker_node_2_cert:
+    file: ${BROKER_NODE_2_CERT_FILE:-./.secrets/broker-node-2-cert.pem}
+  broker_node_2_key:
+    file: ${BROKER_NODE_2_KEY_FILE:-./.secrets/broker-node-2-key.pem}
+  broker_node_3_cert:
+    file: ${BROKER_NODE_3_CERT_FILE:-./.secrets/broker-node-3-cert.pem}
+  broker_node_3_key:
+    file: ${BROKER_NODE_3_KEY_FILE:-./.secrets/broker-node-3-key.pem}

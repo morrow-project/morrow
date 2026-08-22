@@ -180,20 +180,23 @@ pub(super) type SharedReplicaData = Arc<StdMutex<ReplicaDataStore>>;
 pub(super) async fn send_data_append(
     addr: &str,
     auth_token: String,
+    node_id: u64,
+    target: u64,
+    tls: Option<RaftTlsRuntime>,
     request: DataAppendRequest,
 ) -> Result<DataAppendResponse> {
-    let mut stream = TcpStream::connect(addr)
+    let client = NetworkClient {
+        addr: addr.to_string(),
+        auth_token,
+        node_id,
+        target,
+        tls,
+    };
+    match client
+        .request(RaftRequest::DataAppend(request))
         .await
-        .with_context(|| format!("connecting partition replica {addr}"))?;
-    write_frame(
-        &mut stream,
-        &AuthenticatedRaftRequest {
-            auth_token,
-            request: RaftRequest::DataAppend(request),
-        },
-    )
-    .await?;
-    match read_frame(&mut stream).await? {
+        .map_err(|err| BrokerError::msg(err.to_string()))?
+    {
         RaftResponse::DataAppend(response) => Ok(response),
         RaftResponse::Error(message) => Err(BrokerError::msg(message)),
         _ => Err(BrokerError::msg("unexpected partition replica response")),
@@ -203,20 +206,23 @@ pub(super) async fn send_data_append(
 pub(super) async fn send_data_progress(
     addr: &str,
     auth_token: String,
+    node_id: u64,
+    target: u64,
+    tls: Option<RaftTlsRuntime>,
     request: DataProgressRequest,
 ) -> Result<Option<u64>> {
-    let mut stream = TcpStream::connect(addr)
+    let client = NetworkClient {
+        addr: addr.to_string(),
+        auth_token,
+        node_id,
+        target,
+        tls,
+    };
+    match client
+        .request(RaftRequest::DataProgress(request))
         .await
-        .with_context(|| format!("connecting partition replica {addr}"))?;
-    write_frame(
-        &mut stream,
-        &AuthenticatedRaftRequest {
-            auth_token,
-            request: RaftRequest::DataProgress(request),
-        },
-    )
-    .await?;
-    match read_frame(&mut stream).await? {
+        .map_err(|err| BrokerError::msg(err.to_string()))?
+    {
         RaftResponse::DataProgress(progress) => Ok(progress),
         RaftResponse::Error(message) => Err(BrokerError::msg(message)),
         _ => Err(BrokerError::msg("unexpected partition progress response")),

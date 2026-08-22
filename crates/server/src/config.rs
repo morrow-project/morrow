@@ -18,6 +18,7 @@ pub struct Config {
     pub listen: SocketAddr,
     pub http_listen: Option<SocketAddr>,
     pub admin_token: Option<String>,
+    pub admin_tls: Option<TlsConfig>,
     pub wal_dir: PathBuf,
     pub wal_segment_bytes: u64,
     pub fsync_interval_ms: u64,
@@ -38,6 +39,13 @@ pub struct Config {
 pub struct TlsConfig {
     pub cert_file: PathBuf,
     pub key_file: PathBuf,
+    pub handshake_timeout_ms: u64,
+}
+#[derive(Debug, Clone)]
+pub struct InternalTlsConfig {
+    pub cert_file: PathBuf,
+    pub key_file: PathBuf,
+    pub ca_cert_file: PathBuf,
     pub handshake_timeout_ms: u64,
 }
 #[derive(Debug, Clone, Default)]
@@ -61,7 +69,10 @@ pub struct ClusterConfig {
     pub node_id: u64,
     pub auth_token: String,
     pub raft_listen: SocketAddr,
+    pub raft_tls: Option<InternalTlsConfig>,
+    pub allow_insecure_internal_transports: bool,
     pub route_listen: Option<SocketAddr>,
+    pub route_tls: Option<InternalTlsConfig>,
     pub routes: Vec<String>,
     pub route_reconnect_ms: u64,
     pub raft_dir: PathBuf,
@@ -77,6 +88,9 @@ pub struct ClusterNodeConfig {
     pub node_id: u64,
     pub raft_addr: String,
     pub client_addr: String,
+    pub route_addr: Option<String>,
+    pub tls_server_name: Option<String>,
+    pub tls_cert_files: Vec<PathBuf>,
 }
 impl Config {
     pub fn load_from_args() -> Result<Self> {
@@ -111,6 +125,7 @@ impl Config {
             .context("config field listen must be a socket address")?;
         let http_listen = get_http_listen(value)?;
         let admin_token = get_secret(value, "admin_token", "admin_token_file")?;
+        let admin_tls = get_named_tls_config(value, "admin_tls")?;
         let wal_dir = PathBuf::from(get_string(value, "wal_dir")?.unwrap_or("./broker-wal"));
         let wal_segment_bytes =
             get_u64(value, "wal_segment_bytes")?.unwrap_or(crate::wal::DEFAULT_WAL_SEGMENT_BYTES);
@@ -138,6 +153,7 @@ impl Config {
             listen,
             http_listen,
             admin_token,
+            admin_tls,
             wal_dir,
             wal_segment_bytes,
             fsync_interval_ms,
@@ -215,6 +231,13 @@ impl Config {
                 "config field admin_token is required when http_listen is set"
             );
         }
+        if let Some(tls) = &self.admin_tls {
+            crate::broker_ensure!(
+                self.http_listen.is_some(),
+                "config field admin_tls requires http_listen"
+            );
+            tls.validate_named("admin_tls")?;
+        }
         if let Some(tls) = &self.tls {
             tls.validate()?;
         }
@@ -233,70 +256,6 @@ impl Config {
         std::fs::create_dir_all(&self.wal_dir)
             .with_context(|| format!("creating WAL directory {}", self.wal_dir.display()))?;
         Ok(())
-    }
-}
-impl ClusterConfig {
-    fn validate(&self) -> Result<()> {
-        crate::broker_ensure!(
-            self.enabled,
-            "cluster.enabled must be true when cluster is present"
-        );
-        crate::broker_ensure!(
-            self.node_id > 0,
-            "cluster.node_id must be greater than zero"
-        );
-        crate::broker_ensure!(
-            self.node_id <= u64::from(u16::MAX),
-            "cluster.node_id must fit in 16 bits"
-        );
-        crate::broker_ensure!(
-            !self.auth_token.is_empty(),
-            "cluster.auth_token must not be empty"
-        );
-        crate::broker_ensure!(
-            self.heartbeat_interval_ms > 0,
-            "cluster.heartbeat_interval_ms must be greater than zero"
-        );
-        crate::broker_ensure!(
-            self.route_reconnect_ms > 0,
-            "cluster.route_reconnect_ms must be greater than zero"
-        );
-        crate::broker_ensure!(
-            self.election_timeout_min_ms > self.heartbeat_interval_ms,
-            "cluster.election_timeout_min_ms must be greater than heartbeat_interval_ms"
-        );
-        crate::broker_ensure!(
-            self.election_timeout_max_ms > self.election_timeout_min_ms,
-            "cluster.election_timeout_max_ms must be greater than election_timeout_min_ms"
-        );
-        crate::broker_ensure!(
-            self.snapshot_threshold > 0,
-            "cluster.snapshot_threshold must be greater than zero"
-        );
-        crate::broker_ensure!(
-            !self.nodes.is_empty(),
-            "cluster.nodes must contain at least one node"
-        );
-
-        let mut ids = std::collections::HashSet::new();
-        let mut has_self = false;
-        for node in &self.nodes {
-            crate::broker_ensure!(
-                node.node_id > 0,
-                "cluster.nodes[].node_id must be greater than zero"
-            );
-            crate::broker_ensure!(
-                ids.insert(node.node_id),
-                "cluster.nodes contains duplicate node_id"
-            );
-            has_self |= node.node_id == self.node_id;
-        }
-        crate::broker_ensure!(has_self, "cluster.node_id must be present in cluster.nodes");
-        Ok(())
-    }
-
-    pub fn self_node(&self) -> Option<&ClusterNodeConfig> {
-        self.nodes.iter().find(|node| node.node_id == self.node_id)
     }
 }
 fn get_auth_config(value: &serde_json::Value) -> Result<AuthConfig> {
@@ -404,21 +363,26 @@ fn get_permission_patterns(
 }
 impl TlsConfig {
     fn validate(&self) -> Result<()> {
+        self.validate_named("tls")
+    }
+
+    fn validate_named(&self, field: &str) -> Result<()> {
         crate::broker_ensure!(
             self.handshake_timeout_ms > 0,
-            "config field tls.handshake_timeout_ms must be greater than zero"
+            "config field {field}.handshake_timeout_ms must be greater than zero"
         );
         crate::broker_ensure!(
             self.cert_file.is_file(),
-            "config field tls.cert_file must point to an existing file"
+            "config field {field}.cert_file must point to an existing file"
         );
         crate::broker_ensure!(
             self.key_file.is_file(),
-            "config field tls.key_file must point to an existing file"
+            "config field {field}.key_file must point to an existing file"
         );
         Ok(())
     }
 }
+
 fn get_string<'a>(value: &'a serde_json::Value, key: &str) -> Result<Option<&'a str>> {
     match value.get(key) {
         Some(serde_json::Value::String(value)) => Ok(Some(value)),
@@ -490,19 +454,25 @@ fn get_bool(value: &serde_json::Value, key: &str) -> Result<Option<bool>> {
     }
 }
 fn get_tls_config(value: &serde_json::Value) -> Result<Option<TlsConfig>> {
-    let Some(tls) = value.get("tls") else {
+    get_named_tls_config(value, "tls")
+}
+
+fn get_named_tls_config(value: &serde_json::Value, field: &str) -> Result<Option<TlsConfig>> {
+    let Some(tls) = value.get(field) else {
         return Ok(None);
     };
     if tls.is_null() {
         return Ok(None);
     }
     let serde_json::Value::Object(_) = tls else {
-        return Err(BrokerError::msg("config field tls must be an object"));
+        return Err(BrokerError::msg(format!(
+            "config field {field} must be an object"
+        )));
     };
     let cert_file = get_string(tls, "cert_file")?
-        .ok_or_else(|| BrokerError::msg("config field tls.cert_file is required"))?;
+        .ok_or_else(|| BrokerError::msg(format!("config field {field}.cert_file is required")))?;
     let key_file = get_string(tls, "key_file")?
-        .ok_or_else(|| BrokerError::msg("config field tls.key_file is required"))?;
+        .ok_or_else(|| BrokerError::msg(format!("config field {field}.key_file is required")))?;
     let handshake_timeout_ms = get_u64(tls, "handshake_timeout_ms")?.unwrap_or(2_000);
     Ok(Some(TlsConfig {
         cert_file: PathBuf::from(cert_file),

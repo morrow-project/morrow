@@ -8,3 +8,6 @@ client.workspace = true
 serde_json.workspace = true
 server.workspace = true
 tokio.workspace = true
+rustls.workspace = true
+rustls-pemfile.workspace = true
+tokio-rustls.workspace = true

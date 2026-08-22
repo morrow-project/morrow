@@ -4,6 +4,8 @@ use super::*;
 pub(super) struct NetworkFactory {
     pub(super) nodes: HashMap<u64, ClusterNode>,
     pub(super) auth_token: String,
+    pub(super) node_id: u64,
+    pub(super) tls: Option<RaftTlsRuntime>,
 }
 impl RaftNetworkFactory<BrokerRaftConfig> for NetworkFactory {
     type Network = NetworkClient;
@@ -14,10 +16,12 @@ impl RaftNetworkFactory<BrokerRaftConfig> for NetworkFactory {
             .get(&target)
             .map(|node| node.raft_addr.to_string())
             .unwrap_or_else(|| node.addr.clone());
-        let _ = target;
         NetworkClient {
             addr,
             auth_token: self.auth_token.clone(),
+            node_id: self.node_id,
+            target,
+            tls: self.tls.clone(),
         }
     }
 }
@@ -25,6 +29,9 @@ impl RaftNetworkFactory<BrokerRaftConfig> for NetworkFactory {
 pub(super) struct NetworkClient {
     pub(super) addr: String,
     pub(super) auth_token: String,
+    pub(super) node_id: u64,
+    pub(super) target: u64,
+    pub(super) tls: Option<RaftTlsRuntime>,
 }
 impl RaftNetwork<BrokerRaftConfig> for NetworkClient {
     async fn append_entries(
@@ -93,27 +100,64 @@ impl RaftNetwork<BrokerRaftConfig> for NetworkClient {
 }
 
 impl NetworkClient {
-    async fn request(
+    pub(super) async fn request(
         &self,
         request: RaftRequest,
     ) -> std::result::Result<RaftResponse, RPCError<u64, BasicNode, openraft::error::RaftError<u64>>>
     {
-        let mut stream = TcpStream::connect(&self.addr).await.map_err(|err| {
+        let stream = TcpStream::connect(&self.addr).await.map_err(|err| {
             RPCError::Unreachable(Unreachable::new(&io::Error::new(
                 err.kind(),
                 err.to_string(),
             )))
         })?;
+        if let Some(tls) = &self.tls {
+            let server_name = tls
+                .server_names
+                .get(&self.target)
+                .ok_or_else(|| network_error("missing Raft TLS server name"))?;
+            let server_name = rustls::pki_types::ServerName::try_from(server_name.clone())
+                .map_err(|err| network_error(err.to_string()))?;
+            let mut stream = tls
+                .connector
+                .connect(server_name, stream)
+                .await
+                .map_err(|err| RPCError::Network(NetworkError::new(&err)))?;
+            let peer_id = crate::tls::identify_peer(
+                stream.get_ref().1.peer_certificates(),
+                &tls.peer_identities,
+            )
+            .map_err(|err| RPCError::Network(NetworkError::new(&err)))?;
+            if peer_id != self.target {
+                return Err(network_error(
+                    "Raft TLS certificate belongs to a different node",
+                ));
+            }
+            return self.exchange(&mut stream, request).await;
+        }
+        let mut stream = stream;
+        self.exchange(&mut stream, request).await
+    }
+
+    async fn exchange<S>(
+        &self,
+        stream: &mut S,
+        request: RaftRequest,
+    ) -> std::result::Result<RaftResponse, RPCError<u64, BasicNode, openraft::error::RaftError<u64>>>
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
         write_frame(
-            &mut stream,
+            stream,
             &AuthenticatedRaftRequest {
+                node_id: self.node_id,
                 auth_token: self.auth_token.clone(),
                 request,
             },
         )
         .await
         .map_err(|err| RPCError::Network(NetworkError::new(&err)))?;
-        read_frame(&mut stream)
+        read_frame(stream)
             .await
             .map_err(|err| RPCError::Network(NetworkError::new(&err)))
     }

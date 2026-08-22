@@ -18,6 +18,7 @@
     "node_id": 3,
     "auth_token": "test-cluster-token",
     "raft_listen": "127.0.0.1:5223",
+    "allow_insecure_internal_transports": true,
     "route_listen": "127.0.0.1:6223",
     "routes": ["127.0.0.1:6221"],
     "route_reconnect_ms": 500,

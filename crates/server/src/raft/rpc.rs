@@ -15,6 +15,7 @@ pub(super) enum RaftRequest {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub(super) struct AuthenticatedRaftRequest {
+    pub(super) node_id: u64,
     pub(super) auth_token: String,
     pub(super) request: RaftRequest,
 }
@@ -35,6 +36,7 @@ pub(super) async fn serve_raft(
     listen: SocketAddr,
     auth_token: String,
     partition_data: SharedReplicaData,
+    tls: Option<RaftTlsRuntime>,
 ) -> Result<()> {
     let listener = TcpListener::bind(listen)
         .await
@@ -45,24 +47,65 @@ pub(super) async fn serve_raft(
         let state_machine = state_machine.clone();
         let auth_token = auth_token.clone();
         let partition_data = partition_data.clone();
+        let tls = tls.clone();
         tokio::spawn(async move {
-            if let Err(err) =
-                handle_raft_stream(raft, state_machine, stream, &auth_token, partition_data).await
-            {
+            let result = if let Some(tls) = tls {
+                match tokio::time::timeout(
+                    Duration::from_millis(tls.handshake_timeout_ms),
+                    tls.acceptor.accept(stream),
+                )
+                .await
+                {
+                    Ok(Ok(stream)) => match crate::tls::identify_peer(
+                        stream.get_ref().1.peer_certificates(),
+                        &tls.peer_identities,
+                    ) {
+                        Ok(peer_id) => {
+                            handle_raft_stream(
+                                raft,
+                                state_machine,
+                                stream,
+                                &auth_token,
+                                partition_data,
+                                Some(peer_id),
+                            )
+                            .await
+                        }
+                        Err(err) => Err(err),
+                    },
+                    Ok(Err(err)) => Err(BrokerError::with_source("accepting Raft TLS", err)),
+                    Err(_) => Err(BrokerError::msg("Raft TLS handshake timed out")),
+                }
+            } else {
+                handle_raft_stream(
+                    raft,
+                    state_machine,
+                    stream,
+                    &auth_token,
+                    partition_data,
+                    None,
+                )
+                .await
+            };
+            if let Err(err) = result {
                 error!(error = ?err, "raft RPC error");
             }
         });
     }
 }
 
-pub(super) async fn handle_raft_stream(
+pub(super) async fn handle_raft_stream<S>(
     raft: BrokerRaft,
     state_machine: StateMachineStore,
-    mut stream: TcpStream,
+    mut stream: S,
     auth_token: &str,
     partition_data: SharedReplicaData,
-) -> Result<()> {
-    let request = read_authenticated_request(&mut stream, auth_token).await?;
+    tls_peer_id: Option<u64>,
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let request = read_authenticated_request(&mut stream, auth_token, tls_peer_id).await?;
     let response = match request {
         RaftRequest::AppendEntries(rpc) => match raft.append_entries(rpc).await {
             Ok(response) => RaftResponse::AppendEntries(response),
@@ -116,11 +159,18 @@ pub(super) async fn handle_raft_stream(
 pub(super) async fn read_authenticated_request<R>(
     reader: &mut R,
     auth_token: &str,
+    tls_peer_id: Option<u64>,
 ) -> Result<RaftRequest>
 where
     R: AsyncRead + Unpin,
 {
     let envelope: AuthenticatedRaftRequest = read_frame(reader).await?;
+    if let Some(peer_id) = tls_peer_id {
+        crate::broker_ensure!(
+            envelope.node_id == peer_id,
+            "Raft request node ID does not match peer certificate"
+        );
+    }
     crate::broker_ensure!(
         crate::security::constant_time_eq(&envelope.auth_token, auth_token),
         "invalid Raft auth token"

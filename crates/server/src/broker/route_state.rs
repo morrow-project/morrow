@@ -4,11 +4,23 @@ use super::*;
 pub(super) struct RouteMesh {
     pub(super) inner: Arc<Mutex<RouteMeshState>>,
     pub(super) auth_token: String,
+    pub(super) tls: Option<RouteTlsRuntime>,
+    pub(super) configured_route_nodes: Arc<HashMap<String, u64>>,
+}
+
+#[derive(Clone)]
+pub(super) struct RouteTlsRuntime {
+    pub(super) acceptor: tokio_rustls::TlsAcceptor,
+    pub(super) connector: tokio_rustls::TlsConnector,
+    pub(super) peer_identities: Arc<HashMap<Vec<u8>, u64>>,
+    pub(super) server_names: Arc<HashMap<u64, String>>,
+    pub(super) handshake_timeout_ms: u64,
 }
 
 pub(super) struct RouteMeshState {
     pub(super) node_id: u64,
-    pub(super) route_addr: SocketAddr,
+    pub(super) route_listen: SocketAddr,
+    pub(super) route_addr: String,
     pub(super) client_addr: SocketAddr,
     pub(super) seeds: Vec<String>,
     pub(super) reconnect_ms: u64,
@@ -37,7 +49,7 @@ pub(super) struct RoutePeer {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(super) struct RoutePeerInfo {
     pub(super) node_id: u64,
-    pub(super) route_addr: SocketAddr,
+    pub(super) route_addr: String,
     pub(super) client_addr: SocketAddr,
 }
 
@@ -52,7 +64,7 @@ pub(super) enum RouteDirection {
 pub(super) enum RouteFrame {
     Hello {
         node_id: u64,
-        route_addr: SocketAddr,
+        route_addr: String,
         client_addr: SocketAddr,
     },
     PeerList {

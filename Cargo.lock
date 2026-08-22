@@ -984,9 +984,12 @@ name = "integration"
 version = "0.1.0"
 dependencies = [
  "client",
+ "rustls",
+ "rustls-pemfile",
  "serde_json",
  "server",
  "tokio",
+ "tokio-rustls",
 ]
 
 [[package]]

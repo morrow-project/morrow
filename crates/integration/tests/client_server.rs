@@ -10,3 +10,6 @@ mod qos_tests;
 
 #[path = "client_server/pull_tests.rs"]
 mod pull_tests;
+
+#[path = "client_server/internal_tls_tests.rs"]
+mod internal_tls_tests;

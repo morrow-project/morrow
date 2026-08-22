@@ -2,7 +2,8 @@ pub(super) use client::{Client, ClientAuth, ServerFrame};
 pub(super) use server::{
     Broker, Config,
     config::{
-        AuthClientConfig, AuthConfig, AuthPermissions, ClusterConfig, ClusterNodeConfig, TlsConfig,
+        AuthClientConfig, AuthConfig, AuthPermissions, ClusterConfig, ClusterNodeConfig,
+        InternalTlsConfig, TlsConfig,
     },
 };
 pub(super) use std::{
@@ -16,6 +17,9 @@ pub(super) use tokio::{
     time::Duration,
 };
 pub(super) const TLS_SERVER_NAME: &str = "localhost";
+
+trait AsyncStream: tokio::io::AsyncRead + tokio::io::AsyncWrite {}
+impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + ?Sized> AsyncStream for T {}
 
 pub(super) fn auth_config_with_permissions(
     clients: Vec<(&ClientAuth, Option<Vec<String>>, Option<Vec<String>>)>,
@@ -72,6 +76,7 @@ pub(super) struct ClusterHarness {
     pub(super) brokers: Vec<Broker>,
     pub(super) server_tasks: Vec<tokio::task::JoinHandle<()>>,
     pub(super) max_payload: usize,
+    secure: bool,
     pub(super) _dirs: Vec<TestDir>,
 }
 pub(super) struct ClusterHarnessNode {
@@ -83,14 +88,18 @@ pub(super) struct ClusterHarnessNode {
 }
 impl ClusterHarness {
     pub(super) async fn start_three() -> Self {
-        Self::start_three_with_routes(false).await
+        Self::start_three_with_options(false, false).await
     }
 
     pub(super) async fn start_three_routed() -> Self {
-        Self::start_three_with_routes(true).await
+        Self::start_three_with_options(true, false).await
     }
 
-    pub(super) async fn start_three_with_routes(enable_routes: bool) -> Self {
+    pub(super) async fn start_three_secure() -> Self {
+        Self::start_three_with_options(true, true).await
+    }
+
+    pub(super) async fn start_three_with_options(enable_routes: bool, secure: bool) -> Self {
         let max_payload = 1024;
         let mut nodes = Vec::new();
         for node_id in 1..=3 {
@@ -113,6 +122,7 @@ impl ClusterHarness {
                 listen: node.client_addr,
                 http_listen: enable_routes.then_some(node.http_addr),
                 admin_token: enable_routes.then_some("test-admin-token".to_string()),
+                admin_tls: secure.then(tls_config),
                 wal_dir: dir.path().join("wal"),
                 wal_segment_bytes: server::wal::DEFAULT_WAL_SEGMENT_BYTES,
                 fsync_interval_ms: 1,
@@ -131,7 +141,10 @@ impl ClusterHarness {
                     node_id: node.node_id,
                     auth_token: "test-cluster-token".to_string(),
                     raft_listen: node.raft_addr,
+                    raft_tls: secure.then(|| internal_tls_config(node.node_id)),
+                    allow_insecure_internal_transports: !secure,
                     route_listen: enable_routes.then_some(node.route_addr),
+                    route_tls: secure.then(|| internal_tls_config(node.node_id)),
                     routes: if !enable_routes || node.node_id == 1 {
                         Vec::new()
                     } else {
@@ -146,6 +159,13 @@ impl ClusterHarness {
                             node_id: node.node_id,
                             raft_addr: node.raft_addr.to_string(),
                             client_addr: node.client_addr.to_string(),
+                            route_addr: enable_routes.then(|| node.route_addr.to_string()),
+                            tls_server_name: secure.then(|| format!("node-{}", node.node_id)),
+                            tls_cert_files: if secure {
+                                vec![internal_cert_file(node.node_id)]
+                            } else {
+                                Vec::new()
+                            },
                         })
                         .collect(),
                     election_timeout_min_ms: 150,
@@ -172,6 +192,7 @@ impl ClusterHarness {
             brokers,
             server_tasks,
             max_payload,
+            secure,
             _dirs: dirs,
         }
     }
@@ -220,17 +241,22 @@ impl ClusterHarness {
 
     pub(super) async fn wait_for_full_route_mesh(&self) {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let mut observed = Vec::new();
         loop {
             let mut ready = true;
+            observed.clear();
             for node in &self.nodes {
-                let Some(value) = cluster_json(node.http_addr).await else {
+                let Some(value) = cluster_json_with_tls(node.http_addr, self.secure).await else {
                     ready = false;
+                    observed.push(None);
                     continue;
                 };
                 let Some(connected) = value["routes"]["connected"].as_array() else {
                     ready = false;
+                    observed.push(None);
                     continue;
                 };
+                observed.push(Some(connected.len()));
                 ready &= connected.len() == self.nodes.len() - 1;
             }
             if ready {
@@ -238,16 +264,35 @@ impl ClusterHarness {
             }
             assert!(
                 tokio::time::Instant::now() < deadline,
-                "route mesh did not become full"
+                "route mesh did not become full: {observed:?}"
             );
             tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    pub(super) async fn wait_for_admin_tls(&self, node_index: usize) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if cluster_json_with_tls(self.nodes[node_index].http_addr, true)
+                .await
+                .is_some()
+            {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "admin TLS listener did not become ready"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
         }
     }
 
     pub(super) async fn wait_for_route_interest(&self, observer_index: usize, subject: &str) {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         loop {
-            if let Some(value) = cluster_json(self.nodes[observer_index].http_addr).await {
+            if let Some(value) =
+                cluster_json_with_tls(self.nodes[observer_index].http_addr, self.secure).await
+            {
                 if value["routes"]["connected"]
                     .as_array()
                     .into_iter()
@@ -280,7 +325,34 @@ pub(super) async fn free_addr() -> SocketAddr {
     listener.local_addr().unwrap()
 }
 pub(super) async fn cluster_json(addr: SocketAddr) -> Option<serde_json::Value> {
-    let mut stream = TcpStream::connect(addr).await.ok()?;
+    cluster_json_with_tls(addr, false).await
+}
+
+pub(super) async fn cluster_json_with_tls(
+    addr: SocketAddr,
+    secure: bool,
+) -> Option<serde_json::Value> {
+    let stream = tokio::time::timeout(Duration::from_millis(250), TcpStream::connect(addr))
+        .await
+        .ok()?
+        .ok()?;
+    let mut stream: Box<dyn AsyncStream + Unpin> = if secure {
+        let connector = internal_tls_connector(tls_ca_cert_file())?;
+        Box::new(
+            tokio::time::timeout(
+                Duration::from_millis(250),
+                connector.connect(
+                    rustls::pki_types::ServerName::try_from("localhost").ok()?,
+                    stream,
+                ),
+            )
+            .await
+            .ok()?
+            .ok()?,
+        )
+    } else {
+        Box::new(stream)
+    };
     stream
         .write_all(
             b"GET /cluster HTTP/1.1\r\nhost: localhost\r\nauthorization: Bearer test-admin-token\r\n\r\n",
@@ -288,10 +360,30 @@ pub(super) async fn cluster_json(addr: SocketAddr) -> Option<serde_json::Value> 
         .await
         .ok()?;
     let mut response = Vec::new();
-    stream.read_to_end(&mut response).await.ok()?;
+    tokio::time::timeout(
+        Duration::from_millis(250),
+        stream.read_to_end(&mut response),
+    )
+    .await
+    .ok()?
+    .ok()?;
     let response = String::from_utf8(response).ok()?;
     let (_, body) = response.split_once("\r\n\r\n")?;
     serde_json::from_str(body).ok()
+}
+
+fn internal_tls_connector(ca_file: PathBuf) -> Option<tokio_rustls::TlsConnector> {
+    let mut reader = std::io::BufReader::new(std::fs::File::open(ca_file).ok()?);
+    let certs = rustls_pemfile::certs(&mut reader)
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add_parsable_certificates(certs);
+    Some(tokio_rustls::TlsConnector::from(std::sync::Arc::new(
+        rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth(),
+    )))
 }
 
 pub(super) async fn wait_for_partition_metadata(
@@ -372,6 +464,7 @@ impl Harness {
             listen: addr,
             http_listen: None,
             admin_token: None,
+            admin_tls: None,
             wal_dir: wal_dir.path().to_path_buf(),
             wal_segment_bytes: server::wal::DEFAULT_WAL_SEGMENT_BYTES,
             fsync_interval_ms: 1,
@@ -441,4 +534,23 @@ pub(super) fn tls_key_file() -> PathBuf {
 }
 pub(super) fn tls_ca_cert_file() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ca-cert.pem")
+}
+
+pub(super) fn internal_tls_config(node_id: u64) -> InternalTlsConfig {
+    InternalTlsConfig {
+        cert_file: internal_cert_file(node_id),
+        key_file: internal_fixture(format!("node-{node_id}-key.pem")),
+        ca_cert_file: internal_fixture("ca-cert.pem"),
+        handshake_timeout_ms: 500,
+    }
+}
+
+pub(super) fn internal_cert_file(node_id: u64) -> PathBuf {
+    internal_fixture(format!("node-{node_id}-cert.pem"))
+}
+
+fn internal_fixture(name: impl AsRef<Path>) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/internal")
+        .join(name)
 }

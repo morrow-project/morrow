@@ -289,6 +289,7 @@ mod state_machine;
 mod storage_io;
 
 pub(crate) use self::proxy::proxy_stream_to_leader;
+use self::runtime::RaftTlsRuntime;
 use self::{data_plane::*, log_store::*, network::*, rpc::*, state_machine::*, storage_io::*};
 pub use self::{
     proxy::proxy_to_leader,

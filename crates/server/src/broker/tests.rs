@@ -422,6 +422,7 @@ fn test_config(dir: &Path) -> Config {
         listen: "127.0.0.1:0".parse().unwrap(),
         http_listen: None,
         admin_token: Some("test-admin-token".to_string()),
+        admin_tls: None,
         wal_dir: dir.to_path_buf(),
         wal_segment_bytes: crate::wal::DEFAULT_WAL_SEGMENT_BYTES,
         fsync_interval_ms: 1,
@@ -482,10 +483,13 @@ fn fake_cluster_config(dir: &Path, node_count: u64, local_node_id: u64) -> Clust
         node_id: local_node_id,
         auth_token: "test-cluster-token".to_string(),
         raft_listen: SocketAddr::from(([127, 0, 0, 1], 20_000 + local_node_id as u16)),
+        raft_tls: None,
+        allow_insecure_internal_transports: true,
         route_listen: Some(SocketAddr::from((
             [127, 0, 0, 1],
             30_000 + local_node_id as u16,
         ))),
+        route_tls: None,
         routes: Vec::new(),
         route_reconnect_ms: 50,
         raft_dir: dir.join("raft"),
@@ -496,6 +500,11 @@ fn fake_cluster_config(dir: &Path, node_count: u64, local_node_id: u64) -> Clust
                 raft_addr: SocketAddr::from(([127, 0, 0, 1], 20_000 + node_id as u16)).to_string(),
                 client_addr: SocketAddr::from(([127, 0, 0, 1], 10_000 + node_id as u16))
                     .to_string(),
+                route_addr: Some(
+                    SocketAddr::from(([127, 0, 0, 1], 30_000 + node_id as u16)).to_string(),
+                ),
+                tls_server_name: None,
+                tls_cert_files: Vec::new(),
             })
             .collect(),
         election_timeout_min_ms: 150,

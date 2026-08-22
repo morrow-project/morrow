@@ -46,6 +46,7 @@ Fields:
 - `listen`: TCP socket address for client connections.
 - `http_listen`: optional HTTP status listener address.
 - `admin_token`: bearer token required when `http_listen` is set.
+- `admin_tls`: optional TLS config dedicated to the administrative listener.
 - `wal_dir`: directory for the broker WAL.
 - `wal_segment_bytes`: WAL segment rotation threshold.
 - `fsync_interval_ms`: maximum batching interval before fsync.
@@ -89,6 +90,7 @@ the broker WAL rather than entering metadata consensus:
     "node_id": 1,
     "auth_token_file": "/run/secrets/broker_cluster_token",
     "raft_listen": "127.0.0.1:5221",
+    "allow_insecure_internal_transports": true,
     "route_listen": "127.0.0.1:6221",
     "routes": [],
     "route_reconnect_ms": 500,
@@ -110,6 +112,15 @@ the broker WAL rather than entering metadata consensus:
 Exactly one fresh node should use `"bootstrap": true`; every node must list the
 same static membership and `auth_token`, and set its own `node_id`, `listen`,
 `wal_dir`, `raft_listen`, and `raft_dir`. Dynamic membership is not implemented yet.
+`cluster.raft_tls` and `cluster.route_tls` use a node certificate, private key,
+trusted CA, and handshake timeout. With either transport protected, every node
+entry also supplies `tls_server_name` and one or more `tls_cert_files`. The
+certificate presented by a peer must validate against the CA, match the dialed
+hostname, and exactly match a certificate assigned to that node ID.
+Internal TLS is required by default so reusable cluster credentials never cross
+plaintext sockets. `allow_insecure_internal_transports` is an explicit escape
+hatch for loopback-only tests such as the example above; do not enable it on a
+shared network.
 If `route_listen` is set, the node also starts an internal route listener.
 `routes` are seed route addresses; nodes gossip discovered peers over route
 connections after authenticating with `cluster.auth_token`, and dial until they
@@ -121,7 +132,8 @@ follower proxy path.
 
 When `http_listen` is set, `admin_token` or `admin_token_file` is required and the broker exposes JSON
 admin endpoints protected by `Authorization: Bearer <admin_token>`. Bind this
-listener to loopback or a trusted private interface.
+listener to loopback or a trusted private interface. Configure `admin_tls` when
+the token can cross anything other than an already protected local channel.
 `GET /cluster` reports cluster size, status, this node's role, leader ID, static
 Raft peers, partition leaders/high-watermarks, and route topology. `GET /connections` reports live client
 connections. `GET /subscriptions` reports durable consumers and transient
@@ -134,30 +146,27 @@ counters.
 `compose.yaml` is an explicitly local-only development profile. It starts a
 three-node broker cluster using the local Dockerfile, enables client
 challenge-response authentication, mounts credentials as Docker Compose
-secrets, and binds every published port to `127.0.0.1`. It does not enable TLS;
-do not use this profile as a production deployment.
+secrets, protects Raft and route traffic with mutual TLS, protects the admin
+listener with TLS, and binds every published port to `127.0.0.1`. It remains a
+development profile rather than a production deployment.
 
-Create fresh local credentials before the first start. The Ed25519 DER file and
-raw private seed stay under the ignored `.secrets` directory and are never
-mounted into a broker container:
+Create fresh local credentials and a private development CA before the first
+start. Private client and CA material stays under the ignored `.secrets`
+directory; the CA private key is discarded after issuing the node certificates:
 
 ```bash
-mkdir -p .secrets
-openssl rand -hex 32 > .secrets/broker-admin-token
-openssl rand -hex 32 > .secrets/broker-cluster-token
-openssl genpkey -algorithm ED25519 -outform DER -out .secrets/local-client-key.der
-tail -c 32 .secrets/local-client-key.der | xxd -p -c 64 > .secrets/local-client-seed
-openssl pkey -inform DER -in .secrets/local-client-key.der -pubout -outform DER \
-  | tail -c 32 | xxd -p -c 64 > .secrets/broker-client-public-key
+scripts/generate-compose-secrets.sh
 docker compose config
 docker compose up --build -d
 docker compose ps
 ```
 
 The default secret paths can be replaced with `BROKER_ADMIN_TOKEN_FILE`,
-`BROKER_CLUSTER_TOKEN_FILE`, and `BROKER_CLIENT_PUBLIC_KEY_FILE`. Startup fails
-if a mounted file is missing or empty. Compose passes the same cluster secret to
-all three nodes without placing its contents in rendered Compose output.
+`BROKER_CLUSTER_TOKEN_FILE`, `BROKER_CLIENT_PUBLIC_KEY_FILE`,
+`BROKER_TLS_CA_FILE`, and the `BROKER_NODE_<N>_CERT_FILE` and
+`BROKER_NODE_<N>_KEY_FILE` variables. Startup fails if a mounted file is missing
+or empty. Compose passes credentials without placing their contents in rendered
+Compose output.
 
 Each node mounts a read-only config from `docker/cluster/` and gets its own named
 data volume:
@@ -177,8 +186,29 @@ requests without the bearer token return `401 Unauthorized`. For example:
 
 ```bash
 printf 'CONNECT {}\r\n' | nc 127.0.0.1 4221
-curl -i http://127.0.0.1:8221/cluster
+curl --cacert .secrets/broker-ca-cert.pem -i https://localhost:8221/cluster
 ```
+
+### Internal certificate and token rotation
+
+Issue a replacement certificate from the currently trusted CA with the same
+node DNS name. Add its public certificate path to that node's
+`tls_cert_files` on every member, mount both old and new public certificates,
+and roll the configuration through the cluster one node at a time. Then switch
+the target node's `raft_tls`, `route_tls`, and `admin_tls` certificate/key to the
+replacement, restart that node, and verify it rejoins before proceeding. Once
+all peers use the replacement, remove the old public certificate in another
+rolling restart. This overlap permits certificate rollover without a
+cluster-wide outage.
+
+For a CA rotation, distribute a CA bundle containing both old and new roots,
+perform the same certificate rollover, then remove the old root. Rotate the
+cluster bearer token only after mTLS is healthy: temporarily deploy a version
+that accepts both token generations, switch senders, and then remove the old
+token. The current configuration accepts one token, so changing it directly
+requires a coordinated restart. Rotate the admin token one node at a time and
+update callers after each node; TLS prevents either bearer token from appearing
+on the wire during the transition.
 
 ## Release Builds
 

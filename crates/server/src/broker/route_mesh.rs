@@ -1,12 +1,52 @@
 use super::*;
 
 impl RouteMesh {
-    pub(super) fn from_config(config: &Config) -> Option<Self> {
-        let cluster = config.cluster.as_ref()?;
-        let route_addr = cluster.route_listen?;
-        Some(Self {
+    pub(super) fn from_config(config: &Config) -> Result<Option<Self>> {
+        let Some(cluster) = config.cluster.as_ref() else {
+            return Ok(None);
+        };
+        let Some(route_listen) = cluster.route_listen else {
+            return Ok(None);
+        };
+        let route_addr = cluster
+            .self_node()
+            .and_then(|node| node.route_addr.clone())
+            .unwrap_or_else(|| route_listen.to_string());
+        let tls = cluster
+            .route_tls
+            .as_ref()
+            .map(|tls| -> Result<RouteTlsRuntime> {
+                Ok(RouteTlsRuntime {
+                    acceptor: crate::tls::load_internal_acceptor(tls)?,
+                    connector: crate::tls::load_internal_connector(tls)?,
+                    peer_identities: Arc::new(crate::tls::load_peer_certificates(&cluster.nodes)?),
+                    server_names: Arc::new(
+                        cluster
+                            .nodes
+                            .iter()
+                            .map(|node| {
+                                (
+                                    node.node_id,
+                                    node.tls_server_name.clone().expect("validated TLS name"),
+                                )
+                            })
+                            .collect(),
+                    ),
+                    handshake_timeout_ms: tls.handshake_timeout_ms,
+                })
+            })
+            .transpose()?;
+        let configured_route_nodes = Arc::new(
+            cluster
+                .nodes
+                .iter()
+                .filter_map(|node| Some((node.route_addr.clone()?, node.node_id)))
+                .collect(),
+        );
+        Ok(Some(Self {
             inner: Arc::new(Mutex::new(RouteMeshState {
                 node_id: cluster.node_id,
+                route_listen,
                 route_addr,
                 client_addr: config.listen,
                 seeds: cluster.routes.clone(),
@@ -16,13 +56,15 @@ impl RouteMesh {
                 local_interests: Vec::new(),
             })),
             auth_token: cluster.auth_token.clone(),
-        })
+            tls,
+            configured_route_nodes,
+        }))
     }
 
     pub(super) async fn start(&self, broker: Broker) -> Result<()> {
         let (listen, reconnect_ms) = {
             let state = self.inner.lock().await;
-            (state.route_addr, state.reconnect_ms)
+            (state.route_listen, state.reconnect_ms)
         };
         let listener = TcpListener::bind(listen)
             .await
@@ -38,15 +80,9 @@ impl RouteMesh {
                         let broker = accept_broker.clone();
                         let auth_token = accept_auth_token.clone();
                         tokio::spawn(async move {
-                            if let Err(err) = handle_route_stream(
-                                mesh,
-                                broker,
-                                stream,
-                                RouteDirection::Inbound,
-                                auth_token,
-                            )
-                            .await
-                            {
+                            let result =
+                                accept_route_stream(mesh, broker, stream, auth_token).await;
+                            if let Err(err) = result {
                                 error!(error = ?err, "route connection error");
                             }
                         });
@@ -66,22 +102,22 @@ impl RouteMesh {
             loop {
                 interval.tick().await;
                 let addrs = dial_mesh.dial_candidates().await;
-                for addr in addrs {
+                for (addr, expected_node_id) in addrs {
                     match TcpStream::connect(&addr).await {
                         Ok(stream) => {
                             let mesh = dial_mesh.clone();
                             let broker = dial_broker.clone();
                             let auth_token = dial_auth_token.clone();
                             tokio::spawn(async move {
-                                if let Err(err) = handle_route_stream(
+                                let result = connect_route_stream(
                                     mesh,
                                     broker,
                                     stream,
-                                    RouteDirection::Outbound,
                                     auth_token,
+                                    expected_node_id,
                                 )
-                                .await
-                                {
+                                .await;
+                                if let Err(err) = result {
                                     error!(error = ?err, "route connection error");
                                 }
                             });
@@ -96,25 +132,29 @@ impl RouteMesh {
         Ok(())
     }
 
-    pub(super) async fn dial_candidates(&self) -> Vec<String> {
+    pub(super) async fn dial_candidates(&self) -> Vec<(String, Option<u64>)> {
         let state = self.inner.lock().await;
         let mut addrs = state.seeds.clone();
         addrs.extend(
             state
                 .known_peers
                 .values()
-                .map(|peer| peer.route_addr.to_string()),
+                .map(|peer| peer.route_addr.clone()),
         );
         addrs.sort();
         addrs.dedup();
         addrs
             .into_iter()
-            .filter(|addr| *addr != state.route_addr.to_string())
+            .filter(|addr| *addr != state.route_addr)
             .filter(|addr| {
                 !state
                     .peers
                     .values()
-                    .any(|peer| peer.info.route_addr.to_string() == *addr)
+                    .any(|peer| peer.info.route_addr == *addr)
+            })
+            .map(|addr| {
+                let node_id = self.configured_route_nodes.get(&addr).copied();
+                (addr, node_id)
             })
             .collect()
     }
@@ -122,12 +162,12 @@ impl RouteMesh {
     pub(super) async fn note_dial_error(&self, addr: String, error: String) {
         let mut state = self.inner.lock().await;
         for peer in state.known_peers.values_mut() {
-            if peer.route_addr.to_string() == addr {
+            if peer.route_addr == addr {
                 continue;
             }
         }
         for peer in state.peers.values_mut() {
-            if peer.info.route_addr.to_string() == addr {
+            if peer.info.route_addr == addr {
                 peer.last_error = Some(error.clone());
                 peer.reconnect_attempts = peer.reconnect_attempts.saturating_add(1);
             }
@@ -138,7 +178,7 @@ impl RouteMesh {
         let state = self.inner.lock().await;
         RouteFrame::Hello {
             node_id: state.node_id,
-            route_addr: state.route_addr,
+            route_addr: state.route_addr.clone(),
             client_addr: state.client_addr,
         }
     }
@@ -152,7 +192,7 @@ impl RouteMesh {
                 .cloned()
                 .chain(std::iter::once(RoutePeerInfo {
                     node_id: state.node_id,
-                    route_addr: state.route_addr,
+                    route_addr: state.route_addr.clone(),
                     client_addr: state.client_addr,
                 }))
                 .collect(),
@@ -202,7 +242,7 @@ impl RouteMesh {
     pub(super) async fn merge_peers(&self, peers: Vec<RoutePeerInfo>) -> Vec<u64> {
         let mut state = self.inner.lock().await;
         let node_id = state.node_id;
-        let route_addr = state.route_addr;
+        let route_addr = state.route_addr.clone();
         let mut added = Vec::new();
         for peer in peers {
             if peer.node_id != node_id && peer.route_addr != route_addr {
@@ -297,7 +337,7 @@ impl RouteMesh {
             .values()
             .map(|peer| RouteDiscoveredPeerResponse {
                 node_id: peer.node_id,
-                route_addr: peer.route_addr.to_string(),
+                route_addr: peer.route_addr.clone(),
                 client_addr: peer.client_addr.to_string(),
                 connected: state.peers.contains_key(&peer.node_id),
             })
@@ -308,7 +348,7 @@ impl RouteMesh {
             .iter()
             .map(|(node_id, peer)| RoutePeerResponse {
                 node_id: *node_id,
-                route_addr: peer.info.route_addr.to_string(),
+                route_addr: peer.info.route_addr.clone(),
                 client_addr: peer.info.client_addr.to_string(),
                 direction: match peer.direction {
                     RouteDirection::Inbound => "inbound",
@@ -323,7 +363,7 @@ impl RouteMesh {
             .collect::<Vec<_>>();
         connected.sort_by_key(|peer| peer.node_id);
         RouteTopologyResponse {
-            listen: state.route_addr.to_string(),
+            listen: state.route_listen.to_string(),
             seeds: state.seeds.clone(),
             discovered,
             connected,
@@ -331,14 +371,18 @@ impl RouteMesh {
     }
 }
 
-pub(super) async fn handle_route_stream(
+pub(super) async fn handle_route_stream<S>(
     mesh: RouteMesh,
     broker: Broker,
-    stream: TcpStream,
+    stream: S,
     direction: RouteDirection,
     auth_token: String,
-) -> Result<()> {
-    let (mut reader, mut writer) = stream.into_split();
+    tls_peer_id: Option<u64>,
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let (mut reader, mut writer) = tokio::io::split(stream);
     let (sender, mut receiver) = mpsc::channel::<RouteFrame>(256);
     let writer_auth_token = auth_token.clone();
     sender
@@ -371,6 +415,12 @@ pub(super) async fn handle_route_stream(
                 route_addr,
                 client_addr,
             } => {
+                if let Some(peer_id) = tls_peer_id {
+                    crate::broker_ensure!(
+                        node_id == peer_id,
+                        "route hello node ID does not match peer certificate"
+                    );
+                }
                 let info = RoutePeerInfo {
                     node_id,
                     route_addr,

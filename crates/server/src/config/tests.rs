@@ -53,6 +53,7 @@ fn parses_cluster_route_mesh_config() {
             "node_id": 1,
             "auth_token": "cluster-secret",
             "raft_listen": "127.0.0.1:5221",
+            "allow_insecure_internal_transports": true,
             "route_listen": "127.0.0.1:6221",
             "routes": ["127.0.0.1:6222", "127.0.0.1:6223"],
             "raft_dir": "./target/test-wal-config-routes/raft",
@@ -161,6 +162,7 @@ fn parses_cluster_config() {
             "node_id": 1,
             "auth_token": "cluster-secret",
             "raft_listen": "127.0.0.1:5221",
+            "allow_insecure_internal_transports": true,
             "routes": ["localhost:6222"],
             "raft_dir": "./target/test-wal-cluster-config/raft",
             "bootstrap": true,
@@ -193,6 +195,7 @@ fn rejects_cluster_missing_self_node() {
             "node_id": 3,
             "auth_token": "cluster-secret",
             "raft_listen": "127.0.0.1:5221",
+            "allow_insecure_internal_transports": true,
             "raft_dir": "./target/test-wal-cluster-missing-self/raft",
             "nodes": [
                 {"node_id": 1, "raft_addr": "127.0.0.1:5221", "client_addr": "127.0.0.1:4221"}
@@ -211,6 +214,26 @@ fn rejects_http_listener_without_admin_token() {
     }))
     .unwrap_err();
     assert!(err.to_string().contains("admin_token"));
+}
+
+#[test]
+fn rejects_plaintext_internal_transport_by_default() {
+    let err = Config::from_json(&serde_json::json!({
+        "wal_dir": "./target/test-wal-insecure-cluster",
+        "cluster": {
+            "enabled": true,
+            "node_id": 1,
+            "auth_token": "cluster-secret",
+            "raft_listen": "127.0.0.1:5221",
+            "raft_dir": "./target/test-wal-insecure-cluster/raft",
+            "bootstrap": true,
+            "nodes": [
+                {"node_id": 1, "raft_addr": "127.0.0.1:5221", "client_addr": "127.0.0.1:4221"}
+            ]
+        }
+    }))
+    .unwrap_err();
+    assert!(err.to_string().contains("cluster.raft_tls is required"));
 }
 
 #[test]

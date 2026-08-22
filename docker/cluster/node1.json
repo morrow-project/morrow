@@ -2,6 +2,11 @@
   "listen": "0.0.0.0:4222",
   "http_listen": "0.0.0.0:8222",
   "admin_token_file": "/run/secrets/broker_admin_token",
+  "admin_tls": {
+    "cert_file": "/run/secrets/broker_node_1_cert",
+    "key_file": "/run/secrets/broker_node_1_key",
+    "handshake_timeout_ms": 2000
+  },
   "wal_dir": "/var/lib/broker/wal",
   "wal_segment_bytes": 67108864,
   "fsync_interval_ms": 5,
@@ -23,7 +28,19 @@
     "node_id": 1,
     "auth_token_file": "/run/secrets/broker_cluster_token",
     "raft_listen": "0.0.0.0:5222",
+    "raft_tls": {
+      "cert_file": "/run/secrets/broker_node_1_cert",
+      "key_file": "/run/secrets/broker_node_1_key",
+      "ca_cert_file": "/run/secrets/broker_tls_ca",
+      "handshake_timeout_ms": 2000
+    },
     "route_listen": "0.0.0.0:6222",
+    "route_tls": {
+      "cert_file": "/run/secrets/broker_node_1_cert",
+      "key_file": "/run/secrets/broker_node_1_key",
+      "ca_cert_file": "/run/secrets/broker_tls_ca",
+      "handshake_timeout_ms": 2000
+    },
     "routes": [
       "broker-2:6222",
       "broker-3:6222"
@@ -35,17 +52,26 @@
       {
         "node_id": 1,
         "raft_addr": "broker-1:5222",
-        "client_addr": "broker-1:4222"
+        "client_addr": "broker-1:4222",
+        "route_addr": "broker-1:6222",
+        "tls_server_name": "broker-1",
+        "tls_cert_files": ["/run/secrets/broker_node_1_cert"]
       },
       {
         "node_id": 2,
         "raft_addr": "broker-2:5222",
-        "client_addr": "broker-2:4222"
+        "client_addr": "broker-2:4222",
+        "route_addr": "broker-2:6222",
+        "tls_server_name": "broker-2",
+        "tls_cert_files": ["/run/secrets/broker_node_2_cert"]
       },
       {
         "node_id": 3,
         "raft_addr": "broker-3:5222",
-        "client_addr": "broker-3:4222"
+        "client_addr": "broker-3:4222",
+        "route_addr": "broker-3:6222",
+        "tls_server_name": "broker-3",
+        "tls_cert_files": ["/run/secrets/broker_node_3_cert"]
       }
     ],
     "election_timeout_min_ms": 150,
