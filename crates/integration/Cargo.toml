@@ -11,3 +11,6 @@ tokio.workspace = true
 rustls.workspace = true
 rustls-pemfile.workspace = true
 tokio-rustls.workspace = true
+
+[dev-dependencies]
+wat = "1.254.0"

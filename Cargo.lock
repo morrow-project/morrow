@@ -990,6 +990,7 @@ dependencies = [
  "server",
  "tokio",
  "tokio-rustls",
+ "wat",
 ]
 
 [[package]]

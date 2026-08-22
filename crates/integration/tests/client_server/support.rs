@@ -99,7 +99,19 @@ impl ClusterHarness {
         Self::start_three_with_options(true, true).await
     }
 
+    pub(super) async fn start_three_with_auth(auth: AuthConfig) -> Self {
+        Self::start_three_with_runtime_options(false, false, auth).await
+    }
+
     pub(super) async fn start_three_with_options(enable_routes: bool, secure: bool) -> Self {
+        Self::start_three_with_runtime_options(enable_routes, secure, AuthConfig::default()).await
+    }
+
+    async fn start_three_with_runtime_options(
+        enable_routes: bool,
+        secure: bool,
+        auth: AuthConfig,
+    ) -> Self {
         let max_payload = 1024;
         let mut nodes = Vec::new();
         for node_id in 1..=3 {
@@ -136,7 +148,7 @@ impl ClusterHarness {
                 max_encoded_batch_bytes: server::config::DEFAULT_MAX_ENCODED_BATCH_BYTES,
                 verbose: false,
                 tls: None,
-                auth: Default::default(),
+                auth: auth.clone(),
                 cluster: Some(ClusterConfig {
                     enabled: true,
                     node_id: node.node_id,

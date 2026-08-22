@@ -300,6 +300,12 @@ rules as subscriptions. Broker ack subjects remain available only to the active
 consumer member that received the delivery, and `_INBOX.*` request/reply
 subjects are scoped to the authenticated client's `_INBOX.<client_id>.` prefix.
 
+Publish authorization runs before programmable middleware and is repeated after
+subject rewrites and for every secondary publication. Middleware inherits the
+publisher's authority; no module is trusted to cross an authorization boundary.
+Denied attempts are audited with connection ID, subject, and reason only, never
+with message payloads or credentials.
+
 ## Run
 
 Build and run the broker from the repository root:

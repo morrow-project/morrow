@@ -14,7 +14,7 @@ use tokio::{
     sync::{Mutex, mpsc},
 };
 use tokio_rustls::TlsAcceptor;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 #[cfg(test)]
 use openraft::BasicNode;
@@ -48,6 +48,7 @@ const ROUTE_FRAME_READ_TIMEOUT_MS: u64 = 5_000;
 const MAX_ROUTE_FRAME: usize = 2 * 1024 * 1024;
 
 mod broker;
+mod broker_authorization;
 mod broker_client;
 mod broker_lifecycle;
 mod broker_publish;

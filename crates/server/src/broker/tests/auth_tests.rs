@@ -1,5 +1,8 @@
 use super::*;
 use crate::config::{AuthClientConfig, AuthConfig, AuthPermissions};
+use crate::middleware::{
+    Capability, FailurePolicy, MiddlewareManifest, MiddlewareStage, ResourceBudget,
+};
 use ed25519_dalek::{Signer, SigningKey};
 
 #[tokio::test]
@@ -225,6 +228,130 @@ async fn unauthorized_cluster_publish_does_not_propose_write() {
         .expect_err_contains("publish not authorized")
         .await;
     assert_eq!(scenario.fake_cluster().write_count(), 1);
+}
+
+#[tokio::test]
+async fn denied_original_subject_does_not_execute_ingress_middleware() {
+    let scenario = auth_scenario(vec![auth_client(
+        "publisher1",
+        [8; 32],
+        Some(vec!["orders.*"]),
+        None,
+    )]);
+    install_middleware(
+        &scenario,
+        middleware_manifest("trap", "events.denied", []),
+        "(module (func (export \"process\") (param i32) (result i32) unreachable))",
+    );
+    let mut publisher = connect_authenticated(&scenario, "publisher1", [8; 32]).await;
+
+    publisher.publish("events.denied", b"secret").await;
+    publisher
+        .expect_err_contains("publish not authorized")
+        .await;
+    assert!(scenario.broker().inner.lock().await.messages.is_empty());
+}
+
+#[tokio::test]
+async fn rewritten_and_emitted_subjects_retain_publisher_authority() {
+    let scenario = auth_scenario(vec![auth_client(
+        "publisher1",
+        [8; 32],
+        Some(vec!["orders.*"]),
+        None,
+    )]);
+    scenario
+        .broker()
+        .middleware_runtime()
+        .install(vec![
+            (
+                middleware_manifest(
+                    "rewrite-denied",
+                    "orders.rewrite",
+                    [Capability::WriteSubject],
+                ),
+                wat::parse_str(rewrite_module("admin.denied")).unwrap(),
+            ),
+            (
+                middleware_manifest(
+                    "rewrite-reserved",
+                    "orders.reserved",
+                    [Capability::WriteSubject],
+                ),
+                wat::parse_str(rewrite_module("_BROKER.ADMIN")).unwrap(),
+            ),
+            (
+                middleware_manifest(
+                    "emit-denied",
+                    "orders.emit",
+                    [Capability::SecondaryPublish],
+                ),
+                wat::parse_str(
+                    "(module
+                        (import \"broker\" \"emit\" (func $emit (param i32 i32 i32 i32) (result i32)))
+                        (memory (export \"memory\") 1)
+                        (data (i32.const 0) \"admin.emittedx\")
+                        (func (export \"process\") (param i32) (result i32)
+                          i32.const 0 i32.const 13 i32.const 13 i32.const 1 call $emit drop
+                          i32.const 0))",
+                )
+                .unwrap(),
+            ),
+        ])
+        .unwrap();
+    let mut publisher = connect_authenticated(&scenario, "publisher1", [8; 32]).await;
+
+    publisher.publish("orders.rewrite", b"secret").await;
+    publisher
+        .expect_err_contains("publish not authorized")
+        .await;
+    publisher.publish("orders.reserved", b"secret").await;
+    publisher
+        .expect_err_contains("middleware produced reserved broker subject")
+        .await;
+    publisher.publish("orders.emit", b"secret").await;
+    publisher
+        .expect_err_contains("publish not authorized")
+        .await;
+    assert!(scenario.broker().inner.lock().await.messages.is_empty());
+}
+
+fn install_middleware(scenario: &Scenario, manifest: MiddlewareManifest, module: &str) {
+    scenario
+        .broker()
+        .middleware_runtime()
+        .install(vec![(manifest, wat::parse_str(module).unwrap())])
+        .unwrap();
+}
+
+fn middleware_manifest(
+    name: &str,
+    subject: &str,
+    capabilities: impl IntoIterator<Item = Capability>,
+) -> MiddlewareManifest {
+    MiddlewareManifest {
+        name: name.to_string(),
+        subject: subject.to_string(),
+        stage: MiddlewareStage::Ingress,
+        capabilities: capabilities.into_iter().collect(),
+        failure_policy: FailurePolicy::FailClosed,
+        budget: ResourceBudget::default(),
+        named_kv: BTreeSet::new(),
+        secrets: BTreeSet::new(),
+        http_allow_lists: BTreeSet::new(),
+    }
+}
+
+fn rewrite_module(subject: &str) -> String {
+    format!(
+        "(module
+            (import \"broker\" \"set-field\" (func $set (param i32 i32 i32) (result i32)))
+            (memory (export \"memory\") 1)
+            (data (i32.const 0) \"{subject}\")
+            (func (export \"process\") (param i32) (result i32)
+              i32.const 0 i32.const 0 i32.const {} call $set drop i32.const 0))",
+        subject.len()
+    )
 }
 
 fn auth_scenario(clients: Vec<(String, AuthClientConfig)>) -> Scenario {
