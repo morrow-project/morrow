@@ -6,6 +6,14 @@ impl DurableBrokerState {
             .extend(self.consumer_interest_index.matching(subject));
     }
 
+    pub(super) fn observe_published_record(&mut self, record: &PublishRecord) {
+        for consumer in self.consumers.values_mut() {
+            consumer
+                .cursors
+                .observe_published_record(&consumer.record.filter_subject, record);
+        }
+    }
+
     pub(super) fn mark_consumer_ready(&mut self, consumer_id: &str) {
         if self.consumers.contains_key(consumer_id) {
             self.ready_consumers.insert(consumer_id.to_string());

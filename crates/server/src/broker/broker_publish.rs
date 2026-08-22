@@ -329,6 +329,7 @@ impl Morrow {
             inner
                 .messages
                 .insert(record.seq, record.clone().into_resident_metadata());
+            inner.observe_published_record(&record);
             inner.mark_subject_ready(&record.subject);
             inner.enforce_stream_retention(
                 &self.partition_logs,

@@ -165,7 +165,9 @@ impl DurableBrokerState {
         self.partition_sequences.insert(key, record.seq);
         let subject = record.subject.clone();
         let seq = record.seq;
-        self.messages.insert(seq, record.into_resident_metadata());
+        self.messages
+            .insert(seq, record.clone().into_resident_metadata());
+        self.observe_published_record(&record);
         self.mark_subject_ready(&subject);
         self.apply_record_compaction(seq, catalog);
         Ok(())

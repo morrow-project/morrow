@@ -80,14 +80,14 @@ impl DurableBrokerState {
             if consumer.in_flight.len() >= consumer.record.max_in_flight {
                 return None;
             }
-            let mut leased = consumer.in_flight.keys().copied().collect::<HashSet<_>>();
-            leased.extend(consumer.preparing.iter().copied());
+            let in_flight = &consumer.in_flight;
+            let preparing = &consumer.preparing;
             let seq = consumer.cursors.next_indexed_candidate(
                 &consumer.record.filter_subject,
                 &self.messages,
                 &self.partition_sequences,
                 partition_logs,
-                &leased,
+                |seq| in_flight.contains_key(&seq) || preparing.contains(&seq),
             )?;
             let attempt = consumer.pending_attempts.get(&seq).copied().unwrap_or(1);
             (seq, attempt)

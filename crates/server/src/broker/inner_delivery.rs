@@ -145,7 +145,7 @@ impl DurableBrokerState {
         {
             return Ok(None);
         }
-        let leased = consumer.in_flight.keys().copied().collect::<HashSet<_>>();
+        let in_flight = &consumer.in_flight;
         let seq = consumer
             .cursors
             .next_indexed_candidate(
@@ -153,13 +153,13 @@ impl DurableBrokerState {
                 &self.messages,
                 &self.partition_sequences,
                 partition_logs,
-                &leased,
+                |seq| in_flight.contains_key(&seq),
             )
             .or_else(|| {
                 consumer
                     .pending
                     .iter()
-                    .find(|seq| !leased.contains(seq))
+                    .find(|seq| !in_flight.contains_key(seq))
                     .copied()
             });
         let Some(seq) = seq else {

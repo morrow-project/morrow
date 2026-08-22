@@ -128,10 +128,13 @@ impl DurableBrokerState {
     fn remove_compacted_sequence(&mut self, seq: u64) {
         if let Some(record) = self.messages.remove(&seq)
             && let (Some(stream), Some(partition), Some(offset)) =
-                (record.stream, record.partition, record.offset)
+                (record.stream.as_deref(), record.partition, record.offset)
         {
             self.partition_sequences
-                .remove(&(stream, partition, offset));
+                .remove(&(stream.to_string(), partition, offset));
+            for consumer in self.consumers.values_mut() {
+                consumer.cursors.remove_record(stream, partition, offset);
+            }
         }
         for consumer in self.consumers.values_mut() {
             consumer.pending.remove(&seq);
