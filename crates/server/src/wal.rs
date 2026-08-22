@@ -7,8 +7,8 @@ use std::{
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
-const WAL_FILE: &str = "broker.wal";
-const LEGACY_WAL_FILE: &str = "broker.wal.legacy";
+const WAL_FILE: &str = "morrow.wal";
+const LEGACY_WAL_FILE: &str = "morrow.wal.legacy";
 const SEGMENT_EXTENSION: &str = "wal";
 const SEGMENT_TMP_EXTENSION: &str = "wal.tmp";
 const SEGMENT_HEADER: &[u8] = b"BROKERWAL\x01\n";

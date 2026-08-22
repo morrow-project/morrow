@@ -168,7 +168,7 @@ fn indexed_offsets(
             used_index: true,
         });
     }
-    if filter == ">" || filter.ends_with(".>") {
+    if filter == ">" || filter.ends_with("/**") {
         return None;
     }
     let mut matching_postings = Vec::new();

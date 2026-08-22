@@ -47,7 +47,7 @@ impl WalRuntime {
         let next_publish_seq = wal.next_publish_seq();
         let (sender, receiver) = mpsc::sync_channel(WAL_QUEUE_CAPACITY);
         std::thread::Builder::new()
-            .name("broker-wal".to_string())
+            .name("morrow-wal".to_string())
             .spawn(move || wal_worker(wal, receiver))
             .expect("spawning WAL worker");
         Self {

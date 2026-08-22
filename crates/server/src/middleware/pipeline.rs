@@ -72,7 +72,7 @@ impl MiddlewareRuntime {
         let ticker_guard = Arc::downgrade(&ticker_lifetime);
         let ticker_engine = engine.clone();
         std::thread::Builder::new()
-            .name("broker-wasm-deadline".to_string())
+            .name("morrow-wasm-deadline".to_string())
             .spawn(move || {
                 while ticker_guard.upgrade().is_some() {
                     std::thread::sleep(Duration::from_millis(1));
@@ -329,7 +329,7 @@ impl MiddlewareRuntime {
                 middleware.manifest.clone(),
                 middleware.manifest.stage,
                 MiddlewareMessage {
-                    subject: "orders.pool-test".to_string(),
+                    subject: "orders/pool-test".to_string(),
                     key: None,
                     headers: Vec::new(),
                     payload: Vec::new(),

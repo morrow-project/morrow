@@ -1,6 +1,6 @@
 use super::*;
 
-impl Broker {
+impl Morrow {
     pub fn open(config: Config) -> Result<Self> {
         Self::open_with_hooks(config, BrokerHooks::default())
     }

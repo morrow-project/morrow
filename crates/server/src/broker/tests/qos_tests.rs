@@ -6,11 +6,11 @@ async fn accepted_qos_acks_before_stream_retention() {
     let mut subscriber = scenario.connect_durable("client1", 25).await;
     let mut publisher = scenario.connect_durable("publisher1", 25).await;
 
-    subscriber.subscribe("orders.*", "sid1").await;
+    subscriber.subscribe("orders/*", "sid1").await;
     subscriber.ping_roundtrip().await;
     publisher
         .publish_qos(
-            "orders.created",
+            "orders/created",
             b"hello",
             protocol::AckLevel::Accepted,
             "msg-accepted",
@@ -32,11 +32,11 @@ async fn durable_qos_acks_after_local_wal_append() {
     let mut subscriber = scenario.connect_durable("client1", 25).await;
     let mut publisher = scenario.connect_durable("publisher1", 25).await;
 
-    subscriber.subscribe("orders.*", "sid1").await;
+    subscriber.subscribe("orders/*", "sid1").await;
     subscriber.ping_roundtrip().await;
     publisher
         .publish_qos(
-            "orders.created",
+            "orders/created",
             b"hello",
             protocol::AckLevel::Durable,
             "msg-durable",
@@ -47,7 +47,9 @@ async fn durable_qos_acks_after_local_wal_append() {
         .expect_producer_ack("msg-durable", 1, true, "1")
         .await;
     let delivery = subscriber.expect_msg().await;
-    assert!(delivery.starts_with("MSG orders.created sid1 _BROKER.ACK.durable-client1-sid1.1."));
+    assert!(
+        delivery.starts_with("DELIVER orders/created sid1 _MORROW/ACK/durable-client1-sid1/1/")
+    );
 }
 
 #[tokio::test]
@@ -56,11 +58,11 @@ async fn high_durability_qos_acks_after_local_flush() {
     let mut subscriber = scenario.connect_durable("client1", 25).await;
     let mut publisher = scenario.connect_durable("publisher1", 25).await;
 
-    subscriber.subscribe("orders.*", "sid1").await;
+    subscriber.subscribe("orders/*", "sid1").await;
     subscriber.ping_roundtrip().await;
     publisher
         .publish_qos(
-            "orders.created",
+            "orders/created",
             b"hello",
             protocol::AckLevel::HighDurability,
             "msg-high",
@@ -98,7 +100,7 @@ async fn cluster_durable_qos_errors_when_cluster_disabled() {
 
     publisher
         .publish_qos(
-            "orders.created",
+            "orders/created",
             b"hello",
             protocol::AckLevel::ClusterDurable,
             "msg-cluster",
@@ -117,7 +119,7 @@ async fn cluster_durable_qos_waits_for_fake_cluster_commit() {
     let mut subscriber = scenario.connect_durable("client1", 25).await;
     let mut publisher = scenario.connect_durable("publisher1", 25).await;
 
-    subscriber.subscribe("orders.*", "sid1").await;
+    subscriber.subscribe("orders/*", "sid1").await;
     subscriber.write_line("PING").await;
     subscriber.expect_no_frame_short().await;
     assert_eq!(scenario.queued_write_count(), 1);
@@ -125,7 +127,7 @@ async fn cluster_durable_qos_waits_for_fake_cluster_commit() {
     subscriber.expect_pong().await;
     publisher
         .publish_qos(
-            "orders.created",
+            "orders/created",
             b"hello",
             protocol::AckLevel::ClusterDurable,
             "msg-cluster",
@@ -151,13 +153,13 @@ async fn qos_publish_does_not_also_emit_verbose_ok() {
     let mut publisher = scenario.connect().await;
     publisher
         .write_line(
-            r#"CONNECT {"durable_id":"publisher1","verbose":true,"ack_timeout_ms":25,"max_in_flight":1024}"#,
+            r#"CONN {"durable_id":"publisher1","verbose":true,"ack_timeout_ms":25,"max_in_flight":1024}"#,
         )
         .await;
 
     publisher
         .publish_qos(
-            "orders.created",
+            "orders/created",
             b"hello",
             protocol::AckLevel::Durable,
             "msg-verbose",

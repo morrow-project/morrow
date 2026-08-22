@@ -106,7 +106,7 @@ impl Client {
             "max_in_flight": max_in_flight,
             "protocol_version": 2,
         });
-        self.write_line(&format!("CONNECT {payload}")).await?;
+        self.write_line(&format!("CONN {payload}")).await?;
         self.inbox_prefix = inbox_prefix(durable_id);
         self.durable = true;
         self.push_credit_messages = max_in_flight;
@@ -118,7 +118,7 @@ impl Client {
             "verbose": verbose,
             "protocol_version": 2,
         });
-        self.write_line(&format!("CONNECT {payload}")).await
+        self.write_line(&format!("CONN {payload}")).await
     }
 
     pub async fn connect_authenticated(
@@ -141,7 +141,7 @@ impl Client {
             "max_in_flight": max_in_flight,
             "protocol_version": 2,
         });
-        self.write_line(&format!("CONNECT {payload}")).await?;
+        self.write_line(&format!("CONN {payload}")).await?;
         self.inbox_prefix = inbox_prefix(&auth.client_id);
         self.durable = true;
         self.push_credit_messages = max_in_flight;
@@ -150,7 +150,7 @@ impl Client {
 
     pub async fn subscribe(&mut self, subject: &str, sid: &str) -> Result<()> {
         self.write_line(&format!("SUB {subject} {sid}")).await?;
-        if self.durable && !subject.starts_with("_INBOX.") {
+        if self.durable && !subject.starts_with("_MORROW/INBOX/") {
             self.grant_push_credit(
                 sid,
                 self.push_credit_messages,
@@ -250,12 +250,12 @@ impl Client {
             )));
         }
         let mut headers = format!(
-            "NATS/1.0\r\nBroker-QoS: {}\r\nBroker-Msg-Id: {msg_id}\r\n\r\n",
+            "MORROW/1.0\r\nMorrow-QoS: {}\r\nMorrow-Msg-Id: {msg_id}\r\n\r\n",
             level as u8
         );
         if let Some(key) = key {
             headers.truncate(headers.len() - 2);
-            headers.push_str(&format!("Broker-Key: {key}\r\n\r\n"));
+            headers.push_str(&format!("Morrow-Key: {key}\r\n\r\n"));
         }
         let total_len = headers.len() + payload.len();
         if total_len > self.max_payload {
@@ -309,7 +309,10 @@ impl Client {
     }
 
     pub async fn ack(&mut self, ack_subject: &str) -> Result<()> {
-        self.publish(ack_subject, b"").await
+        let ack = protocol::parse_ack_subject(ack_subject)
+            .ok_or_else(|| ClientError::msg("invalid Morrow ACK subject"))?;
+        self.delivery_control_identity("ACK", &ack.consumer_id, ack.seq, ack.delivery_id, None)
+            .await
     }
 
     pub async fn request(
@@ -389,9 +392,9 @@ impl Client {
                 Some(ServerFrame::Message(message)) => return Ok(message),
                 Some(ServerFrame::Ok) => {}
                 Some(frame) => {
-                    return Err(ClientError::msg(format!("expected MSG, got {frame:?}")));
+                    return Err(ClientError::msg(format!("expected DELIVER, got {frame:?}")));
                 }
-                None => return Err(ClientError::msg("connection closed before MSG")),
+                None => return Err(ClientError::msg("connection closed before DELIVER")),
             }
         }
     }

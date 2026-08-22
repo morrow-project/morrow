@@ -5,13 +5,13 @@ async fn earliest_consumer_replays_publications_created_before_it() {
     let scenario = Scenario::new();
     let mut publisher = scenario.connect_durable("publisher", 25).await;
     for payload in [b"one".as_slice(), b"two", b"three"] {
-        publisher.publish("orders.created", payload).await;
+        publisher.publish("orders/created", payload).await;
     }
     publisher.ping_roundtrip().await;
 
     let mut subscriber = scenario.connect_durable("late", 25).await;
     subscriber
-        .subscribe_at("orders.*", "sid", "@earliest")
+        .subscribe_at("orders/*", "sid", "@earliest")
         .await;
     let first = subscriber.expect_msg().await;
     let second = subscriber.expect_msg().await;
@@ -25,19 +25,19 @@ async fn earliest_consumer_replays_publications_created_before_it() {
 async fn consumers_keep_independent_partition_positions() {
     let scenario = Scenario::new();
     let mut publisher = scenario.connect_durable("publisher", 25).await;
-    publisher.publish("orders.created", b"one").await;
-    publisher.publish("orders.created", b"two").await;
+    publisher.publish("orders/created", b"one").await;
+    publisher.publish("orders/created", b"two").await;
     publisher.ping_roundtrip().await;
 
     let mut first = scenario.connect_durable("first", 25).await;
     let mut second = scenario.connect_durable("second", 25).await;
-    first.subscribe_at("orders.*", "sid", "@earliest").await;
-    second.subscribe_at("orders.*", "sid", "@earliest").await;
+    first.subscribe_at("orders/*", "sid", "@earliest").await;
+    second.subscribe_at("orders/*", "sid", "@earliest").await;
     let first_delivery = first.expect_msg().await;
     first.expect_msg().await;
     second.expect_msg().await;
     second.expect_msg().await;
-    first.publish(&ack_subject(&first_delivery), b"").await;
+    first.ack(&ack_subject(&first_delivery)).await;
     first.ping_roundtrip().await;
 
     let inner = scenario.broker().inner.lock().await;
@@ -60,18 +60,18 @@ async fn out_of_order_acks_close_cursor_gap() {
     let scenario = Scenario::new();
     let mut publisher = scenario.connect_durable("publisher", 25).await;
     for payload in [b"one".as_slice(), b"two", b"three"] {
-        publisher.publish("orders.created", payload).await;
+        publisher.publish("orders/created", payload).await;
     }
     publisher.ping_roundtrip().await;
 
     let mut subscriber = scenario.connect_durable("worker", 25).await;
     subscriber
-        .subscribe_at("orders.*", "sid", "@earliest")
+        .subscribe_at("orders/*", "sid", "@earliest")
         .await;
     let first = subscriber.expect_msg().await;
     let second = subscriber.expect_msg().await;
     subscriber.expect_msg().await;
-    subscriber.publish(&ack_subject(&second), b"").await;
+    subscriber.ack(&ack_subject(&second)).await;
     subscriber.ping_roundtrip().await;
     {
         let inner = scenario.broker().inner.lock().await;
@@ -80,7 +80,7 @@ async fn out_of_order_acks_close_cursor_gap() {
         assert_eq!(cursor.acknowledged_offsets, [1].into_iter().collect());
     }
 
-    subscriber.publish(&ack_subject(&first), b"").await;
+    subscriber.ack(&ack_subject(&first)).await;
     subscriber.ping_roundtrip().await;
     let inner = scenario.broker().inner.lock().await;
     assert_eq!(

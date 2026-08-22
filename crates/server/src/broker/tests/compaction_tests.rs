@@ -16,28 +16,28 @@ async fn connector_control_stream_keeps_latest_key_across_restart() {
     publisher
         .publish_hpub(
             protocol::connector_control::CONFIG_SUBJECT,
-            &[("Broker-Key", "connector-a")],
+            &[("Morrow-Key", "connector-a")],
             br#"{"generation":1}"#,
         )
         .await;
     publisher
         .publish_hpub(
             protocol::connector_control::CONFIG_SUBJECT,
-            &[("Broker-Key", "connector-a")],
+            &[("Morrow-Key", "connector-a")],
             br#"{"generation":2}"#,
         )
         .await;
     publisher
         .publish_hpub(
             protocol::connector_control::SCHEMA_SUBJECT,
-            &[("Broker-Key", "connector-a:v1")],
+            &[("Morrow-Key", "connector-a:v1")],
             br#"{"schema":"v1"}"#,
         )
         .await;
     publisher
         .publish_hpub(
             protocol::connector_control::SCHEMA_SUBJECT,
-            &[("Broker-Key", "connector-a:v2")],
+            &[("Morrow-Key", "connector-a:v2")],
             br#"{"schema":"v2"}"#,
         )
         .await;
@@ -151,7 +151,7 @@ async fn physical_compaction_converges_and_preserves_the_high_watermark() {
 
     let partition = dir
         .path()
-        .join("streams/broker-connect-config/partition-00000");
+        .join("streams/morrow-connect-config/partition-00000");
     let physical_bytes = std::fs::read_dir(partition)
         .unwrap()
         .map(|entry| entry.unwrap().path())
@@ -217,7 +217,7 @@ async fn benchmark_incremental_compaction_append_cost() {
     publisher
         .publish_hpub(
             protocol::connector_control::CONFIG_SUBJECT,
-            &[("Broker-Key", "connector-a")],
+            &[("Morrow-Key", "connector-a")],
             b"template",
         )
         .await;
@@ -232,7 +232,7 @@ async fn benchmark_incremental_compaction_append_cost() {
         record.offset = Some(seq - 1);
         inner
             .partition_sequences
-            .insert(("broker-connect-config".to_string(), 0, seq - 1), seq);
+            .insert(("morrow-connect-config".to_string(), 0, seq - 1), seq);
         inner.messages.insert(seq, record);
         inner.apply_record_compaction(seq, &broker.config.streams);
     }

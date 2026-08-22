@@ -3,7 +3,7 @@
 ## Middleware ABI and trust boundary
 
 The versioned component contract is
-[`wit/broker-middleware-v1.wit`](../wit/broker-middleware-v1.wit). It exposes an
+[`wit/morrow-middleware-v1.wit`](../wit/morrow-middleware-v1.wit). It exposes an
 opaque host `message` resource rather than guest memory containing a broker
 record. The current core-Wasm adapter exports `process(stage: i32) -> i32` and
 links only five `broker` imports: `get-field`, `set-field`, `emit`, `host-call`,
@@ -37,7 +37,7 @@ Each invocation enforces:
 Pipeline installation compiles every module before atomically publishing a new
 generation. An invocation holds an `Arc` to the selected generation, so a hot
 upgrade cannot change in-flight work. One previous generation is retained for
-atomic rollback. Subject scopes use the same compiled NATS wildcard trie as
+atomic rollback. Subject scopes use the same compiled Morrow wildcard trie as
 broker routing.
 
 The ignored release benchmark runs 10,000 no-op Wasm invocations:
@@ -54,7 +54,7 @@ hardware before setting production budgets.
 
 ## External connector SPI
 
-`broker-connector` is a separate workspace executable. The broker crate does not
+`morrow-connector` is a separate workspace executable. The broker crate does not
 depend on it or on connector-specific cloud/database SDKs. Its SPI defines:
 
 - bounded `ConnectorBatch` values and explicit byte/record queue limits;
@@ -78,7 +78,7 @@ source offset uncommitted for retry.
 
 The control-plane subject convention is version 1 (`CONTROL_PLANE_VERSION`) in
 the protocol crate and is re-exported by the connector crate:
-`$BROKER.CONNECT.config`, `.status`,
+`$BROKER.CONN.config`, `.status`,
 `.offset`, and `.schema`. Enable the four built-in key-compacted streams with:
 
 ```json
@@ -118,7 +118,7 @@ they are printed or published.
   "broker": "127.0.0.1:4222",
   "tls": {
     "server_name": "localhost",
-    "ca_cert_file": "/run/secrets/broker-ca.pem"
+    "ca_cert_file": "/run/secrets/morrow-ca.pem"
   },
   "auth": {
     "client_id": "connector-orders",
@@ -128,7 +128,7 @@ they are printed or published.
 ```
 
 Deployments upgrading from the original raw-config format must rotate any
-credential that may have appeared in `$BROKER.CONNECT.config`, restrict or
+credential that may have appeared in `$BROKER.CONN.config`, restrict or
 replace the old control stream according to their retention policy, write the
 seed to a mode `0600` secret file, and add the required `tls` and `auth` blocks.
 Old records are not rewritten automatically because doing so cannot erase

@@ -12,5 +12,5 @@ pub mod stream;
 pub mod tls;
 pub mod wal;
 
-pub use broker::Broker;
+pub use broker::Morrow;
 pub use config::Config;

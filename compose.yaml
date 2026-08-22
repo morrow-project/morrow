@@ -1,105 +1,105 @@
 services:
-  broker-1:
+  morrow-1:
     build:
       context: .
-    command: ["/etc/broker/cluster/node1.json"]
+    command: ["/etc/morrow/cluster/node1.json"]
     ports:
       - "127.0.0.1:4221:4222"
       - "127.0.0.1:8221:8222"
     secrets:
-      - broker_admin_token
-      - broker_cluster_token
-      - broker_client_public_key
-      - broker_tls_ca
-      - broker_node_1_cert
-      - broker_node_1_key
-      - broker_node_2_cert
-      - broker_node_3_cert
+      - morrow_admin_token
+      - morrow_cluster_token
+      - morrow_client_public_key
+      - morrow_tls_ca
+      - morrow_node_1_cert
+      - morrow_node_1_key
+      - morrow_node_2_cert
+      - morrow_node_3_cert
     read_only: true
     security_opt:
       - no-new-privileges:true
     cap_drop:
       - ALL
     volumes:
-      - ./docker/cluster/node1.json:/etc/broker/cluster/node1.json:ro
-      - broker-node-1-data:/var/lib/broker
-  broker-2:
+      - ./docker/cluster/node1.json:/etc/morrow/cluster/node1.json:ro
+      - morrow-node-1-data:/var/lib/morrow
+  morrow-2:
     build:
       context: .
-    command: ["/etc/broker/cluster/node2.json"]
+    command: ["/etc/morrow/cluster/node2.json"]
     ports:
       - "127.0.0.1:4222:4222"
       - "127.0.0.1:8222:8222"
     secrets:
-      - broker_admin_token
-      - broker_cluster_token
-      - broker_client_public_key
-      - broker_tls_ca
-      - broker_node_1_cert
-      - broker_node_2_cert
-      - broker_node_2_key
-      - broker_node_3_cert
+      - morrow_admin_token
+      - morrow_cluster_token
+      - morrow_client_public_key
+      - morrow_tls_ca
+      - morrow_node_1_cert
+      - morrow_node_2_cert
+      - morrow_node_2_key
+      - morrow_node_3_cert
     read_only: true
     security_opt:
       - no-new-privileges:true
     cap_drop:
       - ALL
     volumes:
-      - ./docker/cluster/node2.json:/etc/broker/cluster/node2.json:ro
-      - broker-node-2-data:/var/lib/broker
+      - ./docker/cluster/node2.json:/etc/morrow/cluster/node2.json:ro
+      - morrow-node-2-data:/var/lib/morrow
     depends_on:
-      - broker-1
+      - morrow-1
 
-  broker-3:
+  morrow-3:
     build:
       context: .
-    command: ["/etc/broker/cluster/node3.json"]
+    command: ["/etc/morrow/cluster/node3.json"]
     ports:
       - "127.0.0.1:4223:4222"
       - "127.0.0.1:8223:8222"
     secrets:
-      - broker_admin_token
-      - broker_cluster_token
-      - broker_client_public_key
-      - broker_tls_ca
-      - broker_node_1_cert
-      - broker_node_2_cert
-      - broker_node_3_cert
-      - broker_node_3_key
+      - morrow_admin_token
+      - morrow_cluster_token
+      - morrow_client_public_key
+      - morrow_tls_ca
+      - morrow_node_1_cert
+      - morrow_node_2_cert
+      - morrow_node_3_cert
+      - morrow_node_3_key
     read_only: true
     security_opt:
       - no-new-privileges:true
     cap_drop:
       - ALL
     volumes:
-      - ./docker/cluster/node3.json:/etc/broker/cluster/node3.json:ro
-      - broker-node-3-data:/var/lib/broker
+      - ./docker/cluster/node3.json:/etc/morrow/cluster/node3.json:ro
+      - morrow-node-3-data:/var/lib/morrow
     depends_on:
-      - broker-1
+      - morrow-1
 
 volumes:
-  broker-node-1-data:
-  broker-node-2-data:
-  broker-node-3-data:
+  morrow-node-1-data:
+  morrow-node-2-data:
+  morrow-node-3-data:
 
 secrets:
-  broker_admin_token:
-    file: ${BROKER_ADMIN_TOKEN_FILE:-./.secrets/broker-admin-token}
-  broker_cluster_token:
-    file: ${BROKER_CLUSTER_TOKEN_FILE:-./.secrets/broker-cluster-token}
-  broker_client_public_key:
-    file: ${BROKER_CLIENT_PUBLIC_KEY_FILE:-./.secrets/broker-client-public-key}
-  broker_tls_ca:
-    file: ${BROKER_TLS_CA_FILE:-./.secrets/broker-ca-cert.pem}
-  broker_node_1_cert:
-    file: ${BROKER_NODE_1_CERT_FILE:-./.secrets/broker-node-1-cert.pem}
-  broker_node_1_key:
-    file: ${BROKER_NODE_1_KEY_FILE:-./.secrets/broker-node-1-key.pem}
-  broker_node_2_cert:
-    file: ${BROKER_NODE_2_CERT_FILE:-./.secrets/broker-node-2-cert.pem}
-  broker_node_2_key:
-    file: ${BROKER_NODE_2_KEY_FILE:-./.secrets/broker-node-2-key.pem}
-  broker_node_3_cert:
-    file: ${BROKER_NODE_3_CERT_FILE:-./.secrets/broker-node-3-cert.pem}
-  broker_node_3_key:
-    file: ${BROKER_NODE_3_KEY_FILE:-./.secrets/broker-node-3-key.pem}
+  morrow_admin_token:
+    file: ${MORROW_ADMIN_TOKEN_FILE:-./.secrets/morrow-admin-token}
+  morrow_cluster_token:
+    file: ${MORROW_CLUSTER_TOKEN_FILE:-./.secrets/morrow-cluster-token}
+  morrow_client_public_key:
+    file: ${MORROW_CLIENT_PUBLIC_KEY_FILE:-./.secrets/morrow-client-public-key}
+  morrow_tls_ca:
+    file: ${MORROW_TLS_CA_FILE:-./.secrets/morrow-ca-cert.pem}
+  morrow_node_1_cert:
+    file: ${MORROW_NODE_1_CERT_FILE:-./.secrets/morrow-node-1-cert.pem}
+  morrow_node_1_key:
+    file: ${MORROW_NODE_1_KEY_FILE:-./.secrets/morrow-node-1-key.pem}
+  morrow_node_2_cert:
+    file: ${MORROW_NODE_2_CERT_FILE:-./.secrets/morrow-node-2-cert.pem}
+  morrow_node_2_key:
+    file: ${MORROW_NODE_2_KEY_FILE:-./.secrets/morrow-node-2-key.pem}
+  morrow_node_3_cert:
+    file: ${MORROW_NODE_3_CERT_FILE:-./.secrets/morrow-node-3-cert.pem}
+  morrow_node_3_key:
+    file: ${MORROW_NODE_3_KEY_FILE:-./.secrets/morrow-node-3-key.pem}

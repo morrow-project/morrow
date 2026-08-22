@@ -8,7 +8,7 @@ use std::time::Duration;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let path = std::env::args()
         .nth(1)
-        .ok_or("usage: broker-connector CONFIG.json")?;
+        .ok_or("usage: morrow-connector CONFIG.json")?;
     let config_bytes = std::fs::read(path)?;
     let config: ConnectorConfig = serde_json::from_slice(&config_bytes)?;
     let descriptor = config.descriptor_json()?;

@@ -1,6 +1,6 @@
 use super::*;
 
-impl Broker {
+impl Morrow {
     pub(super) async fn authorize_publish(
         &self,
         connection_id: u64,

@@ -1,7 +1,7 @@
 use super::*;
 
 #[derive(Clone)]
-pub struct Broker {
+pub struct Morrow {
     pub(super) inner: Arc<Mutex<DurableBrokerState>>,
     pub(super) wal: WalRuntime,
     pub(super) partition_logs: Arc<PartitionLogSet>,
@@ -26,7 +26,7 @@ pub struct Broker {
     pub(super) hooks: BrokerHooks,
 }
 
-impl Broker {
+impl Morrow {
     pub fn middleware_runtime(&self) -> MiddlewareRuntime {
         self.middleware.clone()
     }

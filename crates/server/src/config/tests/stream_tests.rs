@@ -7,7 +7,7 @@ fn parses_stream_configuration() {
         "wal_dir": "./target/test-wal-stream-config",
         "streams": [{
             "name": "orders",
-            "subjects": ["orders.*", "payments.>"],
+            "subjects": ["orders/*", "payments/**"],
             "partitions": 32,
             "partitioning": {
                 "strategy": "subject_token",
@@ -79,8 +79,8 @@ fn rejects_ambiguous_stream_configuration() {
     let error = Config::from_json(&serde_json::json!({
         "wal_dir": "./target/test-wal-ambiguous-stream-config",
         "streams": [
-            {"name": "orders", "subjects": ["orders.>"]},
-            {"name": "created", "subjects": ["orders.*.created"]}
+            {"name": "orders", "subjects": ["orders/**"]},
+            {"name": "created", "subjects": ["orders/*/created"]}
         ]
     }))
     .unwrap_err();
@@ -92,7 +92,7 @@ fn rejects_ambiguous_stream_configuration() {
 fn rejects_stream_with_invalid_partition_count() {
     let error = Config::from_json(&serde_json::json!({
         "wal_dir": "./target/test-wal-zero-stream-partitions",
-        "streams": [{"name": "orders", "subjects": ["orders.>"], "partitions": 0}]
+        "streams": [{"name": "orders", "subjects": ["orders/**"], "partitions": 0}]
     }))
     .unwrap_err();
 
@@ -103,7 +103,7 @@ fn rejects_stream_with_invalid_partition_count() {
 fn rejects_stream_that_captures_inbox_subjects() {
     let error = Config::from_json(&serde_json::json!({
         "wal_dir": "./target/test-wal-inbox-stream",
-        "streams": [{"name": "everything", "subjects": [">"]}]
+        "streams": [{"name": "everything", "subjects": ["**"]}]
     }))
     .unwrap_err();
 

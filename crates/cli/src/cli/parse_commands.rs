@@ -187,7 +187,7 @@ pub(super) fn ensure_no_more(mut args: impl Iterator<Item = String>, command: &s
 
 pub(super) fn usage() -> CliError {
     CliError::msg(
-        "usage: broker-cli [--config client.json] <ping|pub|sub|request|reply>\n\
+        "usage: morrow-cli [--config client.json] <ping|pub|sub|request|reply>\n\
          pub <subject> <payload>\n\
          sub <subject> [--sid sid] [--queue group] [--ack] [--max-messages n]\n\
          request <subject> <payload> [--timeout-ms n]\n\

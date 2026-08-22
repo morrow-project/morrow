@@ -114,7 +114,7 @@ pub fn select_partition(
         .map(stable_hash)
         .unwrap_or_else(|| match &stream.partitioning.strategy {
             crate::stream::PartitioningStrategy::SubjectToken { token } => subject
-                .split('.')
+                .split('/')
                 .nth(*token as usize)
                 .map(|value| stable_hash(value.as_bytes()))
                 .unwrap_or_else(|| fallback_hash(stream, subject, sticky_value)),

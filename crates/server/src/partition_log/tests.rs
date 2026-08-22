@@ -8,7 +8,7 @@ use tempfile::TempDir;
 fn definition(partitions: u32) -> StreamDefinition {
     StreamDefinition {
         name: StreamId::new("orders").unwrap(),
-        subjects: vec!["orders.>".into()],
+        subjects: vec!["orders/**".into()],
         partitions,
         partitioning: PartitioningPolicy {
             strategy: PartitioningStrategy::Key,
@@ -32,7 +32,7 @@ fn request<'a>(
     AppendRequest {
         namespace: "tenant-a",
         stream,
-        subject: "orders.created",
+        subject: "orders/created",
         key,
         partition_hint: None,
         headers,
@@ -53,8 +53,8 @@ fn request_for_subject<'a>(stream: &'a StreamDefinition, subject: &'a str) -> Ap
 #[test]
 fn keyed_partition_is_stable_during_epoch() {
     let stream = definition(11);
-    let first = select_partition(&stream, "orders.created", Some(b"customer-7"), 0);
-    let second = select_partition(&stream, "orders.updated", Some(b"customer-7"), 9);
+    let first = select_partition(&stream, "orders/created", Some(b"customer-7"), 0);
+    let second = select_partition(&stream, "orders/updated", Some(b"customer-7"), 9);
     assert_eq!(first, second);
 }
 
@@ -266,15 +266,15 @@ fn sealed_subject_index_matches_ordered_full_scan_results() {
     let stream = &catalog.definitions()[0];
     let (logs, _) = PartitionLogSet::open(dir.path(), &catalog, 1).unwrap();
     let subjects = [
-        "orders.created",
-        "orders.eu.created",
-        "orders.updated",
-        "orders.eu.deleted",
+        "orders/created",
+        "orders/eu.created",
+        "orders/updated",
+        "orders/eu.deleted",
     ];
     for subject in subjects {
         logs.append(request_for_subject(stream, subject)).unwrap();
     }
-    for filter in ["orders.created", "orders.*", "orders.>"] {
+    for filter in ["orders/created", "orders/*", "orders/**"] {
         let query = logs
             .matching_offsets("orders", PartitionId(0), filter)
             .unwrap();
@@ -285,7 +285,7 @@ fn sealed_subject_index_matches_ordered_full_scan_results() {
             .map(|(offset, _)| offset as u64)
             .collect::<Vec<_>>();
         assert_eq!(query.offsets, expected);
-        if filter == "orders.created" {
+        if filter == "orders/created" {
             assert!(query.used_index);
         }
     }
@@ -297,9 +297,9 @@ fn missing_and_corrupt_subject_indexes_fall_back_and_rebuild() {
     let catalog = catalog(1);
     let stream = &catalog.definitions()[0];
     let (logs, _) = PartitionLogSet::open(dir.path(), &catalog, 1).unwrap();
-    logs.append(request_for_subject(stream, "orders.created"))
+    logs.append(request_for_subject(stream, "orders/created"))
         .unwrap();
-    logs.append(request_for_subject(stream, "orders.updated"))
+    logs.append(request_for_subject(stream, "orders/updated"))
         .unwrap();
     let sealed = dir
         .path()
@@ -309,7 +309,7 @@ fn missing_and_corrupt_subject_indexes_fall_back_and_rebuild() {
     std::fs::remove_file(&sealed).unwrap();
     let (logs, _) = PartitionLogSet::open(dir.path(), &catalog, 1).unwrap();
     let missing = logs
-        .matching_offsets("orders", PartitionId(0), "orders.created")
+        .matching_offsets("orders", PartitionId(0), "orders/created")
         .unwrap();
     assert_eq!(missing.offsets, vec![0]);
     assert!(missing.used_index);
@@ -318,7 +318,7 @@ fn missing_and_corrupt_subject_indexes_fall_back_and_rebuild() {
     std::fs::write(&sealed, b"corrupt index").unwrap();
     let (logs, _) = PartitionLogSet::open(dir.path(), &catalog, 1).unwrap();
     let corrupt = logs
-        .matching_offsets("orders", PartitionId(0), "orders.created")
+        .matching_offsets("orders", PartitionId(0), "orders/created")
         .unwrap();
     assert_eq!(corrupt.offsets, vec![0]);
     assert!(corrupt.used_index);
@@ -332,12 +332,12 @@ fn benchmark_sealed_subject_index_exact_star_and_tail_filters() {
     let stream = &catalog.definitions()[0];
     let (logs, _) = PartitionLogSet::open(dir.path(), &catalog, 512 * 1024).unwrap();
     let subjects = (0..10_000)
-        .map(|id| format!("orders.{}.event", id % 1_000))
+        .map(|id| format!("orders/{}.event", id % 1_000))
         .collect::<Vec<_>>();
     for subject in &subjects {
         logs.append(request_for_subject(stream, subject)).unwrap();
     }
-    for filter in ["orders.42.event", "orders.*.event", "orders.>"] {
+    for filter in ["orders/42.event", "orders/*/event", "orders/**"] {
         let started = std::time::Instant::now();
         for _ in 0..100 {
             std::hint::black_box(

@@ -56,8 +56,12 @@ async fn per_identity_connection_quota_releases_after_disconnect() {
 async fn transient_subscription_quotas_reject_without_state_and_release() {
     let scenario = Scenario::new_with_quotas(quotas());
     let mut first = scenario.connect_durable("one", 1_000).await;
-    first.write_line("SUB _INBOX.one.a sid-1 @latest").await;
-    first.write_line("SUB _INBOX.one.b sid-2 @latest").await;
+    first
+        .write_line("SUB _MORROW/INBOX/one/a sid-1 @latest")
+        .await;
+    first
+        .write_line("SUB _MORROW/INBOX/one/b sid-2 @latest")
+        .await;
     first
         .expect_err_contains("transient subscription quota exceeded")
         .await;
@@ -67,23 +71,31 @@ async fn transient_subscription_quotas_reject_without_state_and_release() {
     );
 
     let mut second = scenario.connect_durable("two", 1_000).await;
-    second.write_line("SUB _INBOX.two.a sid-2 @latest").await;
+    second
+        .write_line("SUB _MORROW/INBOX/two/a sid-2 @latest")
+        .await;
     second.ping_roundtrip().await;
     assert_eq!(
         scenario.broker().transient.lock().await.subscriptions.len(),
         2
     );
-    second.write_line("SUB _INBOX.two.b sid-3 @latest").await;
+    second
+        .write_line("SUB _MORROW/INBOX/two/b sid-3 @latest")
+        .await;
     second
         .expect_err_contains("transient subscription quota exceeded")
         .await;
     first.disconnect().await;
     second.write_line("UNSUB sid-2").await;
     second.ping_roundtrip().await;
-    second.write_line("SUB _INBOX.two.b sid-3 @latest").await;
+    second
+        .write_line("SUB _MORROW/INBOX/two/b sid-3 @latest")
+        .await;
     second.ping_roundtrip().await;
     let mut third = scenario.connect_durable("three", 1_000).await;
-    third.write_line("SUB _INBOX.three.a sid-4 @latest").await;
+    third
+        .write_line("SUB _MORROW/INBOX/three/a sid-4 @latest")
+        .await;
     third.ping_roundtrip().await;
     assert_eq!(
         scenario.broker().transient.lock().await.subscriptions.len(),
@@ -97,18 +109,18 @@ async fn transient_subscription_quotas_reject_without_state_and_release() {
 async fn durable_consumer_quotas_reject_before_wal_state() {
     let scenario = Scenario::new_with_quotas(quotas());
     let mut first = scenario.connect_durable("one", 1_000).await;
-    first.write_line("SUB orders.one sid-1 @earliest").await;
-    first.write_line("SUB orders.two sid-2 @earliest").await;
+    first.write_line("SUB orders/one sid-1 @earliest").await;
+    first.write_line("SUB orders/two sid-2 @earliest").await;
     first
         .expect_err_contains("durable consumer quota exceeded")
         .await;
     assert_eq!(scenario.broker().inner.lock().await.consumers.len(), 1);
 
     let mut second = scenario.connect_durable("two", 1_000).await;
-    second.write_line("SUB orders.two sid-2 @earliest").await;
+    second.write_line("SUB orders/two sid-2 @earliest").await;
     second.ping_roundtrip().await;
     assert_eq!(scenario.broker().inner.lock().await.consumers.len(), 2);
-    second.write_line("SUB orders.three sid-3 @earliest").await;
+    second.write_line("SUB orders/three sid-3 @earliest").await;
     second
         .expect_err_contains("durable consumer quota exceeded")
         .await;
@@ -164,7 +176,7 @@ async fn configured_idle_client_is_closed_at_deadline() {
         .await
         .unwrap();
     client
-        .write_all(b"CONNECT {\"durable_id\":\"idle\"}\r\n")
+        .write_all(b"CONN {\"durable_id\":\"idle\"}\r\n")
         .await
         .unwrap();
     let err = tokio::time::timeout(Duration::from_secs(1), task)

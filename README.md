@@ -1,6 +1,6 @@
 # Broker
 
-A WAL-backed broker with a NATS-style text protocol. Durable consumers are the
+A WAL-backed broker with a Morrow-style text protocol. Durable consumers are the
 core replicated primitive: durable clients declare an identity before
 subscribing, delivered durable messages require explicit acks, and unacked
 messages are redelivered after their ack timeout. Non-durable clients can also
@@ -13,7 +13,7 @@ with message data replicated directly between partition replicas.
 Runtime configuration is read from a JSON file. Start from the example:
 
 ```bash
-cp broker.json.example broker.json
+cp morrow.json.example morrow.json
 ```
 
 ```json
@@ -35,7 +35,7 @@ cp broker.json.example broker.json
     "client_idle_timeout_ms": 300000,
     "http_header_timeout_ms": 5000
   },
-  "wal_dir": "./broker-wal",
+  "wal_dir": "./morrow-wal",
   "wal_segment_bytes": 67108864,
   "fsync_interval_ms": 5,
   "max_payload": 1048576,
@@ -69,16 +69,16 @@ Fields:
 - `fsync_interval_ms`: maximum batching interval before fsync.
 - `max_payload`: maximum accepted `PUB` payload size in bytes.
 - `max_control_line`: maximum accepted protocol control line length in bytes.
-- `max_ack_timeout_ms`: maximum CONNECT acknowledgment timeout and maximum
+- `max_ack_timeout_ms`: maximum CONN acknowledgment timeout and maximum
   individual NACK delay or lease extension.
-- `max_in_flight`: maximum CONNECT in-flight delivery window. The default client
+- `max_in_flight`: maximum CONN in-flight delivery window. The default client
   window remains 1024.
 - `max_fetch_messages` and `max_fetch_bytes`: independent server-owned FETCH
   request limits.
 - `max_encoded_batch_bytes`: maximum complete encoded FETCH response, including
-  the BATCH line, DMSG metadata, headers, payloads, and frame terminators.
+  the BATCH line, DDELIVER metadata, headers, payloads, and frame terminators.
 - `verbose`: enables `+OK` responses for connections unless overridden by
-  `CONNECT`.
+  `CONN`.
 - `tls`: optional TLS-first listener config.
 - `auth`: optional Ed25519 challenge-response authentication config.
 - `cluster`: optional OpenRaft cluster config.
@@ -86,9 +86,9 @@ Fields:
 If a field is omitted, the value shown above is used.
 
 WAL directories use versioned segment files named `<20-digit-segment-id>.wal`.
-On first startup with an existing `broker.wal`, the broker replays it, writes a
+On first startup with an existing `morrow.wal`, the broker replays it, writes a
 compacted `00000000000000000001.wal` segment, and renames the old file to
-`broker.wal.legacy`.
+`morrow.wal.legacy`.
 
 When `cluster` is `null` or omitted, the broker uses the local WAL directly.
 When `cluster.enabled` is true, OpenRaft commits definitions, assignments,
@@ -100,19 +100,19 @@ the broker WAL rather than entering metadata consensus:
 {
   "listen": "127.0.0.1:4221",
   "http_listen": "127.0.0.1:8221",
-  "admin_token_file": "/run/secrets/broker_admin_token",
-  "wal_dir": "./broker-wal/node1",
+  "admin_token_file": "/run/secrets/morrow_admin_token",
+  "wal_dir": "./morrow-wal/node1",
   "cluster": {
     "enabled": true,
     "node_id": 1,
-    "auth_token_file": "/run/secrets/broker_cluster_token",
+    "auth_token_file": "/run/secrets/morrow_cluster_token",
     "raft_listen": "127.0.0.1:5221",
     "allow_insecure_internal_transports": true,
     "route_listen": "127.0.0.1:6221",
     "route_advertise": "127.0.0.1:6221",
     "routes": [],
     "route_reconnect_ms": 500,
-    "raft_dir": "./broker-wal/node1/raft",
+    "raft_dir": "./morrow-wal/node1/raft",
     "bootstrap": true,
     "nodes": [
       {"node_id": 1, "raft_addr": "127.0.0.1:5221", "client_addr": "127.0.0.1:4221"},
@@ -145,7 +145,7 @@ derived from this node's `nodes[].route_addr`. Wildcard addresses are valid bind
 targets but are rejected as advertisements. `routes` are seed route addresses;
 nodes gossip discovered peers over route connections after authenticating with
 `cluster.auth_token`, and dial until they form a full mesh. Route traffic is live-only:
-transient subscriptions and `_INBOX.*` request/reply traffic can cross nodes,
+transient subscriptions and `_MORROW/INBOX/*` request/reply traffic can cross nodes,
 while durable stream data stays on partition replicas. Without
 `route_listen`, clients can still connect to any Raft node through the legacy
 follower proxy path.
@@ -182,32 +182,32 @@ docker compose up --build -d
 docker compose ps
 ```
 
-The default secret paths can be replaced with `BROKER_ADMIN_TOKEN_FILE`,
-`BROKER_CLUSTER_TOKEN_FILE`, `BROKER_CLIENT_PUBLIC_KEY_FILE`,
-`BROKER_TLS_CA_FILE`, and the `BROKER_NODE_<N>_CERT_FILE` and
-`BROKER_NODE_<N>_KEY_FILE` variables. Startup fails if a mounted file is missing
+The default secret paths can be replaced with `MORROW_ADMIN_TOKEN_FILE`,
+`MORROW_CLUSTER_TOKEN_FILE`, `MORROW_CLIENT_PUBLIC_KEY_FILE`,
+`MORROW_TLS_CA_FILE`, and the `MORROW_NODE_<N>_CERT_FILE` and
+`MORROW_NODE_<N>_KEY_FILE` variables. Startup fails if a mounted file is missing
 or empty. Compose passes credentials without placing their contents in rendered
 Compose output.
 
 Each node mounts a read-only config from `docker/cluster/` and gets its own named
 data volume:
 
-- `broker-node-1-data`
-- `broker-node-2-data`
-- `broker-node-3-data`
+- `morrow-node-1-data`
+- `morrow-node-2-data`
+- `morrow-node-3-data`
 
-Inside each volume, WAL files live under `/var/lib/broker/wal` and Raft data
-lives under `/var/lib/broker/raft`. Client ports are visible only on loopback as
+Inside each volume, WAL files live under `/var/lib/morrow/wal` and Raft data
+lives under `/var/lib/morrow/raft`. Client ports are visible only on loopback as
 `4221`, `4222`, and `4223`; admin ports are visible only on loopback as `8221`,
 `8222`, and `8223`. Raft port `5222` and route port `6222` are internal-only and
 are not published to the host.
 
-An unauthenticated client can read `INFO` but its `CONNECT` is rejected. Admin
+An unauthenticated client can read `INFO` but its `CONN` is rejected. Admin
 requests without the bearer token return `401 Unauthorized`. For example:
 
 ```bash
-printf 'CONNECT {}\r\n' | nc 127.0.0.1 4221
-curl --cacert .secrets/broker-ca-cert.pem -i https://localhost:8221/cluster
+printf 'CONN {}\r\n' | nc 127.0.0.1 4221
+curl --cacert .secrets/morrow-ca-cert.pem -i https://localhost:8221/cluster
 ```
 
 ### Internal certificate and token rotation
@@ -234,7 +234,7 @@ on the wire during the transition.
 ## Release Builds
 
 The repo includes a `Justfile` for release binary builds. Each platform task
-builds both `broker` and `broker-cli` into `dist/<platform>/`:
+builds both `broker` and `morrow-cli` into `dist/<platform>/`:
 
 ```bash
 just build-linux-amd64
@@ -252,10 +252,10 @@ connections:
 ```json
 {
   "listen": "127.0.0.1:4222",
-  "wal_dir": "./broker-wal",
+  "wal_dir": "./morrow-wal",
   "tls": {
-    "cert_file": "./server-cert.pem",
-    "key_file": "./server-key.pem",
+    "cert_file": "./morrow-cert.pem",
+    "key_file": "./morrow-key.pem",
     "handshake_timeout_ms": 2000
   }
 }
@@ -287,8 +287,8 @@ Ed25519 public keys:
         "client_id": "client1",
         "public_key": "64-hex-character-ed25519-public-key",
         "permissions": {
-          "publish": ["orders.*", "events.>"],
-          "subscribe": ["orders.created", "events.*"]
+          "publish": ["orders/*", "events/**"],
+          "subscribe": ["orders/created", "events/*"]
         }
       }
     ]
@@ -298,16 +298,16 @@ Ed25519 public keys:
 
 When authentication is enabled, every new incoming connection receives a freshly
 generated server nonce in the `INFO` frame. The client signs that nonce and sends
-the configured client ID plus hex-encoded signature in `CONNECT`. After
+the configured client ID plus hex-encoded signature in `CONN`. After
 successful verification, the authenticated client ID becomes the durable
 identity for that connection.
 
 The `permissions` block is optional. When omitted, an authenticated client may
 publish and subscribe to all normal subjects. When present, `publish` and
 `subscribe` are subject-pattern allowlists using the same `*` and `>` wildcard
-rules as subscriptions. Broker ack subjects remain available only to the active
-consumer member that received the delivery, and `_INBOX.*` request/reply
-subjects are scoped to the authenticated client's `_INBOX.<client_id>.` prefix.
+rules as subscriptions. Morrow ACK identities remain available only to the active
+consumer member that received the delivery, and `_MORROW/INBOX/*` request/reply
+subjects are scoped to the authenticated client's `_MORROW/INBOX/<client_id>.` prefix.
 
 Publish authorization runs before programmable middleware and is repeated after
 subject rewrites and for every secondary publication. Middleware inherits the
@@ -320,10 +320,10 @@ with message payloads or credentials.
 Build and run the broker from the repository root:
 
 ```bash
-cargo run --release -p server -- broker.json
+cargo run --release -p server -- morrow.json
 ```
 
-If no config path is provided, the broker reads `broker.json` from the current
+If no config path is provided, the broker reads `morrow.json` from the current
 directory:
 
 ```bash
@@ -347,7 +347,7 @@ described in [docs/cluster-state-application.md](docs/cluster-state-application.
   and challenge-response helpers.
 - `crates/client`: reusable client library for TCP/TLS connections, auth, and
   protocol commands.
-- `crates/cli`: `broker-cli`, a command-line client for running broker
+- `crates/cli`: `morrow-cli`, a command-line client for running broker
   operations against a live server.
 - `crates/integration`: cross-crate integration tests.
 
@@ -368,29 +368,29 @@ cargo run --release -p cli -- --config client.json ping
 Publish a message:
 
 ```bash
-cargo run --release -p cli -- --config client.json pub orders.created hello
+cargo run --release -p cli -- --config client.json pub orders/created hello
 ```
 
 Subscribe and ack the first delivered message:
 
 ```bash
-cargo run --release -p cli -- --config client.json sub orders.* --ack --max-messages 1
+cargo run --release -p cli -- --config client.json sub orders/* --ack --max-messages 1
 ```
 
 Send a request and print the first response:
 
 ```bash
-cargo run --release -p cli -- --config client.json request service.echo hello --timeout-ms 30000
+cargo run --release -p cli -- --config client.json request service/echo hello --timeout-ms 30000
 ```
 
 Run a simple responder. Each request is printed to stdout; each response is read
 as one line from stdin:
 
 ```bash
-cargo run --release -p cli -- --config client.json reply service.echo
+cargo run --release -p cli -- --config client.json reply service/echo
 ```
 
-The CLI handles `INFO`, TLS, challenge-response auth, and `CONNECT` implicitly
+The CLI handles `INFO`, TLS, challenge-response auth, and `CONN` implicitly
 from `client.json`. User-visible commands are `ping`, `pub`, `sub`, `request`,
 and `reply`.
 
@@ -400,15 +400,15 @@ Open a TCP connection to the broker. The server immediately sends an `INFO`
 line. With authentication disabled, connect with a durable identity:
 
 ```text
-CONNECT {"durable_id":"client1","verbose":true,"ack_timeout_ms":30000,"max_in_flight":1024}
-SUB orders.* sid1
+CONN {"durable_id":"client1","verbose":true,"ack_timeout_ms":30000,"max_in_flight":1024}
+SUB orders/* sid1
 ```
 
 Protocol version 2 makes bounded pull the primary durable API:
 
 ```text
-CONNECT {"durable_id":"client1","protocol_version":2,"ack_timeout_ms":30000,"max_in_flight":1024}
-CONSUMER CREATE worker orders.* @earliest
+CONN {"durable_id":"client1","protocol_version":2,"ack_timeout_ms":30000,"max_in_flight":1024}
+CONSUMER CREATE worker orders/* @earliest
 FETCH worker 10 65536 1000
 ```
 
@@ -416,7 +416,7 @@ Pull batches carry stream/partition offsets, attempts, lease deadlines, and a
 fenced ACK identity. `ACK`, delayed `NACK`, and `EXTEND` operate on that identity.
 Version 2 durable `SUB` remains available as a push facade but delivers only
 against explicit `CREDIT <sid> <messages> <bytes>` grants. Clients that omit
-`protocol_version` remain on version 1 compatibility behavior.
+`protocol_version` remain on version 1 behavior.
 
 Clustered message data is replicated directly between partition replicas; the
 OpenRaft metadata log carries only definitions, assignments, epochs, and committed
@@ -430,34 +430,34 @@ delivery boundaries are documented in
 [Middleware and connectors](docs/middleware-and-connectors.md).
 
 Durable subscriptions default to `@latest`. A caller can select retained
-history explicitly, for example `SUB orders.* sid1 @earliest`,
-`SUB orders.* sid1 @committed`, `SUB orders.* sid1 @offset:42`, or
-`SUB orders.* sid1 @time:1724200000000`. The position is used when the durable
+history explicitly, for example `SUB orders/* sid1 @earliest`,
+`SUB orders/* sid1 @committed`, `SUB orders/* sid1 @offset:42`, or
+`SUB orders/* sid1 @time:1724200000000`. The position is used when the durable
 consumer is first created; reconnecting attaches to its persisted cursor.
 
 With authentication enabled, sign the `INFO` nonce with the configured private
 key and connect with the client ID plus signature:
 
 ```text
-CONNECT {"client_id":"client1","signature":"128-hex-character-ed25519-signature","verbose":true}
-SUB orders.* sid1
+CONN {"client_id":"client1","signature":"128-hex-character-ed25519-signature","verbose":true}
+SUB orders/* sid1
 ```
 
 Publish from any connected client:
 
 ```text
-PUB orders.created 5
+PUB orders/created 5
 hello
 ```
 
-Publish with per-message producer QoS by using `HPUB` with `Broker-QoS` and
-`Broker-Msg-Id` headers:
+Publish with per-message producer QoS by using `HPUB` with `Morrow-QoS` and
+`Morrow-Msg-Id` headers:
 
 ```text
-HPUB orders.created 51 56
-NATS/1.0
-Broker-QoS: 1
-Broker-Msg-Id: msg-123
+HPUB orders/created 51 56
+MORROW/1.0
+Morrow-QoS: 1
+Morrow-Msg-Id: msg-123
 
 hello
 ```
@@ -468,18 +468,17 @@ Successful QoS publishes receive a producer acknowledgement:
 P-ACK msg-123 1 OK true 1
 ```
 
-The subscriber receives a message with an ack reply subject:
+The subscriber receives a message with a durable ACK identity:
 
 ```text
-MSG orders.created sid1 _BROKER.ACK.durable-client1-sid1.1.1 5
+DELIVER orders/created sid1 _MORROW/ACK/durable-client1-sid1/1/1 5
 hello
 ```
 
-Ack by publishing to that reply subject. The ack payload may be empty:
+Send the explicit ACK command:
 
 ```text
-PUB _BROKER.ACK.durable-client1-sid1.1.1 0
-
+ACK durable-client1-sid1 1 1
 ```
 
 If the ack is not received before `ack_timeout_ms`, the broker redelivers the
@@ -487,25 +486,25 @@ message to an active member of the same durable consumer.
 
 ## Request/Response
 
-Request/response uses the NATS `PUB <subject> <reply-to> <size>` shape. The
-requester subscribes to a transient `_INBOX.*` subject, publishes the request
+Request/response uses the Morrow `PUB <subject> <reply-to> <size>` shape. The
+requester subscribes to a transient `_MORROW/INBOX/*` subject, publishes the request
 with that inbox as the reply subject, then waits for the first response.
 
 ```text
-SUB _INBOX.client1.1 inbox1
+SUB _MORROW/INBOX/client1/1 inbox1
 PING
-PUB service.echo _INBOX.client1.1 5
+PUB service/echo _MORROW/INBOX/client1/1 5
 hello
 ```
 
-A durable responder receives request messages as `HMSG` when the original
-publish includes a reply subject. The `HMSG` reply-to is the requester inbox;
-the broker ACK subject is carried in the `Broker-Ack` header:
+A durable responder receives request messages as `HDELIVER` when the original
+publish includes a reply subject. The `HDELIVER` reply-to is the requester inbox;
+the Morrow ACK identity is carried in the `Morrow-Ack` header:
 
 ```text
-HMSG service.echo sid1 _INBOX.client1.1 65 70
-NATS/1.0
-Broker-Ack: _BROKER.ACK.durable-responder1-sid1.1.1
+HDELIVER service/echo sid1 _MORROW/INBOX/client1/1 65 70
+MORROW/1.0
+Morrow-Ack: _MORROW/ACK/durable-responder1-sid1/1/1
 
 hello
 ```
@@ -514,19 +513,19 @@ The responder publishes the response to the reply subject and then ACKs the
 request:
 
 ```text
-PUB _INBOX.client1.1 5
+PUB _MORROW/INBOX/client1/1 5
 world
-PUB _BROKER.ACK.durable-responder1-sid1.1.1 0
+ACK durable-responder1-sid1 1 1
 
 ```
 
-`_INBOX.*` subscriptions are transient request/reply plumbing. They do not
+`_MORROW/INBOX/*` subscriptions are transient request/reply plumbing. They do not
 create durable consumers, are removed on disconnect or `UNSUB`, and messages
 published to inactive inboxes are not retained.
 
 ## Durable Consumers
 
-- `CONNECT` must establish a durable identity before `SUB`.
+- `CONN` must establish a durable identity before `SUB`.
 - With authentication disabled, provide `durable_id`.
 - With authentication enabled, provide `client_id` and `signature`. If
   `durable_id` is also provided, it must match the authenticated `client_id`.
@@ -542,9 +541,9 @@ published to inactive inboxes are not retained.
 - Out-of-order acknowledgements are retained only within the consumer's bounded
   acknowledgement window; retention gaps are exposed by the admin subscription
   response rather than silently treated as delivered data.
-- Ack subjects are reserved under `_BROKER.ACK.*`; publishing to other
-  `_BROKER.*` subjects is rejected.
-- `_INBOX.*` subjects are reserved for transient request/reply inboxes and are
+- ACK paths are reserved under `_MORROW/ACK/*`; publishing to other
+  `_MORROW/*` subjects is rejected.
+- `_MORROW/INBOX/*` subjects are reserved for transient request/reply inboxes and are
   live-only.
 
 ### Stream retention limits
@@ -567,10 +566,10 @@ counters for the current process lifetime.
 
 ## Protocol Reference
 
-The protocol uses CRLF-delimited NATS-style frames.
+The protocol uses CRLF-delimited Morrow-style frames.
 See [crates/protocol/PROTOCOL.md](crates/protocol/PROTOCOL.md) for the full
 wire protocol reference, including all client commands, server frames, payload
-framing, auth fields, ACK subjects, headers, and validation rules.
+framing, auth fields, ACK identities, headers, and validation rules.
 
 ## Development Checks
 

@@ -1,6 +1,6 @@
 use super::*;
 
-impl Broker {
+impl Morrow {
     pub(super) async fn start_cluster(&self) -> Result<()> {
         let Some(cluster_config) = &self.config.cluster else {
             return Ok(());

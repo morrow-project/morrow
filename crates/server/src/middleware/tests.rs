@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 fn manifest(capabilities: impl IntoIterator<Item = Capability>) -> MiddlewareManifest {
     MiddlewareManifest {
         name: "test-policy".to_string(),
-        subject: "orders.>".to_string(),
+        subject: "orders/**".to_string(),
         stage: MiddlewareStage::Ingress,
         capabilities: capabilities.into_iter().collect(),
         failure_policy: FailurePolicy::FailClosed,
@@ -17,7 +17,7 @@ fn manifest(capabilities: impl IntoIterator<Item = Capability>) -> MiddlewareMan
 
 fn message() -> MiddlewareMessage {
     MiddlewareMessage {
-        subject: "orders.created".to_string(),
+        subject: "orders/created".to_string(),
         key: None,
         headers: Vec::new(),
         payload: b"hello".to_vec(),
@@ -153,7 +153,7 @@ fn denied_host_calls_and_stage_mutations_fail_closed() {
                 "(module
                     (import \"broker\" \"set-field\" (func $set (param i32 i32 i32) (result i32)))
                     (memory (export \"memory\") 1)
-                    (data (i32.const 0) \"orders.changed\")
+                    (data (i32.const 0) \"orders/changed\")
                     (func (export \"process\") (param i32) (result i32)
                       i32.const 0 i32.const 0 i32.const 14 call $set drop i32.const 0))",
             ),
@@ -201,7 +201,7 @@ fn emission_recursion_and_output_growth_are_bounded() {
                 "(module
                     (import \"broker\" \"emit\" (func $emit (param i32 i32 i32 i32) (result i32)))
                     (memory (export \"memory\") 1)
-                    (data (i32.const 0) \"events.outx\")
+                    (data (i32.const 0) \"events/outx\")
                     (func (export \"process\") (param i32) (result i32)
                       i32.const 0 i32.const 10 i32.const 10 i32.const 1 call $emit drop i32.const 0))",
             ),
@@ -311,7 +311,7 @@ fn pooled_executions_do_not_reuse_guest_or_host_state() {
                     (import \"broker\" \"emit\" (func $emit (param i32 i32 i32 i32) (result i32)))
                     (import \"broker\" \"host-call\" (func $host (param i32) (result i32)))
                     (memory (export \"memory\") 1)
-                    (data (i32.const 8) \"events.out\")
+                    (data (i32.const 8) \"events/out\")
                     (func (export \"process\") (param i32) (result i32)
                       i32.const 0 i32.load8_u if unreachable end
                       i32.const 0 i32.const 1 i32.store8
@@ -327,7 +327,7 @@ fn pooled_executions_do_not_reuse_guest_or_host_state() {
             .process(MiddlewareStage::Ingress, message(), 0)
             .unwrap();
         assert_eq!(outcome.emitted.len(), 1);
-        assert_eq!(outcome.emitted[0].subject, "events.out");
+        assert_eq!(outcome.emitted[0].subject, "events/out");
     }
 
     runtime

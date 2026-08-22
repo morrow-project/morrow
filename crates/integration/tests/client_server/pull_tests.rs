@@ -16,7 +16,7 @@ async fn client_pull_consumer_supports_bounded_fetch_and_delivery_controls() {
     consumer
         .create_consumer(
             "worker",
-            "orders.*",
+            "orders/*",
             client::protocol::StartPosition::Earliest,
         )
         .await
@@ -32,7 +32,7 @@ async fn client_pull_consumer_supports_bounded_fetch_and_delivery_controls() {
         .unwrap();
     publisher
         .publish_with_qos_and_key(
-            "orders.created",
+            "orders/created",
             None,
             b"one",
             client::protocol::AckLevel::HighDurability,
@@ -92,7 +92,7 @@ async fn client_pull_consumer_supports_bounded_fetch_and_delivery_controls() {
     consumer.ack_delivery(&redelivery).await.unwrap();
 
     publisher
-        .publish("orders.created", b"123456")
+        .publish("orders/created", b"123456")
         .await
         .unwrap();
     publisher.ping_roundtrip().await.unwrap();
@@ -113,7 +113,7 @@ async fn client_pull_consumer_supports_bounded_fetch_and_delivery_controls() {
 
     let publish_task = tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(20)).await;
-        publisher.publish("orders.created", b"late").await.unwrap();
+        publisher.publish("orders/created", b"late").await.unwrap();
     });
     let started = tokio::time::Instant::now();
     let arrived = consumer

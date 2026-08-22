@@ -13,7 +13,7 @@ async fn client_can_subscribe_publish_receive_and_ack_against_server() {
         .connect_durable("subscriber1", false, 5_000, 16)
         .await
         .unwrap();
-    subscriber.subscribe("orders.*", "sid1").await.unwrap();
+    subscriber.subscribe("orders/*", "sid1").await.unwrap();
     subscriber.ping_roundtrip().await.unwrap();
 
     let mut publisher = Client::connect(harness.addr, harness.max_payload)
@@ -24,17 +24,17 @@ async fn client_can_subscribe_publish_receive_and_ack_against_server() {
         .connect_durable("publisher1", false, 5_000, 16)
         .await
         .unwrap();
-    publisher.publish("orders.created", b"hello").await.unwrap();
+    publisher.publish("orders/created", b"hello").await.unwrap();
 
     let message = subscriber.next_message().await.unwrap();
-    assert_eq!(message.subject, "orders.created");
+    assert_eq!(message.subject, "orders/created");
     assert_eq!(message.sid, "sid1");
     assert_eq!(message.payload, b"hello");
     for (name, expected) in [
-        ("Broker-Stream", "orders"),
-        ("Broker-Partition", "0"),
-        ("Broker-Offset", "0"),
-        ("Broker-Attempt", "1"),
+        ("Morrow-Stream", "orders"),
+        ("Morrow-Partition", "0"),
+        ("Morrow-Offset", "0"),
+        ("Morrow-Attempt", "1"),
     ] {
         assert!(
             message
@@ -46,7 +46,7 @@ async fn client_can_subscribe_publish_receive_and_ack_against_server() {
     }
     let ack_subject = message
         .ack_subject
-        .expect("durable messages carry ack subject");
+        .expect("durable messages carry ACK identity");
     subscriber.ack(&ack_subject).await.unwrap();
     subscriber.ping_roundtrip().await.unwrap();
 
@@ -63,24 +63,24 @@ async fn client_request_receives_response_from_durable_responder() {
         .connect_durable("responder1", false, 5_000, 16)
         .await
         .unwrap();
-    responder.subscribe("service.echo", "sid1").await.unwrap();
+    responder.subscribe("service/echo", "sid1").await.unwrap();
     responder.ping_roundtrip().await.unwrap();
 
     let responder_task = tokio::spawn(async move {
         let message = responder.next_message().await.unwrap();
-        assert_eq!(message.subject, "service.echo");
+        assert_eq!(message.subject, "service/echo");
         assert_eq!(message.payload, b"hello");
         assert!(
             message
                 .reply_to
                 .as_deref()
-                .is_some_and(|reply| reply.starts_with("_INBOX."))
+                .is_some_and(|reply| reply.starts_with("_MORROW/INBOX/"))
         );
         assert!(
             message
                 .ack_subject
                 .as_deref()
-                .is_some_and(|ack| ack.starts_with("_BROKER.ACK."))
+                .is_some_and(|ack| ack.starts_with("_MORROW/ACK/"))
         );
         responder.respond(&message, b"world").await.unwrap();
         responder
@@ -98,10 +98,10 @@ async fn client_request_receives_response_from_durable_responder() {
         .await
         .unwrap();
     let response = requester
-        .request("service.echo", b"hello", Duration::from_secs(3))
+        .request("service/echo", b"hello", Duration::from_secs(3))
         .await
         .unwrap();
-    assert!(response.subject.starts_with("_INBOX."));
+    assert!(response.subject.starts_with("_MORROW/INBOX/"));
     assert_eq!(response.payload, b"world");
     assert!(response.ack_subject.is_none());
     responder_task.await.unwrap();
@@ -124,7 +124,7 @@ async fn authenticated_client_can_subscribe_publish_receive_and_ack() {
         .connect_authenticated(&info, &subscriber_auth, false, 5_000, 16)
         .await
         .unwrap();
-    subscriber.subscribe("orders.*", "sid1").await.unwrap();
+    subscriber.subscribe("orders/*", "sid1").await.unwrap();
     subscriber.ping_roundtrip().await.unwrap();
 
     let mut publisher = Client::connect(harness.addr, harness.max_payload)
@@ -135,15 +135,15 @@ async fn authenticated_client_can_subscribe_publish_receive_and_ack() {
         .connect_authenticated(&info, &publisher_auth, false, 5_000, 16)
         .await
         .unwrap();
-    publisher.publish("orders.created", b"hello").await.unwrap();
+    publisher.publish("orders/created", b"hello").await.unwrap();
 
     let message = subscriber.next_message().await.unwrap();
-    assert_eq!(message.subject, "orders.created");
+    assert_eq!(message.subject, "orders/created");
     assert_eq!(message.sid, "sid1");
     assert_eq!(message.payload, b"hello");
     let ack_subject = message
         .ack_subject
-        .expect("durable messages carry ack subject");
+        .expect("durable messages carry ACK identity");
     subscriber.ack(&ack_subject).await.unwrap();
     subscriber.ping_roundtrip().await.unwrap();
 
@@ -155,8 +155,8 @@ async fn authenticated_client_with_permissions_can_subscribe_publish_receive_and
     let publisher_auth = ClientAuth::from_seed("publisher1", [8; 32]);
     let harness = Harness::start_with_config(
         auth_config_with_permissions(vec![
-            (&subscriber_auth, None, Some(vec!["orders.*".to_string()])),
-            (&publisher_auth, Some(vec!["orders.>".to_string()]), None),
+            (&subscriber_auth, None, Some(vec!["orders/*".to_string()])),
+            (&publisher_auth, Some(vec!["orders/**".to_string()]), None),
         ]),
         None,
     )
@@ -170,7 +170,7 @@ async fn authenticated_client_with_permissions_can_subscribe_publish_receive_and
         .connect_authenticated(&info, &subscriber_auth, false, 5_000, 16)
         .await
         .unwrap();
-    subscriber.subscribe("orders.*", "sid1").await.unwrap();
+    subscriber.subscribe("orders/*", "sid1").await.unwrap();
     subscriber.ping_roundtrip().await.unwrap();
 
     let mut publisher = Client::connect(harness.addr, harness.max_payload)
@@ -181,10 +181,10 @@ async fn authenticated_client_with_permissions_can_subscribe_publish_receive_and
         .connect_authenticated(&info, &publisher_auth, false, 5_000, 16)
         .await
         .unwrap();
-    publisher.publish("orders.created", b"hello").await.unwrap();
+    publisher.publish("orders/created", b"hello").await.unwrap();
 
     let message = subscriber.next_message().await.unwrap();
-    assert_eq!(message.subject, "orders.created");
+    assert_eq!(message.subject, "orders/created");
     assert_eq!(message.sid, "sid1");
     assert_eq!(message.payload, b"hello");
     subscriber
@@ -200,8 +200,8 @@ async fn authenticated_permissions_reject_unauthorized_subscribe_and_publish() {
     let publisher_auth = ClientAuth::from_seed("publisher1", [8; 32]);
     let harness = Harness::start_with_config(
         auth_config_with_permissions(vec![
-            (&subscriber_auth, None, Some(vec!["orders.*".to_string()])),
-            (&publisher_auth, Some(vec!["orders.*".to_string()]), None),
+            (&subscriber_auth, None, Some(vec!["orders/*".to_string()])),
+            (&publisher_auth, Some(vec!["orders/*".to_string()]), None),
         ]),
         None,
     )
@@ -215,7 +215,7 @@ async fn authenticated_permissions_reject_unauthorized_subscribe_and_publish() {
         .connect_authenticated(&info, &subscriber_auth, false, 5_000, 16)
         .await
         .unwrap();
-    subscriber.subscribe("events.*", "sid1").await.unwrap();
+    subscriber.subscribe("events/*", "sid1").await.unwrap();
     match subscriber.next_frame().await.unwrap().unwrap() {
         ServerFrame::Err(error) => assert!(error.contains("subscribe not authorized")),
         frame => panic!("expected subscribe auth error, got {frame:?}"),
@@ -230,7 +230,7 @@ async fn authenticated_permissions_reject_unauthorized_subscribe_and_publish() {
         .await
         .unwrap();
     publisher
-        .publish("events.created", b"blocked")
+        .publish("events/created", b"blocked")
         .await
         .unwrap();
     match publisher.next_frame().await.unwrap().unwrap() {
@@ -298,7 +298,7 @@ async fn tls_client_can_subscribe_publish_receive_and_ack() {
         .connect_durable("subscriber1", false, 5_000, 16)
         .await
         .unwrap();
-    subscriber.subscribe("orders.*", "sid1").await.unwrap();
+    subscriber.subscribe("orders/*", "sid1").await.unwrap();
     subscriber.ping_roundtrip().await.unwrap();
 
     let mut publisher = Client::connect_tls(
@@ -314,15 +314,15 @@ async fn tls_client_can_subscribe_publish_receive_and_ack() {
         .connect_durable("publisher1", false, 5_000, 16)
         .await
         .unwrap();
-    publisher.publish("orders.created", b"hello").await.unwrap();
+    publisher.publish("orders/created", b"hello").await.unwrap();
 
     let message = subscriber.next_message().await.unwrap();
-    assert_eq!(message.subject, "orders.created");
+    assert_eq!(message.subject, "orders/created");
     assert_eq!(message.sid, "sid1");
     assert_eq!(message.payload, b"hello");
     let ack_subject = message
         .ack_subject
-        .expect("durable messages carry ack subject");
+        .expect("durable messages carry ACK identity");
     subscriber.ack(&ack_subject).await.unwrap();
     subscriber.ping_roundtrip().await.unwrap();
 
@@ -348,7 +348,7 @@ async fn tls_authenticated_client_can_subscribe_publish_receive_and_ack() {
         .connect_authenticated(&info, &subscriber_auth, false, 5_000, 16)
         .await
         .unwrap();
-    subscriber.subscribe("orders.*", "sid1").await.unwrap();
+    subscriber.subscribe("orders/*", "sid1").await.unwrap();
     subscriber.ping_roundtrip().await.unwrap();
 
     let mut publisher = Client::connect_tls(
@@ -364,15 +364,15 @@ async fn tls_authenticated_client_can_subscribe_publish_receive_and_ack() {
         .connect_authenticated(&info, &publisher_auth, false, 5_000, 16)
         .await
         .unwrap();
-    publisher.publish("orders.created", b"hello").await.unwrap();
+    publisher.publish("orders/created", b"hello").await.unwrap();
 
     let message = subscriber.next_message().await.unwrap();
-    assert_eq!(message.subject, "orders.created");
+    assert_eq!(message.subject, "orders/created");
     assert_eq!(message.sid, "sid1");
     assert_eq!(message.payload, b"hello");
     let ack_subject = message
         .ack_subject
-        .expect("durable messages carry ack subject");
+        .expect("durable messages carry ACK identity");
     subscriber.ack(&ack_subject).await.unwrap();
     subscriber.ping_roundtrip().await.unwrap();
 
@@ -414,7 +414,7 @@ async fn clustered_follower_proxies_client_to_leader() {
         .connect_durable("subscriber1", false, 5_000, 16)
         .await
         .unwrap();
-    subscriber.subscribe("orders.*", "sid1").await.unwrap();
+    subscriber.subscribe("orders/*", "sid1").await.unwrap();
     subscriber.ping_roundtrip().await.unwrap();
 
     let mut publisher = Client::connect(follower.client_addr, harness.max_payload)
@@ -425,13 +425,13 @@ async fn clustered_follower_proxies_client_to_leader() {
         .connect_durable("publisher1", false, 5_000, 16)
         .await
         .unwrap();
-    publisher.publish("orders.created", b"hello").await.unwrap();
+    publisher.publish("orders/created", b"hello").await.unwrap();
 
     let message = tokio::time::timeout(Duration::from_secs(5), subscriber.next_message())
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(message.subject, "orders.created");
+    assert_eq!(message.subject, "orders/created");
     assert_eq!(message.payload, b"hello");
     subscriber
         .ack(message.ack_subject.as_deref().unwrap())
@@ -470,7 +470,7 @@ async fn clustered_partition_metadata_exposes_direct_leader_discovery() {
         .connect_durable("metadata-publisher", false, 5_000, 16)
         .await
         .unwrap();
-    publisher.publish("orders.created", b"hello").await.unwrap();
+    publisher.publish("orders/created", b"hello").await.unwrap();
     publisher.ping_roundtrip().await.unwrap();
 
     let committed = wait_for_partition_metadata(leader_node.http_addr, "orders", 0, Some(0)).await;
@@ -488,23 +488,23 @@ async fn routed_cluster_forms_full_mesh_and_forwards_transient_publish() {
         .unwrap();
     subscriber.read_info().await.unwrap();
     subscriber.connect_transient(false).await.unwrap();
-    subscriber.subscribe("orders.*", "sid1").await.unwrap();
+    subscriber.subscribe("orders/*", "sid1").await.unwrap();
     subscriber.ping_roundtrip().await.unwrap();
 
-    harness.wait_for_route_interest(0, "orders.*").await;
+    harness.wait_for_route_interest(0, "orders/*").await;
 
     let mut publisher = Client::connect(harness.nodes[2].client_addr, harness.max_payload)
         .await
         .unwrap();
     publisher.read_info().await.unwrap();
     publisher.connect_transient(false).await.unwrap();
-    publisher.publish("orders.created", b"hello").await.unwrap();
+    publisher.publish("orders/created", b"hello").await.unwrap();
 
     let message = tokio::time::timeout(Duration::from_secs(5), subscriber.next_message())
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(message.subject, "orders.created");
+    assert_eq!(message.subject, "orders/created");
     assert_eq!(message.sid, "sid1");
     assert_eq!(message.payload, b"hello");
     assert!(message.ack_subject.is_none());
@@ -516,7 +516,7 @@ async fn routed_cluster_forwards_inbox_request_reply() {
     let harness = ClusterHarness::start_three_routed().await;
     harness.wait_for_full_route_mesh().await;
 
-    let inbox = "_INBOX.requester.1";
+    let inbox = "_MORROW/INBOX/requester/1";
     let mut requester = Client::connect(harness.nodes[0].client_addr, harness.max_payload)
         .await
         .unwrap();
@@ -530,10 +530,10 @@ async fn routed_cluster_forwards_inbox_request_reply() {
         .unwrap();
     responder.read_info().await.unwrap();
     responder.connect_transient(false).await.unwrap();
-    responder.subscribe("service.echo", "svc").await.unwrap();
+    responder.subscribe("service/echo", "svc").await.unwrap();
     responder.ping_roundtrip().await.unwrap();
 
-    harness.wait_for_route_interest(2, "service.echo").await;
+    harness.wait_for_route_interest(2, "service/echo").await;
     harness.wait_for_route_interest(2, inbox).await;
 
     let mut publisher = Client::connect(harness.nodes[2].client_addr, harness.max_payload)
@@ -542,7 +542,7 @@ async fn routed_cluster_forwards_inbox_request_reply() {
     publisher.read_info().await.unwrap();
     publisher.connect_transient(false).await.unwrap();
     publisher
-        .publish_with_reply("service.echo", Some(inbox), b"hello")
+        .publish_with_reply("service/echo", Some(inbox), b"hello")
         .await
         .unwrap();
 
@@ -550,7 +550,7 @@ async fn routed_cluster_forwards_inbox_request_reply() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(request.subject, "service.echo");
+    assert_eq!(request.subject, "service/echo");
     assert_eq!(request.reply_to.as_deref(), Some(inbox));
     responder.respond(&request, b"world").await.unwrap();
 

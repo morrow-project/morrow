@@ -66,7 +66,7 @@ impl RouteMesh {
         }))
     }
 
-    pub(super) async fn start(&self, broker: Broker) -> Result<()> {
+    pub(super) async fn start(&self, broker: Morrow) -> Result<()> {
         let (listen, reconnect_ms) = {
             let state = self.inner.lock().await;
             (state.route_listen, state.reconnect_ms)

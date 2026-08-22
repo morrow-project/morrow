@@ -420,20 +420,20 @@ fn durable_message_frame(
             .iter()
             .map(|header| (header.name.clone(), header.value.clone()))
             .collect::<Vec<_>>();
-        headers.push(("Broker-Ack".into(), ack_subject.into()));
+        headers.push(("Morrow-Ack".into(), ack_subject.into()));
         if let Some(key) = &message.key {
-            headers.push(("Broker-Key-Hex".into(), hex(key)));
+            headers.push(("Morrow-Key-Hex".into(), hex(key)));
         }
-        headers.push(("Broker-Timestamp".into(), message.timestamp_ms.to_string()));
+        headers.push(("Morrow-Timestamp".into(), message.timestamp_ms.to_string()));
         if let (Some(stream), Some(partition), Some(offset)) =
             (&message.stream, message.partition, message.offset)
         {
-            headers.push(("Broker-Stream".into(), stream.clone()));
-            headers.push(("Broker-Partition".into(), partition.to_string()));
-            headers.push(("Broker-Offset".into(), offset.to_string()));
+            headers.push(("Morrow-Stream".into(), stream.clone()));
+            headers.push(("Morrow-Partition".into(), partition.to_string()));
+            headers.push(("Morrow-Offset".into(), offset.to_string()));
         }
-        headers.push(("Broker-Attempt".into(), attempt.to_string()));
-        headers.push(("Broker-Lease-Deadline".into(), deadline_ms.to_string()));
+        headers.push(("Morrow-Attempt".into(), attempt.to_string()));
+        headers.push(("Morrow-Lease-Deadline".into(), deadline_ms.to_string()));
         let borrowed = headers
             .iter()
             .map(|(name, value)| (name.as_str(), value.as_str()))
@@ -454,7 +454,7 @@ fn durable_message_frame(
         .iter()
         .map(|header| (header.name.clone(), header.value.clone()))
         .collect::<Vec<_>>();
-    headers.push(("Broker-Ack".into(), ack_subject.into()));
+    headers.push(("Morrow-Ack".into(), ack_subject.into()));
     let header_refs = headers
         .iter()
         .map(|(name, value)| (name.as_str(), value.as_str()))

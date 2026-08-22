@@ -6,7 +6,7 @@ fn record(offset: u64) -> ConnectorRecord {
         stream: "orders".to_string(),
         partition: 0,
         offset,
-        subject: "orders.created".to_string(),
+        subject: "orders/created".to_string(),
         key: None,
         payload: format!("record-{offset}").into_bytes(),
         schema_id: Some("orders-v1".to_string()),

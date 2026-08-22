@@ -51,7 +51,7 @@ fn rejects_malformed_seed() {
 
 #[test]
 fn parses_ping_args() {
-    let args = Args::parse(["broker-cli", "ping"].into_iter().map(str::to_string)).unwrap();
+    let args = Args::parse(["morrow-cli", "ping"].into_iter().map(str::to_string)).unwrap();
     assert_eq!(args.config_path, PathBuf::from(DEFAULT_CONFIG_PATH));
     assert_eq!(args.command, Command::Ping);
 }
@@ -60,11 +60,11 @@ fn parses_ping_args() {
 fn parses_pub_args() {
     let args = Args::parse(
         [
-            "broker-cli",
+            "morrow-cli",
             "--config",
             "custom.json",
             "pub",
-            "orders.created",
+            "orders/created",
             "hello",
         ]
         .into_iter()
@@ -75,7 +75,7 @@ fn parses_pub_args() {
     assert_eq!(
         args.command,
         Command::Pub {
-            subject: "orders.created".into(),
+            subject: "orders/created".into(),
             payload: b"hello".to_vec(),
             qos: None,
             msg_id: None,
@@ -87,9 +87,9 @@ fn parses_pub_args() {
 fn parses_qos_pub_args() {
     let args = Args::parse(
         [
-            "broker-cli",
+            "morrow-cli",
             "pub",
-            "orders.created",
+            "orders/created",
             "hello",
             "--qos",
             "2",
@@ -103,7 +103,7 @@ fn parses_qos_pub_args() {
     assert_eq!(
         args.command,
         Command::Pub {
-            subject: "orders.created".into(),
+            subject: "orders/created".into(),
             payload: b"hello".to_vec(),
             qos: Some(AckLevel::HighDurability),
             msg_id: Some("msg-1".into()),
@@ -115,9 +115,9 @@ fn parses_qos_pub_args() {
 fn parses_sub_args() {
     let args = Args::parse(
         [
-            "broker-cli",
+            "morrow-cli",
             "sub",
-            "orders.*",
+            "orders/*",
             "--sid",
             "sid2",
             "--queue",
@@ -133,7 +133,7 @@ fn parses_sub_args() {
     assert_eq!(
         args.command,
         Command::Sub {
-            subject: "orders.*".into(),
+            subject: "orders/*".into(),
             sid: "sid2".into(),
             queue: Some("workers".into()),
             ack: true,
@@ -146,9 +146,9 @@ fn parses_sub_args() {
 fn parses_request_args() {
     let args = Args::parse(
         [
-            "broker-cli",
+            "morrow-cli",
             "request",
-            "orders.lookup",
+            "orders/lookup",
             "hello",
             "--timeout-ms",
             "500",
@@ -160,7 +160,7 @@ fn parses_request_args() {
     assert_eq!(
         args.command,
         Command::Request {
-            subject: "orders.lookup".into(),
+            subject: "orders/lookup".into(),
             payload: b"hello".to_vec(),
             timeout_ms: 500,
         }
@@ -170,7 +170,7 @@ fn parses_request_args() {
 #[test]
 fn parses_reply_args() {
     let args = Args::parse(
-        ["broker-cli", "reply", "orders.lookup", "--queue", "workers"]
+        ["morrow-cli", "reply", "orders/lookup", "--queue", "workers"]
             .into_iter()
             .map(str::to_string),
     )
@@ -178,7 +178,7 @@ fn parses_reply_args() {
     assert_eq!(
         args.command,
         Command::Reply {
-            subject: "orders.lookup".into(),
+            subject: "orders/lookup".into(),
             queue: Some("workers".into()),
         }
     );

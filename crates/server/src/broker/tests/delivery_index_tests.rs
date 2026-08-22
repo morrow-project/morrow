@@ -5,7 +5,7 @@ async fn idle_delivery_tick_does_not_read_retained_history() {
     let scenario = Scenario::new();
     let mut publisher = scenario.connect_durable("publisher", 1_000).await;
     for _ in 0..16 {
-        publisher.publish("orders.created", b"history").await;
+        publisher.publish("orders/created", b"history").await;
     }
     publisher.ping_roundtrip().await;
     scenario.broker().inner.lock().await.ready_consumers.clear();
@@ -38,7 +38,7 @@ async fn idle_delivery_tick_does_not_read_retained_history() {
 async fn one_redelivery_tick_expires_at_most_the_work_limit() {
     let scenario = Scenario::new();
     let mut subscriber = scenario.connect_durable("client1", 25).await;
-    subscriber.subscribe("orders.*", "sid1").await;
+    subscriber.subscribe("orders/*", "sid1").await;
     subscriber.ping_roundtrip().await;
 
     let mut inner = scenario.broker().inner.lock().await;
@@ -87,9 +87,9 @@ async fn rescheduled_lease_ignores_its_stale_deadline() {
     let scenario = Scenario::new();
     let mut subscriber = scenario.connect_durable("client1", 25).await;
     let mut publisher = scenario.connect_durable("publisher", 25).await;
-    subscriber.subscribe("orders.*", "sid1").await;
+    subscriber.subscribe("orders/*", "sid1").await;
     subscriber.ping_roundtrip().await;
-    publisher.publish("orders.created", b"hello").await;
+    publisher.publish("orders/created", b"hello").await;
     subscriber.expect_msg().await;
 
     let mut inner = scenario.broker().inner.lock().await;
@@ -121,7 +121,7 @@ async fn rescheduled_lease_ignores_its_stale_deadline() {
 async fn benchmark_high_history_and_consumer_cardinality() {
     let scenario = Scenario::new();
     let mut publisher = scenario.connect_durable("publisher", 1_000).await;
-    publisher.publish("orders.created", b"history").await;
+    publisher.publish("orders/created", b"history").await;
     publisher.ping_roundtrip().await;
 
     let mut inner = scenario.broker().inner.lock().await;
@@ -138,11 +138,11 @@ async fn benchmark_high_history_and_consumer_cardinality() {
     for id in 0..1_000 {
         inner
             .consumer_interest_index
-            .insert("orders.*", format!("benchmark-{id}"));
+            .insert("orders/*", format!("benchmark-{id}"));
     }
     inner.ready_consumers.clear();
     let started = std::time::Instant::now();
-    inner.mark_subject_ready("orders.created");
+    inner.mark_subject_ready("orders/created");
     assert_eq!(inner.ready_consumers.len(), 1_000);
     eprintln!(
         "history=10000 consumers=1000 elapsed={:?}",

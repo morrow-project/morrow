@@ -1,6 +1,6 @@
 use super::*;
 
-impl Broker {
+impl Morrow {
     pub(super) fn spawn_http_status_listener(&self) {
         let Some(listen) = self.config.http_listen else {
             return;

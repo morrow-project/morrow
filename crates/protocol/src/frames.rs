@@ -5,7 +5,7 @@ pub fn info_line(max_payload: usize, nonce: Option<&str>) -> Vec<u8> {
         .map(|nonce| format!(",\"nonce\":\"{nonce}\",\"auth_required\":true"))
         .unwrap_or_else(|| ",\"auth_required\":false".to_string());
     format!(
-        "INFO {{\"server_id\":\"broker\",\"server_name\":\"broker\",\"version\":\"{}\",\"proto\":2,\"protocol_versions\":[1,2],\"max_payload\":{max_payload}{nonce},\"tls_required\":false}}\r\n",
+        "INFO {{\"server_id\":\"morrow\",\"server_name\":\"Morrow\",\"version\":\"{}\",\"proto\":2,\"protocol_versions\":[1,2],\"max_payload\":{max_payload}{nonce},\"tls_required\":false}}\r\n",
         env!("CARGO_PKG_VERSION"),
     )
     .into_bytes()
@@ -50,8 +50,8 @@ pub fn err(message: &str) -> Vec<u8> {
 
 pub fn msg(subject: &str, sid: &str, reply_to: Option<&str>, payload: &[u8]) -> Vec<u8> {
     let header = match reply_to {
-        Some(reply_to) => format!("MSG {subject} {sid} {reply_to} {}\r\n", payload.len()),
-        None => format!("MSG {subject} {sid} {}\r\n", payload.len()),
+        Some(reply_to) => format!("DELIVER {subject} {sid} {reply_to} {}\r\n", payload.len()),
+        None => format!("DELIVER {subject} {sid} {}\r\n", payload.len()),
     };
     payload_frame(header, payload)
 }
@@ -63,7 +63,7 @@ pub fn hmsg(
     headers: &[(&str, &str)],
     payload: &[u8],
 ) -> Vec<u8> {
-    let mut header_block = String::from("NATS/1.0\r\n");
+    let mut header_block = String::from("MORROW/1.0\r\n");
     for (name, value) in headers {
         header_block.push_str(name);
         header_block.push_str(": ");
@@ -74,8 +74,10 @@ pub fn hmsg(
     let headers_len = header_block.len();
     let total_len = headers_len + payload.len();
     let protocol_header = match reply_to {
-        Some(reply_to) => format!("HMSG {subject} {sid} {reply_to} {headers_len} {total_len}\r\n"),
-        None => format!("HMSG {subject} {sid} {headers_len} {total_len}\r\n"),
+        Some(reply_to) => {
+            format!("HDELIVER {subject} {sid} {reply_to} {headers_len} {total_len}\r\n")
+        }
+        None => format!("HDELIVER {subject} {sid} {headers_len} {total_len}\r\n"),
     };
     let mut frame = Vec::with_capacity(protocol_header.len() + total_len + 2);
     frame.extend_from_slice(protocol_header.as_bytes());
@@ -86,12 +88,12 @@ pub fn hmsg(
 }
 
 pub fn ack_subject(consumer_id: &str, seq: u64, delivery_id: u64) -> String {
-    format!("_BROKER.ACK.{consumer_id}.{seq}.{delivery_id}")
+    format!("_MORROW/ACK/{consumer_id}/{seq}/{delivery_id}")
 }
 
 pub fn parse_ack_subject(subject: &str) -> Option<AckSubject> {
-    let mut parts = subject.split('.');
-    if parts.next()? != "_BROKER" || parts.next()? != "ACK" {
+    let mut parts = subject.split('/');
+    if parts.next()? != "_MORROW" || parts.next()? != "ACK" {
         return None;
     }
     let consumer_id = parts.next()?.to_string();
@@ -136,7 +138,7 @@ pub fn durable_message(
     delivery_id: u64,
     payload: &[u8],
 ) -> Vec<u8> {
-    let mut header_block = String::from("NATS/1.0\r\n");
+    let mut header_block = String::from("MORROW/1.0\r\n");
     for (header, value) in headers {
         header_block.push_str(header);
         header_block.push_str(": ");
@@ -149,7 +151,7 @@ pub fn durable_message(
     let reply_to = reply_to.unwrap_or("-");
     let key = key.map(hex).unwrap_or_else(|| "-".to_string());
     let protocol_header = format!(
-        "DMSG {name} {subject} {reply_to} {stream} {partition} {offset} {key} {timestamp_ms} {attempt} {lease_deadline_ms} {seq} {delivery_id} {headers_len} {total_len}\r\n"
+        "DDELIVER {name} {subject} {reply_to} {stream} {partition} {offset} {key} {timestamp_ms} {attempt} {lease_deadline_ms} {seq} {delivery_id} {headers_len} {total_len}\r\n"
     );
     let mut frame = Vec::with_capacity(protocol_header.len() + total_len + 2);
     frame.extend_from_slice(protocol_header.as_bytes());

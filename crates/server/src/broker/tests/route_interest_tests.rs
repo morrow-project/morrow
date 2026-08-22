@@ -6,9 +6,9 @@ async fn wildcard_route_bind_announces_hostname_and_peers_by_node_id() {
     let mut config = test_config(dir.path());
     let mut cluster = fake_cluster_config(dir.path(), 3, 1);
     cluster.route_listen = Some("0.0.0.0:6222".parse().unwrap());
-    cluster.route_advertise = Some("broker-1:6222".to_string());
+    cluster.route_advertise = Some("morrow-1:6222".to_string());
     for node in &mut cluster.nodes {
-        node.route_addr = Some(format!("broker-{}:6222", node.node_id));
+        node.route_addr = Some(format!("morrow-{}:6222", node.node_id));
     }
     config.cluster = Some(cluster);
     let broker = deterministic_broker(config, Arc::new(ManualClock::new(1_000)), None);
@@ -17,14 +17,14 @@ async fn wildcard_route_bind_announces_hostname_and_peers_by_node_id() {
     assert!(matches!(
         mesh.hello().await,
         RouteFrame::Hello { node_id: 1, route_addr, .. }
-            if route_addr == "broker-1:6222"
+            if route_addr == "morrow-1:6222"
     ));
     let (competing_sender, _competing_frames) = mpsc::channel(1);
     assert_eq!(
         mesh.register_peer(
             RoutePeerInfo {
                 node_id: 2,
-                route_addr: "broker-2:6222".to_string(),
+                route_addr: "morrow-2:6222".to_string(),
                 client_addr: "127.0.0.1:4222".parse().unwrap(),
             },
             RouteDirection::Outbound,
@@ -39,7 +39,7 @@ async fn wildcard_route_bind_announces_hostname_and_peers_by_node_id() {
         mesh.register_peer(
             RoutePeerInfo {
                 node_id: 2,
-                route_addr: "broker-2:6222".to_string(),
+                route_addr: "morrow-2:6222".to_string(),
                 client_addr: "127.0.0.1:4222".parse().unwrap(),
             },
             RouteDirection::Inbound,
@@ -53,7 +53,7 @@ async fn wildcard_route_bind_announces_hostname_and_peers_by_node_id() {
         mesh.register_peer(
             RoutePeerInfo {
                 node_id: 2,
-                route_addr: "broker-2-new:6222".to_string(),
+                route_addr: "morrow-2-new:6222".to_string(),
                 client_addr: "127.0.0.1:4222".parse().unwrap(),
             },
             RouteDirection::Inbound,
@@ -67,7 +67,7 @@ async fn wildcard_route_bind_announces_hostname_and_peers_by_node_id() {
         mesh.register_peer(
             RoutePeerInfo {
                 node_id: 3,
-                route_addr: "broker-2-new:6222".to_string(),
+                route_addr: "morrow-2-new:6222".to_string(),
                 client_addr: "127.0.0.1:4223".parse().unwrap(),
             },
             RouteDirection::Inbound,
@@ -103,19 +103,19 @@ async fn route_interests_use_reference_counted_deltas_off_the_publish_path() {
     );
 
     let mut first = scenario.connect().await;
-    first.subscribe("orders.*", "first").await;
+    first.subscribe("orders/*", "first").await;
     first.ping_roundtrip().await;
-    assert_interest_delta(frames.recv().await.unwrap(), 1, &["orders.*"], &[]);
+    assert_interest_delta(frames.recv().await.unwrap(), 1, &["orders/*"], &[]);
 
     let snapshot = mesh.interests().await;
     assert!(matches!(
         snapshot,
         RouteFrame::Interests { version: 1, subjects }
-            if subjects == ["orders.*"]
+            if subjects == ["orders/*"]
     ));
 
     let mut duplicate = scenario.connect().await;
-    duplicate.subscribe("orders.*", "duplicate").await;
+    duplicate.subscribe("orders/*", "duplicate").await;
     duplicate.ping_roundtrip().await;
     assert!(frames.try_recv().is_err());
 
@@ -129,7 +129,7 @@ async fn route_interests_use_reference_counted_deltas_off_the_publish_path() {
     assert!(frames.try_recv().is_err());
 
     duplicate.disconnect().await;
-    assert_interest_delta(frames.recv().await.unwrap(), 2, &[], &["orders.*"]);
+    assert_interest_delta(frames.recv().await.unwrap(), 2, &[], &["orders/*"]);
 
     first.subscribe("topic", "limited").await;
     first.write_line("UNSUB limited 1").await;
@@ -157,7 +157,7 @@ async fn route_interest_versions_detect_gaps_and_accept_full_resync() {
     .await
     .unwrap();
 
-    mesh.set_remote_interests(2, 7, vec!["orders.*".to_string()])
+    mesh.set_remote_interests(2, 7, vec!["orders/*".to_string()])
         .await;
     assert!(
         !mesh
@@ -170,18 +170,18 @@ async fn route_interest_versions_detect_gaps_and_accept_full_resync() {
         assert_eq!(peer.remote_interest_version, 7);
         assert_eq!(
             peer.remote_interests.iter().cloned().collect::<Vec<_>>(),
-            ["orders.*"]
+            ["orders/*"]
         );
     }
 
-    mesh.set_remote_interests(2, 10, vec!["service.*".to_string()])
+    mesh.set_remote_interests(2, 10, vec!["service/*".to_string()])
         .await;
     assert!(
         mesh.apply_remote_interest_delta(
             2,
             11,
             vec!["topic".to_string()],
-            vec!["service.*".to_string()],
+            vec!["service/*".to_string()],
         )
         .await
     );

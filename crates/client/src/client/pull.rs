@@ -70,7 +70,7 @@ impl Client {
                 Some(ServerFrame::Err(err)) => return Err(ClientError::msg(err)),
                 Some(frame) => {
                     return Err(ClientError::msg(format!(
-                        "expected DMSG in FETCH batch, got {frame:?}"
+                        "expected DDELIVER in FETCH batch, got {frame:?}"
                     )));
                 }
                 None => return Err(ClientError::msg("connection closed during FETCH batch")),
@@ -134,12 +134,29 @@ impl Client {
         message: &DurableMessage,
         duration_ms: Option<u64>,
     ) -> Result<()> {
+        self.delivery_control_identity(
+            operation,
+            &message.consumer,
+            message.seq,
+            message.delivery_id,
+            duration_ms,
+        )
+        .await
+    }
+
+    pub(crate) async fn delivery_control_identity(
+        &mut self,
+        operation: &str,
+        consumer: &str,
+        sequence: u64,
+        delivery: u64,
+        duration_ms: Option<u64>,
+    ) -> Result<()> {
         let suffix = duration_ms
             .map(|duration| format!(" {duration}"))
             .unwrap_or_default();
         self.write_line(&format!(
-            "{operation} {} {} {}{suffix}",
-            message.consumer, message.seq, message.delivery_id
+            "{operation} {consumer} {sequence} {delivery}{suffix}"
         ))
         .await?;
         loop {
@@ -150,9 +167,9 @@ impl Client {
                     seq,
                     delivery_id,
                 }) if actual == operation
-                    && name == message.consumer
-                    && seq == message.seq
-                    && delivery_id == message.delivery_id =>
+                    && name == consumer
+                    && seq == sequence
+                    && delivery_id == delivery =>
                 {
                     return Ok(());
                 }

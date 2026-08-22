@@ -10,7 +10,7 @@ use tokio::{
 struct Scenario {
     _dir: TempDir,
     clock: Arc<ManualClock>,
-    broker: Broker,
+    broker: Morrow,
     fake_cluster: Option<FakeClusterRuntime>,
 }
 impl Scenario {
@@ -100,7 +100,7 @@ impl Scenario {
         }
     }
 
-    fn broker(&self) -> &Broker {
+    fn broker(&self) -> &Morrow {
         &self.broker
     }
 
@@ -184,25 +184,25 @@ impl Drop for TestClient {
     }
 }
 impl TestClient {
-    async fn connect(broker: &Broker) -> Self {
+    async fn connect(broker: &Morrow) -> Self {
         Self::connect_with(broker, false).await
     }
 
-    async fn connect_with_info(broker: &Broker) -> (Self, String) {
+    async fn connect_with_info(broker: &Morrow) -> (Self, String) {
         Self::connect_with_info_and_path(broker, false).await
     }
 
-    async fn connect_accepted(broker: &Broker) -> Self {
+    async fn connect_accepted(broker: &Morrow) -> Self {
         Self::connect_with(broker, true).await
     }
 
-    async fn connect_with(broker: &Broker, accepted_path: bool) -> Self {
+    async fn connect_with(broker: &Morrow, accepted_path: bool) -> Self {
         Self::connect_with_info_and_path(broker, accepted_path)
             .await
             .0
     }
 
-    async fn connect_with_info_and_path(broker: &Broker, accepted_path: bool) -> (Self, String) {
+    async fn connect_with_info_and_path(broker: &Morrow, accepted_path: bool) -> (Self, String) {
         let (client_stream, server_stream) = tokio::io::duplex(4096);
         let server = broker.clone();
         let task = tokio::spawn(async move {
@@ -224,7 +224,7 @@ impl TestClient {
         (client, info)
     }
 
-    async fn connect_durable(broker: &Broker, durable_id: &str, ack_timeout_ms: u64) -> Self {
+    async fn connect_durable(broker: &Morrow, durable_id: &str, ack_timeout_ms: u64) -> Self {
         let mut client = Self::connect(broker).await;
         client
             .send_durable_connect(durable_id, ack_timeout_ms)
@@ -232,7 +232,7 @@ impl TestClient {
         client
     }
 
-    async fn connect_pull(broker: &Broker, durable_id: &str, ack_timeout_ms: u64) -> Self {
+    async fn connect_pull(broker: &Morrow, durable_id: &str, ack_timeout_ms: u64) -> Self {
         let mut client = Self::connect(broker).await;
         let payload = serde_json::json!({
             "durable_id": durable_id,
@@ -241,7 +241,7 @@ impl TestClient {
             "max_in_flight": 2,
             "protocol_version": 2,
         });
-        client.write_line(&format!("CONNECT {payload}")).await;
+        client.write_line(&format!("CONN {payload}")).await;
         client
     }
 
@@ -252,7 +252,7 @@ impl TestClient {
             "ack_timeout_ms": ack_timeout_ms,
             "max_in_flight": 1024,
         });
-        self.write_line(&format!("CONNECT {payload}")).await;
+        self.write_line(&format!("CONN {payload}")).await;
     }
 
     async fn disconnect(mut self) {
@@ -290,6 +290,19 @@ impl TestClient {
         self.publish_with_reply(subject, None, payload).await;
     }
 
+    async fn ack(&mut self, ack_subject: &str) {
+        let ack = protocol::parse_ack_subject(ack_subject).unwrap();
+        self.write_line(&format!(
+            "ACK {} {} {}",
+            ack.consumer_id, ack.seq, ack.delivery_id
+        ))
+        .await;
+        assert!(
+            self.read_frame().await.starts_with("D-OK ACK "),
+            "ACK did not receive D-OK"
+        );
+    }
+
     async fn publish_with_reply(&mut self, subject: &str, reply_to: Option<&str>, payload: &[u8]) {
         match reply_to {
             Some(reply_to) => {
@@ -314,7 +327,7 @@ impl TestClient {
         msg_id: &str,
     ) {
         let headers = format!(
-            "NATS/1.0\r\nBroker-QoS: {}\r\nBroker-Msg-Id: {msg_id}\r\n\r\n",
+            "MORROW/1.0\r\nMorrow-QoS: {}\r\nMorrow-Msg-Id: {msg_id}\r\n\r\n",
             level as u8
         );
         self.write_line(&format!(
@@ -334,7 +347,7 @@ impl TestClient {
     }
 
     async fn publish_hpub(&mut self, subject: &str, headers: &[(&str, &str)], payload: &[u8]) {
-        let mut block = String::from("NATS/1.0\r\n");
+        let mut block = String::from("MORROW/1.0\r\n");
         for (name, value) in headers {
             block.push_str(&format!("{name}: {value}\r\n"));
         }
@@ -371,13 +384,19 @@ impl TestClient {
 
     async fn expect_msg(&mut self) -> String {
         let frame = self.read_frame().await;
-        assert!(frame.starts_with("MSG "), "expected MSG, got {frame:?}");
+        assert!(
+            frame.starts_with("DELIVER "),
+            "expected DELIVER, got {frame:?}"
+        );
         frame
     }
 
     async fn expect_hmsg(&mut self) -> String {
         let frame = self.read_frame().await;
-        assert!(frame.starts_with("HMSG "), "expected HMSG, got {frame:?}");
+        assert!(
+            frame.starts_with("HDELIVER "),
+            "expected HDELIVER, got {frame:?}"
+        );
         frame
     }
 
@@ -412,14 +431,14 @@ impl TestClient {
         let line = std::str::from_utf8(&frame).unwrap().to_string();
         let mut parts = line.split_whitespace();
         match parts.next() {
-            Some("MSG") | Some("DMSG") => {
+            Some("DELIVER") | Some("DDELIVER") => {
                 let tokens = line.split_whitespace().collect::<Vec<_>>();
                 let size = tokens.last().unwrap().parse::<usize>().unwrap();
                 let mut body = vec![0; size + 2];
                 stream.read_exact(&mut body).await.unwrap();
                 frame.extend_from_slice(&body);
             }
-            Some("HMSG") => {
+            Some("HDELIVER") => {
                 let tokens = line.split_whitespace().collect::<Vec<_>>();
                 let total_size = tokens.last().unwrap().parse::<usize>().unwrap();
                 let mut body = vec![0; total_size + 2];
@@ -456,7 +475,7 @@ fn test_config(dir: &Path) -> Config {
     }
 }
 fn test_outbound_queue(
-    broker: &Broker,
+    broker: &Morrow,
     capacity: usize,
 ) -> (OutboundQueue, mpsc::Receiver<OutboundFrame>) {
     let (sender, receiver) = mpsc::channel(capacity);
@@ -472,8 +491,8 @@ fn test_outbound_queue(
 fn test_streams() -> crate::stream::StreamCatalog {
     crate::stream::StreamCatalog::new(
         [
-            ("orders", "orders.>"),
-            ("service", "service.>"),
+            ("orders", "orders/**"),
+            ("service", "service/**"),
             ("topic", "topic"),
         ]
         .into_iter()
@@ -493,8 +512,8 @@ fn deterministic_broker(
     config: Config,
     clock: Arc<ManualClock>,
     initial_cluster: Option<ClusterRuntime>,
-) -> Broker {
-    Broker::open_with_hooks(
+) -> Morrow {
+    Morrow::open_with_hooks(
         config,
         BrokerHooks {
             clock,
@@ -548,10 +567,10 @@ fn fake_cluster_config(dir: &Path, node_count: u64, local_node_id: u64) -> Clust
 fn ack_subject(frame: &str) -> String {
     frame.split_whitespace().nth(3).unwrap().to_string()
 }
-async fn http_request(broker: &Broker, path: &str) -> String {
+async fn http_request(broker: &Morrow, path: &str) -> String {
     http_request_with_auth(broker, path, Some("test-admin-token")).await
 }
-async fn http_request_with_auth(broker: &Broker, path: &str, token: Option<&str>) -> String {
+async fn http_request_with_auth(broker: &Morrow, path: &str, token: Option<&str>) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let broker = broker.clone();

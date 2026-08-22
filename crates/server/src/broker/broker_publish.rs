@@ -1,6 +1,6 @@
 use super::*;
 
-impl Broker {
+impl Morrow {
     async fn load_partition_record(&self, metadata: PublishRecord) -> Result<PublishRecord> {
         if metadata.stream.is_none() {
             return Ok(metadata);
@@ -80,20 +80,8 @@ impl Broker {
         producer_ack: Option<protocol::ProducerAckRequest>,
         recursion_depth: usize,
     ) -> Result<()> {
-        if let Some(consumer_ack) = protocol::parse_ack_subject(&subject_name) {
-            self.authorize_ack_publish(publisher_id, &consumer_ack)
-                .await?;
-            let _ = self.ack(consumer_ack).await?;
-            if let Some(producer_ack) = &producer_ack {
-                self.send_producer_ack(publisher_id, producer_ack, false, None)
-                    .await?;
-            } else {
-                self.send_verbose_ok(publisher_id).await?;
-            }
-            return Ok(());
-        }
         crate::broker_ensure!(
-            !subject_name.starts_with("_BROKER."),
+            !subject_name.starts_with("_MORROW/") || is_inbox_publish(&subject_name),
             "reserved broker subject"
         );
         crate::broker_ensure!(
@@ -150,7 +138,7 @@ impl Broker {
             "middleware produced invalid publish subject"
         );
         crate::broker_ensure!(
-            !subject_name.starts_with("_BROKER."),
+            !subject_name.starts_with("_MORROW/") || is_inbox_publish(&subject_name),
             "middleware produced reserved broker subject"
         );
         crate::broker_ensure!(

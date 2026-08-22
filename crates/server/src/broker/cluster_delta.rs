@@ -1,6 +1,6 @@
 use super::*;
 
-impl Broker {
+impl Morrow {
     pub(super) async fn sync_cluster_deltas(&self, cluster: &ClusterRuntime) -> Result<()> {
         let _delta_application = self.cluster_delta_gate.lock().await;
         let Some(batch) = cluster.deltas_after(self.cluster_applied_log_index()) else {

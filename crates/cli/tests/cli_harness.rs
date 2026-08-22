@@ -8,7 +8,7 @@ use std::{
 
 use client::{Client, ClientAuth};
 use server::{
-    Broker, Config,
+    Config, Morrow,
     config::{AuthClientConfig, AuthConfig, TlsConfig},
 };
 use tokio::net::TcpListener;
@@ -39,7 +39,7 @@ async fn cli_pub_and_sub_against_server() {
             "--config",
             config.path_str(),
             "sub",
-            "orders.*",
+            "orders/*",
             "--ack",
             "--max-messages",
             "1",
@@ -54,7 +54,7 @@ async fn cli_pub_and_sub_against_server() {
         "--config",
         config.path_str(),
         "pub",
-        "orders.created",
+        "orders/created",
         "hello",
     ])
     .await;
@@ -62,7 +62,7 @@ async fn cli_pub_and_sub_against_server() {
 
     let sub_output = wait_output(sub, Duration::from_secs(3)).await;
     assert!(sub_output.status.success(), "{}", stderr(&sub_output));
-    assert_eq!(stdout(&sub_output), "orders.created sid1 hello\n");
+    assert_eq!(stdout(&sub_output), "orders/created sid1 hello\n");
     harness.shutdown().await;
 }
 
@@ -79,7 +79,7 @@ async fn cli_request_against_client_responder() {
         .connect_durable("responder1", false, 5_000, 16)
         .await
         .unwrap();
-    responder.subscribe("service.echo", "sid1").await.unwrap();
+    responder.subscribe("service/echo", "sid1").await.unwrap();
     responder.ping_roundtrip().await.unwrap();
     let responder_task = tokio::spawn(async move {
         let message = responder.next_message().await.unwrap();
@@ -94,7 +94,7 @@ async fn cli_request_against_client_responder() {
         "--config",
         config.path_str(),
         "request",
-        "service.echo",
+        "service/echo",
         "hello",
         "--timeout-ms",
         "3000",
@@ -179,7 +179,7 @@ struct ClientConfigFile {
 
 impl ClientConfigFile {
     fn new(harness: &Harness, auth: Option<&ClientAuth>, ca_cert_file: Option<PathBuf>) -> Self {
-        let dir = TestDir::new("broker-cli-config");
+        let dir = TestDir::new("morrow-cli-config");
         let path = dir.path().join("client.json");
         let tls_json = match ca_cert_file {
             Some(path) => format!(
@@ -237,7 +237,7 @@ impl ClientConfigFile {
 struct Harness {
     addr: SocketAddr,
     max_payload: usize,
-    broker: Broker,
+    broker: Morrow,
     server_task: tokio::task::JoinHandle<()>,
     _wal_dir: TestDir,
 }
@@ -279,7 +279,7 @@ impl Harness {
     }
 
     async fn start_with_config(auth: AuthConfig, tls: Option<TlsConfig>) -> Self {
-        let wal_dir = TestDir::new("broker-cli-wal");
+        let wal_dir = TestDir::new("morrow-cli-wal");
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let max_payload = 1024;
@@ -305,7 +305,7 @@ impl Harness {
             cluster: None,
             streams: test_streams(),
         };
-        let broker = Broker::open(config).unwrap();
+        let broker = Morrow::open(config).unwrap();
         let server = broker.clone();
         let server_task = tokio::spawn(async move {
             if let Err(err) = server.serve_listener(listener).await {
@@ -353,7 +353,7 @@ async fn wait_output(mut child: std::process::Child, timeout: Duration) -> Outpu
 }
 
 fn cli_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_broker-cli")
+    env!("CARGO_BIN_EXE_morrow-cli")
 }
 
 fn tls_config() -> TlsConfig {
@@ -366,7 +366,7 @@ fn tls_config() -> TlsConfig {
 
 fn test_streams() -> server::stream::StreamCatalog {
     server::stream::StreamCatalog::new(
-        [("orders", "orders.>"), ("service", "service.>")]
+        [("orders", "orders/**"), ("service", "service/**")]
             .into_iter()
             .map(|(name, subject)| server::stream::StreamDefinition {
                 name: server::stream::StreamId::new(name).unwrap(),
@@ -382,11 +382,11 @@ fn test_streams() -> server::stream::StreamCatalog {
 }
 
 fn tls_cert_file() -> PathBuf {
-    workspace_root().join("crates/integration/tests/fixtures/server-cert.pem")
+    workspace_root().join("crates/integration/tests/fixtures/morrow-cert.pem")
 }
 
 fn tls_key_file() -> PathBuf {
-    workspace_root().join("crates/integration/tests/fixtures/server-key.pem")
+    workspace_root().join("crates/integration/tests/fixtures/morrow-key.pem")
 }
 
 fn tls_ca_cert_file() -> PathBuf {

@@ -22,7 +22,7 @@ impl TestDir {
             .as_nanos();
         let counter = TEST_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
-            "broker-wal-test-{}-{nanos}-{counter}",
+            "morrow-wal-test-{}-{nanos}-{counter}",
             std::process::id()
         ));
         std::fs::create_dir_all(&path).unwrap();
@@ -57,13 +57,13 @@ fn replays_consumer_publish_delivery_and_ack_state() {
     let (mut wal, _) = open_wal(dir.path());
     let consumer = consumer("durable-client-1");
     wal.append_consumer_upsert(&consumer).unwrap();
-    let first = wal.append_publish("orders.created", None, b"one").unwrap();
+    let first = wal.append_publish("orders/created", None, b"one").unwrap();
     let attempt = wal
         .append_delivery_attempt(first.seq, &consumer.consumer_id, 1_000, 1)
         .unwrap();
     wal.append_ack(first.seq, &consumer.consumer_id, attempt.delivery_id)
         .unwrap();
-    let second = wal.append_publish("orders.created", None, b"two").unwrap();
+    let second = wal.append_publish("orders/created", None, b"two").unwrap();
     wal.append_delivery_attempt(second.seq, &consumer.consumer_id, 2_000, 1)
         .unwrap();
     wal.flush().unwrap();
@@ -86,7 +86,7 @@ fn replay_retains_message_until_all_matching_consumers_ack() {
     let second_consumer = consumer("durable-client-2");
     wal.append_consumer_upsert(&first_consumer).unwrap();
     wal.append_consumer_upsert(&second_consumer).unwrap();
-    let message = wal.append_publish("orders.created", None, b"one").unwrap();
+    let message = wal.append_publish("orders/created", None, b"one").unwrap();
     let attempt = wal
         .append_delivery_attempt(message.seq, &first_consumer.consumer_id, 1_000, 1)
         .unwrap();
@@ -117,7 +117,7 @@ fn replay_retains_message_until_all_matching_consumers_ack() {
 fn later_consumers_do_not_receive_older_publishes_on_replay() {
     let dir = TestDir::new();
     let (mut wal, _) = open_wal(dir.path());
-    wal.append_publish("orders.created", None, b"old").unwrap();
+    wal.append_publish("orders/created", None, b"old").unwrap();
     let consumer = consumer("durable-client-1");
     wal.append_consumer_upsert(&consumer).unwrap();
     wal.flush().unwrap();
@@ -133,8 +133,8 @@ fn rotates_and_replays_multiple_segments() {
     let (mut wal, _) = Wal::open(dir.path(), Duration::from_millis(1), 96).unwrap();
     let consumer = consumer("durable-client-1");
     wal.append_consumer_upsert(&consumer).unwrap();
-    wal.append_publish("orders.created", None, b"one").unwrap();
-    wal.append_publish("orders.updated", None, b"two").unwrap();
+    wal.append_publish("orders/created", None, b"one").unwrap();
+    wal.append_publish("orders/updated", None, b"two").unwrap();
     wal.flush().unwrap();
     assert!(wal.active_segment_id > 1);
     drop(wal);
@@ -168,7 +168,7 @@ fn migrates_legacy_wal_to_segmented_layout() {
         stream: None,
         partition: None,
         offset: None,
-        subject: "orders.created".into(),
+        subject: "orders/created".into(),
         key: None,
         headers: Vec::new(),
         timestamp_ms: 0,
@@ -195,8 +195,8 @@ fn checkpoint_removes_covered_segments() {
     let (mut wal, _) = Wal::open(dir.path(), Duration::from_millis(1), 96).unwrap();
     let consumer = consumer("durable-client-1");
     wal.append_consumer_upsert(&consumer).unwrap();
-    let first = wal.append_publish("orders.created", None, b"one").unwrap();
-    let second = wal.append_publish("orders.updated", None, b"two").unwrap();
+    let first = wal.append_publish("orders/created", None, b"one").unwrap();
+    let second = wal.append_publish("orders/updated", None, b"two").unwrap();
     assert!(wal.active_segment_id > 1);
     let replayed = ReplayedConsumer {
         record: consumer,
@@ -292,7 +292,7 @@ fn open_wal(dir: &Path) -> (Wal, Replay) {
 fn consumer(consumer_id: &str) -> ConsumerRecord {
     ConsumerRecord {
         consumer_id: consumer_id.into(),
-        filter_subject: "orders.*".into(),
+        filter_subject: "orders/*".into(),
         queue_group: None,
         ack_timeout_ms: 30_000,
         max_in_flight: 1024,

@@ -2,7 +2,7 @@ use super::*;
 
 pub(super) async fn accept_route_stream(
     mesh: RouteMesh,
-    broker: Broker,
+    broker: Morrow,
     stream: TcpStream,
     auth_token: String,
 ) -> Result<()> {
@@ -42,7 +42,7 @@ pub(super) async fn accept_route_stream(
 
 pub(super) async fn connect_route_stream(
     mesh: RouteMesh,
-    broker: Broker,
+    broker: Morrow,
     stream: TcpStream,
     auth_token: String,
     expected_node_id: Option<u64>,

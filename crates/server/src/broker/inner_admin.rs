@@ -230,7 +230,7 @@ impl TransientState {
     }
 }
 
-impl Broker {
+impl Morrow {
     pub(super) async fn connections_response(&self) -> ConnectionsResponse {
         let durable_counts = {
             let inner = self.inner.lock().await;

@@ -4,8 +4,8 @@ use super::*;
 async fn http_connections_endpoint_reports_live_client_metadata() {
     let scenario = Scenario::new();
     let mut client = scenario.connect_durable("client1", 25).await;
-    client.subscribe("orders.*", "sid1").await;
-    client.subscribe("_INBOX.client1.1", "inbox1").await;
+    client.subscribe("orders/*", "sid1").await;
+    client.subscribe("_MORROW/INBOX/client1/1", "inbox1").await;
     client.ping_roundtrip().await;
 
     let response = http_request(scenario.broker(), "/connections").await;
@@ -28,10 +28,10 @@ async fn http_subscriptions_endpoint_reports_durable_and_transient_state() {
     let scenario = Scenario::new();
     let mut first = scenario.connect_durable("client1", 25).await;
     let mut second = scenario.connect_durable("client2", 50).await;
-    first.subscribe("orders.*", "sid1").await;
-    first.subscribe("_INBOX.client1.1", "inbox1").await;
+    first.subscribe("orders/*", "sid1").await;
+    first.subscribe("_MORROW/INBOX/client1/1", "inbox1").await;
     second
-        .subscribe_queue("orders.*", "workers", "worker1")
+        .subscribe_queue("orders/*", "workers", "worker1")
         .await;
     first.ping_roundtrip().await;
     second.ping_roundtrip().await;
@@ -41,18 +41,18 @@ async fn http_subscriptions_endpoint_reports_durable_and_transient_state() {
     assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
     assert!(response.contains("\"durable_consumers\""));
     assert!(response.contains("\"consumer_id\":\"durable-client1-sid1\""));
-    assert!(response.contains("\"filter_subject\":\"orders.*\""));
+    assert!(response.contains("\"filter_subject\":\"orders/*\""));
     assert!(response.contains("\"queue_group\":null"));
     assert!(response.contains("\"stream\":\"orders\""));
     assert!(response.contains("\"committed_offset\":0"));
     assert!(response.contains("\"retention_gaps\":0"));
     assert!(response.contains("\"connection_id\":1"));
     assert!(response.contains("\"sid\":\"sid1\""));
-    assert!(response.contains("\"consumer_id\":\"queue-workers-6f72646572732e2a\""));
+    assert!(response.contains("\"consumer_id\":\"queue-workers-6f72646572732f2a\""));
     assert!(response.contains("\"queue_group\":\"workers\""));
     assert!(response.contains("\"sid\":\"worker1\""));
     assert!(response.contains("\"transient_subscriptions\""));
-    assert!(response.contains("\"subject\":\"_INBOX.client1.1\""));
+    assert!(response.contains("\"subject\":\"_MORROW/INBOX/client1/1\""));
     assert!(response.contains("\"sid\":\"inbox1\""));
 }
 
@@ -63,7 +63,7 @@ async fn http_streams_endpoint_reports_effective_bindings() {
     let mut config = test_config(dir.path());
     config.streams = crate::stream::StreamCatalog::new(vec![crate::stream::StreamDefinition {
         name: crate::stream::StreamId::new("orders").unwrap(),
-        subjects: vec!["orders.>".to_string()],
+        subjects: vec!["orders/**".to_string()],
         partitions: 8,
         partitioning: Default::default(),
         storage: Default::default(),
@@ -76,7 +76,7 @@ async fn http_streams_endpoint_reports_effective_bindings() {
 
     assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
     assert!(response.contains("\"name\":\"orders\""));
-    assert!(response.contains("\"subjects\":[\"orders.>\"]"));
+    assert!(response.contains("\"subjects\":[\"orders/**\"]"));
     assert!(response.contains("\"partitions\":8"));
     assert!(response.contains("\"partition_status\""));
     assert!(response.contains("\"recovery\":{"));
@@ -115,11 +115,11 @@ async fn http_wal_endpoint_requires_auth_and_reports_metrics() {
     let scenario = Scenario::new_with_wal_segment_bytes(128);
     let mut subscriber = scenario.connect_durable("client1", 25).await;
     let mut publisher = scenario.connect_durable("publisher1", 25).await;
-    subscriber.subscribe("orders.*", "sid1").await;
+    subscriber.subscribe("orders/*", "sid1").await;
     subscriber.ping_roundtrip().await;
-    publisher.publish("orders.created", b"hello").await;
+    publisher.publish("orders/created", b"hello").await;
     let frame = subscriber.expect_msg().await;
-    publisher.publish(&ack_subject(&frame), b"").await;
+    publisher.ack(&ack_subject(&frame)).await;
     publisher.ping_roundtrip().await;
 
     let missing = http_request_with_auth(scenario.broker(), "/wal", None).await;
@@ -225,12 +225,14 @@ async fn fake_cluster_leader_change_from_remote_to_local_handles_protocol_locall
     let mut publisher = scenario.connect_accepted().await;
     publisher.send_durable_connect("publisher1", 25).await;
 
-    subscriber.subscribe("orders.*", "sid1").await;
+    subscriber.subscribe("orders/*", "sid1").await;
     subscriber.ping_roundtrip().await;
-    publisher.publish("orders.created", b"hello").await;
+    publisher.publish("orders/created", b"hello").await;
 
     let delivery = subscriber.expect_msg().await;
-    assert!(delivery.starts_with("MSG orders.created sid1 _BROKER.ACK.durable-client1-sid1.1.1"));
+    assert!(
+        delivery.starts_with("DELIVER orders/created sid1 _MORROW/ACK/durable-client1-sid1/1/1")
+    );
     assert!(delivery.ends_with("5\r\nhello\r\n"));
 }
 #[tokio::test]
@@ -241,13 +243,13 @@ async fn fake_cluster_local_leader_accepts_durable_flow_through_accepted_path() 
     let mut publisher = scenario.connect_accepted().await;
     publisher.send_durable_connect("publisher1", 25).await;
 
-    subscriber.subscribe("orders.*", "sid1").await;
+    subscriber.subscribe("orders/*", "sid1").await;
     subscriber.ping_roundtrip().await;
-    publisher.publish("orders.created", b"hello").await;
+    publisher.publish("orders/created", b"hello").await;
 
     let delivery = subscriber.expect_msg().await;
     assert!(delivery.ends_with("5\r\nhello\r\n"));
-    publisher.publish(&ack_subject(&delivery), b"").await;
+    publisher.ack(&ack_subject(&delivery)).await;
     publisher.ping_roundtrip().await;
 
     let inner = scenario.broker().inner.lock().await;
@@ -261,7 +263,7 @@ async fn fake_cluster_quorum_loss_rejects_subscribe() {
     scenario.partition_available([1, 2]);
     let mut subscriber = scenario.connect_durable("client1", 25).await;
 
-    subscriber.subscribe("orders.*", "sid1").await;
+    subscriber.subscribe("orders/*", "sid1").await;
 
     subscriber.expect_err_contains("quorum unavailable").await;
     assert!(scenario.fake_cluster().durable_state().consumers.is_empty());
@@ -272,11 +274,11 @@ async fn fake_cluster_not_leader_rejects_publish() {
     let scenario = Scenario::new_fake_cluster(5);
     let mut subscriber = scenario.connect_durable("client1", 25).await;
     let mut publisher = scenario.connect_durable("publisher1", 25).await;
-    subscriber.subscribe("orders.*", "sid1").await;
+    subscriber.subscribe("orders/*", "sid1").await;
     subscriber.ping_roundtrip().await;
 
     scenario.set_leader(Some(2));
-    publisher.publish("orders.created", b"hello").await;
+    publisher.publish("orders/created", b"hello").await;
 
     publisher.expect_err_contains("not leader").await;
     subscriber.expect_no_frame_short().await;
@@ -306,16 +308,16 @@ async fn clustered_transient_publish_without_stream_binding_does_not_propose_raf
     let mut subscriber = scenario.connect().await;
     let mut publisher = scenario.connect().await;
 
-    subscriber.write_line("CONNECT {}").await;
-    publisher.write_line("CONNECT {}").await;
-    subscriber.subscribe("live.*", "sid1").await;
+    subscriber.write_line("CONN {}").await;
+    publisher.write_line("CONN {}").await;
+    subscriber.subscribe("live/*", "sid1").await;
     subscriber.ping_roundtrip().await;
 
-    publisher.publish("live.topic", b"hello").await;
+    publisher.publish("live/topic", b"hello").await;
     publisher.ping_roundtrip().await;
 
     let delivery = subscriber.expect_msg().await;
-    assert_eq!(delivery, "MSG live.topic sid1 5\r\nhello\r\n");
+    assert_eq!(delivery, "DELIVER live/topic sid1 5\r\nhello\r\n");
     assert_eq!(scenario.fake_cluster().write_count(), 0);
 }
 #[tokio::test]
@@ -323,16 +325,16 @@ async fn fake_cluster_partition_blocks_then_restore_allows_write() {
     let scenario = Scenario::new_fake_cluster(5);
     let mut subscriber = scenario.connect_durable("client1", 25).await;
     let mut publisher = scenario.connect_durable("publisher1", 25).await;
-    subscriber.subscribe("orders.*", "sid1").await;
+    subscriber.subscribe("orders/*", "sid1").await;
     subscriber.ping_roundtrip().await;
 
     scenario.partition_available([1, 2]);
-    publisher.publish("orders.created", b"blocked").await;
+    publisher.publish("orders/created", b"blocked").await;
     publisher.expect_err_contains("quorum unavailable").await;
     subscriber.expect_no_frame_short().await;
 
     scenario.restore_all_nodes();
-    publisher.publish("orders.created", b"hello").await;
+    publisher.publish("orders/created", b"hello").await;
     let delivery = subscriber.expect_msg().await;
     assert!(delivery.ends_with("5\r\nhello\r\n"));
 }
@@ -342,7 +344,7 @@ async fn fake_cluster_delays_consumer_upsert_until_drained() {
     scenario.set_delay_writes(true);
     let mut subscriber = scenario.connect_durable("client1", 25).await;
 
-    subscriber.subscribe("orders.*", "sid1").await;
+    subscriber.subscribe("orders/*", "sid1").await;
     subscriber.write_line("PING").await;
 
     subscriber.expect_no_frame_short().await;
@@ -374,11 +376,11 @@ async fn fake_cluster_delays_publish_delivery_until_drained() {
     let scenario = Scenario::new_fake_cluster(5);
     let mut subscriber = scenario.connect_durable("client1", 25).await;
     let mut publisher = scenario.connect_durable("publisher1", 25).await;
-    subscriber.subscribe("orders.*", "sid1").await;
+    subscriber.subscribe("orders/*", "sid1").await;
     subscriber.ping_roundtrip().await;
 
     scenario.set_delay_writes(true);
-    publisher.publish("orders.created", b"hello").await;
+    publisher.publish("orders/created", b"hello").await;
     publisher.write_line("PING").await;
 
     subscriber.expect_no_frame_short().await;
@@ -394,13 +396,13 @@ async fn fake_cluster_delivery_ack_does_not_enter_metadata_queue() {
     let scenario = Scenario::new_fake_cluster(5);
     let mut subscriber = scenario.connect_durable("client1", 25).await;
     let mut publisher = scenario.connect_durable("publisher1", 25).await;
-    subscriber.subscribe("orders.*", "sid1").await;
+    subscriber.subscribe("orders/*", "sid1").await;
     subscriber.ping_roundtrip().await;
-    publisher.publish("orders.created", b"hello").await;
+    publisher.publish("orders/created", b"hello").await;
     let delivery = subscriber.expect_msg().await;
 
     scenario.set_delay_writes(true);
-    publisher.publish(&ack_subject(&delivery), b"").await;
+    publisher.ack(&ack_subject(&delivery)).await;
     publisher.write_line("PING").await;
     publisher.expect_pong().await;
     assert_eq!(scenario.queued_write_count(), 0);
@@ -420,12 +422,12 @@ async fn fake_cluster_leader_change_preserves_cursor_lease_and_attempt() {
     let scenario = Scenario::new_fake_cluster(5);
     let mut subscriber = scenario.connect_durable("client1", 25).await;
     let mut publisher = scenario.connect_durable("publisher1", 25).await;
-    subscriber.subscribe("orders.*", "sid1").await;
+    subscriber.subscribe("orders/*", "sid1").await;
     subscriber.ping_roundtrip().await;
-    publisher.publish("orders.created", b"hello").await;
+    publisher.publish("orders/created", b"hello").await;
 
     let first = subscriber.expect_msg().await;
-    assert!(first.starts_with("MSG orders.created sid1 _BROKER.ACK.durable-client1-sid1.1.1"));
+    assert!(first.starts_with("DELIVER orders/created sid1 _MORROW/ACK/durable-client1-sid1/1/1"));
     scenario.set_leader(Some(2));
     {
         let inner = scenario.broker().inner.lock().await;
@@ -438,7 +440,9 @@ async fn fake_cluster_leader_change_preserves_cursor_lease_and_attempt() {
     scenario.set_leader(Some(1));
     scenario.tick_redelivery().await;
     let redelivery = subscriber.expect_msg().await;
-    assert!(redelivery.starts_with("MSG orders.created sid1 _BROKER.ACK.durable-client1-sid1.1.2"));
+    assert!(
+        redelivery.starts_with("DELIVER orders/created sid1 _MORROW/ACK/durable-client1-sid1/1/2")
+    );
     let inner = scenario.broker().inner.lock().await;
     let consumer = &inner.consumers["durable-client1-sid1"];
     assert_eq!(consumer.in_flight[&1].attempt, 2);
@@ -451,12 +455,12 @@ async fn fake_cluster_leader_change_back_to_local_allows_writes() {
     scenario.set_leader(Some(2));
     let mut subscriber = scenario.connect_durable("client1", 25).await;
 
-    subscriber.subscribe("orders.*", "sid1").await;
+    subscriber.subscribe("orders/*", "sid1").await;
     subscriber.expect_err_contains("not leader").await;
     assert!(scenario.fake_cluster().durable_state().consumers.is_empty());
 
     scenario.set_leader(Some(1));
-    subscriber.subscribe("orders.*", "sid1").await;
+    subscriber.subscribe("orders/*", "sid1").await;
     subscriber.ping_roundtrip().await;
     assert!(
         scenario

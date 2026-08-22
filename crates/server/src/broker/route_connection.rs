@@ -2,7 +2,7 @@ use super::*;
 
 pub(super) async fn handle_route_stream<S>(
     mesh: RouteMesh,
-    broker: Broker,
+    broker: Morrow,
     stream: S,
     direction: RouteDirection,
     auth_token: String,

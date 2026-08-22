@@ -17,7 +17,7 @@ fn envelope(offset: u64, epoch: u64, payload: &[u8]) -> MessageEnvelope {
         stream: StreamId::new("orders").unwrap(),
         partition: PartitionId(0),
         offset,
-        subject: "orders.created".into(),
+        subject: "orders/created".into(),
         key: None,
         headers: Vec::new(),
         timestamp_ms: 1,

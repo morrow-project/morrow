@@ -15,7 +15,7 @@ pub(super) fn default_inbox_prefix() -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    format!("_INBOX.client.{:x}.{:x}", std::process::id(), nanos)
+    format!("_MORROW/INBOX/client/{:x}/{:x}", std::process::id(), nanos)
 }
 
 pub(super) fn inbox_prefix(client_id: &str) -> String {
@@ -23,7 +23,7 @@ pub(super) fn inbox_prefix(client_id: &str) -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    format!("_INBOX.{client_id}.{:x}", nanos)
+    format!("_MORROW/INBOX/{client_id}/{:x}", nanos)
 }
 
 pub(super) fn decode_fixed<const N: usize>(value: &str, field: &str) -> Result<[u8; N]> {

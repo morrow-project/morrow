@@ -27,7 +27,7 @@ async fn benchmark_cluster_durable_publish_latency() {
         let before = std::time::Instant::now();
         publisher
             .publish_with_qos(
-                "orders.created",
+                "orders/created",
                 None,
                 b"benchmark-payload",
                 client::protocol::AckLevel::Durable,

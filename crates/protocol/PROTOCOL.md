@@ -1,11 +1,11 @@
-# Broker Protocol
+# Morrow Protocol
 
-This document describes the public TCP protocol implemented by this broker.
+This document describes the public TCP protocol implemented by Morrow.
 It is intended to be sufficient to implement a client without using the Rust
 client crate.
 
-The protocol is NATS-style and line oriented. Commands and control frames are
-UTF-8 text lines terminated by `\r\n`. For compatibility, received command
+The protocol is Morrow-style and line oriented. Commands and control frames are
+UTF-8 text lines terminated by `\r\n`. For line-ending tolerance, received command
 lines ending in `\n` are also accepted. Frames that carry a payload include a
 decimal byte length in the protocol line, followed by exactly that many payload
 bytes and a trailing `\r\n`.
@@ -17,7 +17,7 @@ payload bodies.
 1. The client opens a TCP connection to the broker.
 2. If the listener is TLS-enabled, the TLS handshake happens first.
 3. The server immediately sends one `INFO` frame.
-4. The client sends `CONNECT <json>`.
+4. The client sends `CONN <json>`.
 5. The client may then use the commands supported by its negotiated protocol
    version. Version 1 supports the original push/pub-sub surface. Version 2
    additionally supports `CONSUMER`, `FETCH`, `ACK`, `NACK`, `EXTEND`, and
@@ -47,47 +47,45 @@ whitespace, and must not start with `_`.
 
 ### Publish Subjects
 
-Publish subjects are concrete dot-separated tokens:
+Publish subjects are concrete slash-separated path segments:
 
 ```text
-orders.created
-service.echo
-_INBOX.client1.1
+orders/created
+service/echo
+_MORROW/INBOX/client1/1
 ```
 
-A publish subject is invalid if it is empty, starts or ends with `.`, contains
-an empty token, contains whitespace, or contains `*` or `>`.
+A publish subject is invalid if it is empty, starts or ends with `/`, contains
+an empty segment, contains whitespace, or contains `*` or `**`.
 
-Subjects under `_BROKER.` are reserved. Publishing to `_BROKER.ACK...` is the
-ACK mechanism. Publishing to any other `_BROKER.*` subject is rejected.
-When authentication is enabled, an ACK publish is accepted only from an active
-member of the durable consumer named in that ACK subject.
+Subjects under `_MORROW/` are reserved. ACKs use the explicit `ACK` command;
+publishing to `_MORROW/ACK/...` is rejected. Publishing to any other reserved
+path is also rejected, except for request/reply inbox delivery.
 
 ### Subscription Subjects
 
-Subscription subjects use the same dot-token form and additionally support:
+Subscription subjects use the same slash-segment form and additionally support:
 
-- `*` to match exactly one token.
-- `>` to match the remaining tail and only when it is the final token.
+- `*` to match exactly one segment.
+- `**` to match the remaining descendant path and only when it is final.
 
 Examples:
 
 ```text
-orders.*
-orders.>
->
-_INBOX.client1.>
+orders/*
+orders/**
+_MORROW/INBOX/client1/**
 ```
 
-When authentication is enabled, `_INBOX.*` publish and subscribe subjects are
-scoped to the authenticated client prefix: `_INBOX.<client_id>...`.
+When authentication is enabled, `_MORROW/INBOX/*` publish and subscribe subjects are
+scoped to the authenticated client prefix: `_MORROW/INBOX/<client_id>/...`.
 
 Invalid examples:
 
 ```text
 orders..created
 orders.foo*
-orders.>.created
+orders/**.created
 ```
 
 ## Server Frames
@@ -105,13 +103,13 @@ INFO <json>\r\n
 Example without auth:
 
 ```text
-INFO {"server_id":"broker","server_name":"broker","version":"0.1.0","proto":2,"protocol_versions":[1,2],"max_payload":1048576,"auth_required":false,"tls_required":false}
+INFO {"server_id":"morrow","server_name":"Morrow","version":"0.1.0","proto":2,"protocol_versions":[1,2],"max_payload":1048576,"auth_required":false,"tls_required":false}
 ```
 
 Example with auth:
 
 ```text
-INFO {"server_id":"broker","server_name":"broker","version":"0.1.0","proto":2,"protocol_versions":[1,2],"max_payload":1048576,"nonce":"64-hex-character-nonce","auth_required":true,"tls_required":false}
+INFO {"server_id":"morrow","server_name":"Morrow","version":"0.1.0","proto":2,"protocol_versions":[1,2],"max_payload":1048576,"nonce":"64-hex-character-nonce","auth_required":true,"tls_required":false}
 ```
 
 Fields:
@@ -121,7 +119,7 @@ Fields:
 - `server_name`: server display name, currently `"broker"`.
 - `version`: broker crate version.
 - `proto`: highest protocol version, currently `2`.
-- `protocol_versions`: versions accepted in `CONNECT`, currently `[1,2]`.
+- `protocol_versions`: versions accepted in `CONN`, currently `[1,2]`.
 - `max_payload`: maximum accepted `PUB` payload bytes for this connection.
 - `auth_required`: boolean.
 - `nonce`: present when `auth_required` is true.
@@ -149,7 +147,7 @@ Verbose success response.
 
 The server sends `+OK` only when verbose mode is enabled for the connection.
 Verbose mode is enabled when either the server config has `verbose: true` or the
-client sends `CONNECT {"verbose":true}`.
+client sends `CONN {"verbose":true}`.
 
 ### P-ACK
 
@@ -167,7 +165,7 @@ also includes its stream-owned position and the partitioning and leader epochs
 under which it was appended. `seq` remains a transitional consumer-ACK identity;
 stream offsets are authoritative within each partition.
 
-### C-OK, D-OK, BATCH, and DMSG
+### C-OK, D-OK, BATCH, and DDELIVER
 
 Version 2 consumer lifecycle operations return:
 
@@ -187,7 +185,7 @@ requested fetch byte limit.
 
 ```text
 BATCH <consumer-name> <messages> <bytes>\r\n
-DMSG <consumer-name> <subject> <reply-to-or-> <stream> <partition> <offset> <key-hex-or-> <timestamp-ms> <attempt> <lease-deadline-ms> <seq> <delivery-id> <headers-len> <total-len>\r\n
+DDELIVER <consumer-name> <subject> <reply-to-or-> <stream> <partition> <offset> <key-hex-or-> <timestamp-ms> <attempt> <lease-deadline-ms> <seq> <delivery-id> <headers-len> <total-len>\r\n
 <headers><payload>\r\n
 ```
 
@@ -195,9 +193,9 @@ The `(consumer-name, seq, delivery-id)` tuple is the ACK identity. The stream,
 partition, and offset identify the immutable stored record. `key-hex-or-`
 preserves the opaque partition key as lowercase hex or uses `-` when absent;
 `timestamp-ms` is the immutable append timestamp. `reply-to-or-` is the
-application reply subject or `-`; the header block uses the same NATS/1.0 format
-as `HMSG`. Version 2 durable push `HMSG` frames expose the same fields as
-`Broker-Key-Hex` and `Broker-Timestamp` headers. Clients must reject invalid
+application reply subject or `-`; the header block uses the same MORROW/1.0 format
+as `HDELIVER`. Version 2 durable push `HDELIVER` frames expose the same fields as
+`Morrow-Key-Hex` and `Morrow-Timestamp` headers. Clients must reject invalid
 lengths or a `total-len` above their configured payload limit before allocating
 or reading the body.
 
@@ -212,19 +210,19 @@ Error response.
 The message is human-readable. Single quotes are removed from emitted error
 messages.
 
-### MSG
+### DELIVER
 
 Message delivery without protocol headers.
 
 Formats:
 
 ```text
-MSG <subject> <sid> <size>\r\n
+DELIVER <subject> <sid> <size>\r\n
 <payload>\r\n
 ```
 
 ```text
-MSG <subject> <sid> <reply-to> <size>\r\n
+DELIVER <subject> <sid> <reply-to> <size>\r\n
 <payload>\r\n
 ```
 
@@ -232,44 +230,42 @@ Fields:
 
 - `subject`: the publish subject.
 - `sid`: the subscriber sid that matched the message.
-- `reply-to`: optional reply subject. For durable messages without an original
-  reply subject, the broker uses this slot for the ACK subject.
+- `reply-to`: optional application reply subject. Durable ACK identity is
+  carried separately by `Morrow-Ack` or by the explicit `ACK` command.
 - `size`: decimal payload byte length.
 - `payload`: exactly `size` bytes, followed by `\r\n`.
 
 Example durable delivery:
 
 ```text
-MSG orders.created sid1 _BROKER.ACK.durable-client1-sid1.1.1 5\r\n
+DELIVER orders/created sid1 _MORROW/INBOX/client1/1 5\r\n
 hello\r\n
 ```
 
 Example transient delivery:
 
 ```text
-MSG orders.created sid1 5\r\n
+DELIVER orders/created sid1 5\r\n
 hello\r\n
 ```
 
 Client behavior:
 
-- If the optional `reply-to` starts with a valid broker ACK subject, treat it as
-  `ack_subject`, not as an application reply subject.
-- Otherwise, expose it as the application reply subject.
+- Expose `reply-to` as the application reply subject when present.
 
-### HMSG
+### HDELIVER
 
-Message delivery with NATS-style headers.
+Message delivery with Morrow-style headers.
 
 Formats:
 
 ```text
-HMSG <subject> <sid> <headers-len> <total-len>\r\n
+HDELIVER <subject> <sid> <headers-len> <total-len>\r\n
 <headers><payload>\r\n
 ```
 
 ```text
-HMSG <subject> <sid> <reply-to> <headers-len> <total-len>\r\n
+HDELIVER <subject> <sid> <reply-to> <headers-len> <total-len>\r\n
 <headers><payload>\r\n
 ```
 
@@ -280,26 +276,25 @@ Fields:
 - `reply-to`: optional application reply subject.
 - `headers-len`: decimal byte length of the header block.
 - `total-len`: decimal byte length of header block plus payload.
-- `headers`: a UTF-8 header block that starts with `NATS/1.0\r\n`, has
+- `headers`: a UTF-8 header block that starts with `MORROW/1.0\r\n`, has
   zero or more `Name: Value\r\n` lines, and ends with a blank `\r\n`.
 - `payload`: `total-len - headers-len` bytes.
 
 The complete `<headers><payload>` section is followed by `\r\n`.
 
-Durable deliveries with an application reply subject use `HMSG` so the reply
-subject can remain available while the durable ACK subject is carried in the
-`Broker-Ack` header.
-Version 2 push deliveries always use `HMSG` and additionally carry
-`Broker-Stream`, `Broker-Partition`, `Broker-Offset`, `Broker-Attempt`, and
-`Broker-Lease-Deadline`. Compatibility push therefore exposes the same durable
-position, attempt, deadline, and fenced ACK identity as `DMSG`.
+Durable deliveries with an application reply subject use `HDELIVER`; the durable
+ACK is always sent with the explicit `ACK` command. Version 2 push deliveries
+always use `HDELIVER` and additionally carry
+`Morrow-Stream`, `Morrow-Partition`, `Morrow-Offset`, `Morrow-Attempt`, and
+`Morrow-Lease-Deadline`. Bounded push therefore exposes the same durable
+position, attempt, deadline, and fenced ACK identity as `DDELIVER`.
 
 Example:
 
 ```text
-HMSG service.echo sid1 _INBOX.client1.1 65 70\r\n
-NATS/1.0\r\n
-Broker-Ack: _BROKER.ACK.durable-responder1-sid1.1.1\r\n
+HDELIVER service/echo sid1 _MORROW/INBOX/client1/1 65 70\r\n
+MORROW/1.0\r\n
+Morrow-Ack: _MORROW/ACK/durable-responder1-sid1/1/1\r\n
 \r\n
 hello\r\n
 ```
@@ -307,25 +302,25 @@ hello\r\n
 Client behavior:
 
 - Parse header names case-insensitively.
-- If a `Broker-Ack` header is present, expose it as the durable ACK subject.
+- If a `Morrow-Ack` header is present, expose it as the durable ACK identity.
 - Preserve other headers for application use.
 
 ## Client Commands
 
-### CONNECT
+### CONN
 
 Identifies and configures the connection.
 
 Format:
 
 ```text
-CONNECT <json>\r\n
+CONN <json>\r\n
 ```
 
-`CONNECT` with no payload is accepted and treated as `CONNECT {}`:
+`CONN` with no payload is accepted and treated as `CONN {}`:
 
 ```text
-CONNECT\r\n
+CONN\r\n
 ```
 
 Supported JSON fields:
@@ -349,7 +344,7 @@ Field types are strict:
 - `signature`: string.
 - `ack_timeout_ms`: unsigned integer.
 - `max_in_flight`: unsigned integer that fits in the server platform `usize`.
-- `protocol_version`: unsigned integer. Omission selects compatibility version
+- `protocol_version`: unsigned integer. Omission selects version
   `1`; pull consumers and explicit delivery controls require version `2`.
 
 Unknown fields are ignored for forward compatibility.
@@ -367,8 +362,8 @@ Authentication:
 - Authenticated connections use the authenticated client ID as the durable
   identity.
 - Servers may configure per-client publish and subscribe allowlists. Allowlist
-  entries are subject patterns using the same `*` and `>` wildcard rules as
-  subscriptions. Broker ack subjects and `_INBOX.*` request/reply subjects are
+  entries are subject patterns using the same `*` and `**` wildcard rules as
+  subscriptions. ACK identities and `_MORROW/INBOX/*` request/reply subjects are
   allowed for their protocol roles.
 
 Durable settings:
@@ -384,25 +379,25 @@ Examples:
 Transient client:
 
 ```text
-CONNECT {}\r\n
+CONN {}\r\n
 ```
 
 Durable client without auth:
 
 ```text
-CONNECT {"durable_id":"client1","verbose":true,"ack_timeout_ms":30000,"max_in_flight":1024}\r\n
+CONN {"durable_id":"client1","verbose":true,"ack_timeout_ms":30000,"max_in_flight":1024}\r\n
 ```
 
 Version 2 durable client:
 
 ```text
-CONNECT {"durable_id":"client1","protocol_version":2,"ack_timeout_ms":30000,"max_in_flight":1024}\r\n
+CONN {"durable_id":"client1","protocol_version":2,"ack_timeout_ms":30000,"max_in_flight":1024}\r\n
 ```
 
 Authenticated durable client:
 
 ```text
-CONNECT {"client_id":"client1","signature":"128-hex-character-ed25519-signature","verbose":true}\r\n
+CONN {"client_id":"client1","signature":"128-hex-character-ed25519-signature","verbose":true}\r\n
 ```
 
 ### PING
@@ -450,7 +445,7 @@ SUB <subject> <queue> <sid> <start>\r\n
 
 Fields:
 
-- `subject`: subscription subject, including optional `*` or `>`.
+- `subject`: subscription subject, including optional `*` or `**`.
 - `queue`: optional queue group identifier.
 - `sid`: subscription identifier scoped to this connection.
 - `start`: optional durable starting position: `@latest` (the default),
@@ -460,11 +455,11 @@ Fields:
 Behavior:
 
 - On a non-durable connection, `SUB` creates a live transient subscription.
-- On a durable connection, non-`_INBOX.*` `SUB` creates or attaches a durable
+- On a durable connection, non-`_MORROW/INBOX/*` `SUB` creates or attaches a durable
   consumer.
-- `_INBOX.*` subscriptions are always transient, even on durable connections.
+- `_MORROW/INBOX/*` subscriptions are always transient, even on durable connections.
 - Queue groups are supported for durable non-inbox subscriptions.
-- Transient subscriptions, including `_INBOX.*`, do not support queue groups.
+- Transient subscriptions, including `_MORROW/INBOX/*`, do not support queue groups.
 - A start position initializes a new durable consumer. Attaching to an existing
   durable consumer resumes its persisted committed cursor instead.
 
@@ -478,19 +473,19 @@ Durable consumer identity:
 Examples:
 
 ```text
-SUB orders.* sid1\r\n
+SUB orders/* sid1\r\n
 ```
 
 ```text
-SUB orders.* workers worker1\r\n
+SUB orders/* workers worker1\r\n
 ```
 
 ```text
-SUB orders.* sid1 @earliest\r\n
+SUB orders/* sid1 @earliest\r\n
 ```
 
 ```text
-SUB _INBOX.client1.1 inbox1\r\n
+SUB _MORROW/INBOX/client1/1 inbox1\r\n
 ```
 
 ### UNSUB
@@ -554,7 +549,7 @@ FETCH <consumer-name> <max-messages> <max-bytes> <max-wait-ms>\r\n
 
 Both limits must be positive. `max-messages` cannot exceed the consumer's
 `max_in_flight`; the broker also caps the requested byte capacity. The response
-is a `BATCH`, including `BATCH ... 0 0` when the maximum wait expires. An empty
+is a `BATCH`, including `BATCH /... 0 0` when the maximum wait expires. An empty
 fetch creates no delivery lease and does not move a consumer cursor.
 
 ### ACK, NACK, and EXTEND
@@ -573,7 +568,7 @@ state.
 
 ### CREDIT
 
-Version 2 durable `SUB` is a compatibility push facade and starts with zero
+Version 2 durable `SUB` is a bounded push mode and starts with zero
 credit. Grant bounded message and payload-byte credit explicitly:
 
 ```text
@@ -582,7 +577,7 @@ CREDIT <sid> <messages> <bytes>\r\n
 
 Credits are capped by `max_in_flight` and the broker payload limit, consumed on
 delivery, and held only with the live subscription member. Version 1 retains
-its legacy implicit bounded push credit. Transient and `_INBOX.*` subscriptions
+explicit bounded push credit. Transient and `_MORROW/INBOX/*` subscriptions
 remain live-only and do not use `CREDIT`.
 
 ### PUB
@@ -617,30 +612,30 @@ The `size` must be less than or equal to `max_payload` from `INFO`.
 Examples:
 
 ```text
-PUB orders.created 5\r\n
+PUB orders/created 5\r\n
 hello\r\n
 ```
 
 ```text
-PUB service.echo _INBOX.client1.1 5\r\n
+PUB service/echo _MORROW/INBOX/client1/1 5\r\n
 hello\r\n
 ```
 
 Verbose response:
 
-- If verbose mode is enabled, successful non-ACK publishes receive `+OK`.
-- ACK publishes also receive `+OK` when verbose mode is enabled.
+- If verbose mode is enabled, successful publishes receive `+OK`.
+- Explicit `ACK` commands return `D-OK` when the delivery identity is valid.
 
 ### HPUB
 
-Header publish uses NATS-style headers and may request a per-message producer
+Header publish uses Morrow-style headers and may request a per-message producer
 acknowledgement:
 
 ```text
 HPUB <subject> <headers-len> <total-len>\r\n
-NATS/1.0\r\n
-Broker-QoS: 1\r\n
-Broker-Msg-Id: msg-123\r\n
+MORROW/1.0\r\n
+Morrow-QoS: 1\r\n
+Morrow-Msg-Id: msg-123\r\n
 \r\n
 hello\r\n
 ```
@@ -649,45 +644,43 @@ With reply subject:
 
 ```text
 HPUB <subject> <reply-to> <headers-len> <total-len>\r\n
-...
+/...
 ```
 
 QoS headers are producer metadata and are not forwarded to subscribers.
 
-- `Broker-QoS`: optional numeric value.
+- `Morrow-QoS`: optional numeric value.
   - `0`: accepted after validation, authorization, transient delivery
     preparation, and route forwarding.
   - `1`: durable after local durable append or a partition-replica quorum append.
   - `2`: high durability after local flush or a partition-replica quorum fsync.
   - `3`: cluster durable after a partition-replica quorum append and payload-free
     metadata high-watermark commit; rejected when clustering is disabled.
-- `Broker-Msg-Id`: required when `Broker-QoS` is present. It must be non-empty,
+- `Morrow-Msg-Id`: required when `Morrow-QoS` is present. It must be non-empty,
   at most 128 bytes, and contain no whitespace.
-- `Broker-Key`: optional opaque UTF-8 partition key. An explicit key takes
+- `Morrow-Key`: optional opaque UTF-8 partition key. An explicit key takes
   precedence over the stream's configured subject or fallback strategy.
 
 Other HPUB headers are application headers. The broker retains them in the
-immutable stream envelope and returns them on durable and live `HMSG`
-deliveries. `Broker-QoS`, `Broker-Msg-Id`, and `Broker-Key` are broker metadata
+immutable stream envelope and returns them on durable and live `HDELIVER`
+deliveries. `Morrow-QoS`, `Morrow-Msg-Id`, and `Morrow-Key` are broker metadata
 and are not forwarded to subscribers.
 
 Successful QoS publishes receive `P-ACK` and do not also receive verbose `+OK`.
 QoS levels 1 through 3 require a configured stream binding for the publish
-subject; an unbound subject receives `-ERR 'NO_DURABLE_BINDING ...'`. Level 0
+subject; an unbound subject receives `-ERR 'NO_DURABLE_BINDING /...'`. Level 0
 may succeed without a stream binding and reports `retained=false`. Other
 failures receive `-ERR`.
 
 ## Durable ACKs
 
-Version 2 pull deliveries use the explicit `ACK`, `NACK`, and `EXTEND` commands
-above. Compatibility push deliveries may be acknowledged by publishing an
-empty or non-empty payload to the ACK subject supplied by the broker; empty ACK
-payloads remain valid.
+All durable deliveries use the explicit `ACK`, `NACK`, and `EXTEND` commands
+above. Publishing to an ACK subject is not a valid acknowledgement operation.
 
 ACK subject format:
 
 ```text
-_BROKER.ACK.<consumer-id>.<seq>.<delivery-id>
+_MORROW/ACK/<consumer-id>/<seq>/<delivery-id>
 ```
 
 Fields:
@@ -699,12 +692,11 @@ Fields:
 ACK example:
 
 ```text
-PUB _BROKER.ACK.durable-client1-sid1.1.1 0\r\n
-\r\n
+ACK durable-client1-sid1 1 1\r\n
 ```
 
 Only the current valid delivery attempt is ACKed. Late, duplicate, malformed,
-or unknown ACK subjects are ignored.
+or unknown delivery identities are rejected.
 
 If a durable delivery is not ACKed before `ack_timeout_ms`, it becomes eligible
 for redelivery to an active member of the same durable consumer.
@@ -713,7 +705,7 @@ for redelivery to an active member of the same durable consumer.
 
 Request/reply is built from `SUB` and `PUB`:
 
-1. The requester subscribes to a unique `_INBOX.*` subject.
+1. The requester subscribes to a unique `_MORROW/INBOX/*` subject.
 2. The requester publishes to the service subject with the inbox as `reply-to`.
 3. A responder receives the request.
 4. The responder publishes the response to the inbox.
@@ -721,19 +713,19 @@ Request/reply is built from `SUB` and `PUB`:
 Example requester:
 
 ```text
-CONNECT {}\r\n
-SUB _INBOX.client1.1 inbox1\r\n
+CONN {}\r\n
+SUB _MORROW/INBOX/client1/1 inbox1\r\n
 PING\r\n
-PUB service.echo _INBOX.client1.1 5\r\n
+PUB service/echo _MORROW/INBOX/client1/1 5\r\n
 hello\r\n
 ```
 
 Example durable responder delivery:
 
 ```text
-HMSG service.echo sid1 _INBOX.client1.1 65 70\r\n
-NATS/1.0\r\n
-Broker-Ack: _BROKER.ACK.durable-responder1-sid1.1.1\r\n
+HDELIVER service/echo sid1 _MORROW/INBOX/client1/1 65 70\r\n
+MORROW/1.0\r\n
+Morrow-Ack: _MORROW/ACK/durable-responder1-sid1/1/1\r\n
 \r\n
 hello\r\n
 ```
@@ -741,15 +733,14 @@ hello\r\n
 Example response and ACK:
 
 ```text
-PUB _INBOX.client1.1 5\r\n
+PUB _MORROW/INBOX/client1/1 5\r\n
 world\r\n
-PUB _BROKER.ACK.durable-responder1-sid1.1.1 0\r\n
-\r\n
+ACK durable-responder1-sid1 1 1\r\n
 ```
 
 Inbox behavior:
 
-- `_INBOX.*` subscriptions are transient and live-only.
+- `_MORROW/INBOX/*` subscriptions are transient and live-only.
 - Inbox messages are not retained when there is no matching live transient
   subscription.
 - In clustered route-mesh mode, transient inbox interest is propagated so
@@ -782,8 +773,8 @@ Durable subscriptions:
   subscription response.
 - Do not control whether new publications are retained; adding or removing a
   consumer does not change a stream's append behavior.
-- Deliveries include an ACK subject either as the `MSG` reply slot or as the
-  `Broker-Ack` header in `HMSG`.
+- Deliveries include an ACK subject either as the `DELIVER` reply slot or as the
+  `Morrow-Ack` header in `HDELIVER`.
 - Unacked messages are redelivered after `ack_timeout_ms`.
 - Version 2 pull fetches are the primary durable API. Version 2 push delivery
   requires explicit message and byte credit; version 1 keeps the bounded legacy
@@ -795,7 +786,7 @@ Stream retention:
   once to its primary stream, whether or not a durable consumer exists.
 - A publication without a stream binding remains live-only unless durable QoS
   was requested, in which case it is rejected as described above.
-- `_INBOX.*` publications always remain transient.
+- `_MORROW/INBOX/*` publications always remain transient.
 - Live transient delivery is attempted before the durable append or cluster
   commit. A later durability failure can therefore follow a live delivery.
 
@@ -813,7 +804,7 @@ Partition storage:
   not new stream payloads. On first startup after upgrading, transitional
   stream-owned publish records from the previous WAL format are copied into
   partition history and replaced by references at checkpoint. Missing stream
-  configuration or a dangling reference fails startup with a compatibility
+  configuration or a dangling reference fails startup with a migration
   error.
 
 Queue durable subscriptions:
@@ -829,14 +820,14 @@ Clients should expect `-ERR` for:
 - Unsupported commands.
 - Empty protocol lines.
 - Non-UTF-8 command lines.
-- Malformed `CONNECT` JSON.
-- Wrong JSON types for supported `CONNECT` fields.
+- Malformed `CONN` JSON.
+- Wrong JSON types for supported `CONN` fields.
 - Missing or extra command arguments.
 - Non-integer payload lengths or `UNSUB` counts.
 - Payload lengths greater than `max_payload`.
 - Payloads not followed by `\r\n`.
 - Invalid publish subjects, subscription subjects, identifiers, or queue usage.
-- Reserved non-ACK `_BROKER.*` publishes.
+- Reserved non-ACK `_MORROW/*` publishes.
 
 The server accepts command lines terminated by `\n` or `\r\n`, but emitted
 server frames always use `\r\n`.
@@ -844,31 +835,30 @@ server frames always use `\r\n`.
 ## Minimal Durable Client Flow
 
 ```text
-S: INFO {"server_id":"broker","server_name":"broker","version":"0.1.0","proto":2,"protocol_versions":[1,2],"max_payload":1048576,"auth_required":false,"tls_required":false}\r\n
-C: CONNECT {"durable_id":"client1","ack_timeout_ms":30000,"max_in_flight":1024}\r\n
-C: SUB orders.* sid1\r\n
+S: INFO {"server_id":"morrow","server_name":"Morrow","version":"0.1.0","proto":2,"protocol_versions":[1,2],"max_payload":1048576,"auth_required":false,"tls_required":false}\r\n
+C: CONN {"durable_id":"client1","ack_timeout_ms":30000,"max_in_flight":1024}\r\n
+C: SUB orders/* sid1\r\n
 C: PING\r\n
 S: PONG\r\n
 
-C: PUB orders.created 5\r\n
+C: PUB orders/created 5\r\n
 C: hello\r\n
 
-S: MSG orders.created sid1 _BROKER.ACK.durable-client1-sid1.1.1 5\r\n
+S: DELIVER orders/created sid1 _MORROW/ACK/durable-client1-sid1/1/1 5\r\n
 S: hello\r\n
 
-C: PUB _BROKER.ACK.durable-client1-sid1.1.1 0\r\n
-C: \r\n
+C: ACK durable-client1-sid1 1 1\r\n
 ```
 
 ## Minimal Transient Client Flow
 
 ```text
-S: INFO {"server_id":"broker","server_name":"broker","version":"0.1.0","proto":2,"protocol_versions":[1,2],"max_payload":1048576,"auth_required":false,"tls_required":false}\r\n
-C: CONNECT {}\r\n
-C: SUB orders.* sid1\r\n
+S: INFO {"server_id":"morrow","server_name":"Morrow","version":"0.1.0","proto":2,"protocol_versions":[1,2],"max_payload":1048576,"auth_required":false,"tls_required":false}\r\n
+C: CONN {}\r\n
+C: SUB orders/* sid1\r\n
 C: PING\r\n
 S: PONG\r\n
 
-S: MSG orders.created sid1 5\r\n
+S: DELIVER orders/created sid1 5\r\n
 S: hello\r\n
 ```

@@ -1,12 +1,10 @@
 pub fn validate_subject(subject: &str) -> bool {
-    if subject.is_empty() || subject.starts_with('.') || subject.ends_with('.') {
+    if subject.is_empty() || subject.starts_with('/') || subject.ends_with('/') {
         return false;
     }
 
-    subject.split('.').all(|token| {
+    subject.split('/').all(|token| {
         !token.is_empty()
-            && token != "*"
-            && token != ">"
             && !token.contains('*')
             && !token.contains('>')
             && !token.chars().any(char::is_whitespace)
@@ -14,23 +12,19 @@ pub fn validate_subject(subject: &str) -> bool {
 }
 
 pub fn validate_subscription(pattern: &str) -> bool {
-    if pattern.is_empty() || pattern.starts_with('.') || pattern.ends_with('.') {
+    if pattern.is_empty() || pattern.starts_with('/') || pattern.ends_with('/') {
         return false;
     }
 
-    let mut saw_tail = false;
-    for (idx, token) in pattern.split('.').enumerate() {
-        if token.is_empty() || saw_tail || token.chars().any(char::is_whitespace) {
+    for (idx, token) in pattern.split('/').enumerate() {
+        if token.is_empty() || token.chars().any(char::is_whitespace) {
             return false;
         }
-        if token == ">" {
-            saw_tail = true;
-            if idx == 0 && pattern != ">" {
+        if token == "**" {
+            if idx + 1 != pattern.split('/').count() {
                 return false;
             }
-            continue;
-        }
-        if token != "*" && (token.contains('*') || token.contains('>')) {
+        } else if token != "*" && (token.contains('*') || token.contains('>')) {
             return false;
         }
     }
@@ -38,12 +32,12 @@ pub fn validate_subscription(pattern: &str) -> bool {
 }
 
 pub fn matches(pattern: &str, subject: &str) -> bool {
-    let mut pattern_tokens = pattern.split('.');
-    let mut subject_tokens = subject.split('.');
+    let mut pattern_tokens = pattern.split('/');
+    let mut subject_tokens = subject.split('/');
 
     loop {
         match (pattern_tokens.next(), subject_tokens.next()) {
-            (Some(">"), _) => return true,
+            (Some("**"), _) => return true,
             (Some("*"), Some(_)) => {}
             (Some(pattern), Some(subject)) if pattern == subject => {}
             (None, None) => return true,
@@ -90,9 +84,9 @@ impl<T: Clone + Ord> SubjectTrie<T> {
             return false;
         }
         let mut node = &mut self.root;
-        for token in pattern.split('.') {
+        for token in pattern.split('/') {
             match token {
-                ">" => return node.tail.insert(value),
+                "**" => return node.tail.insert(value),
                 "*" => node = node.wildcard.get_or_insert_with(Default::default),
                 literal => node = node.literals.entry(literal.to_string()).or_default(),
             }
@@ -105,9 +99,9 @@ impl<T: Clone + Ord> SubjectTrie<T> {
             return false;
         }
         let mut node = &mut self.root;
-        for token in pattern.split('.') {
+        for token in pattern.split('/') {
             match token {
-                ">" => return node.tail.remove(value),
+                "**" => return node.tail.remove(value),
                 "*" => {
                     let Some(wildcard) = node.wildcard.as_mut() else {
                         return false;
@@ -129,7 +123,7 @@ impl<T: Clone + Ord> SubjectTrie<T> {
         if !validate_subject(subject) {
             return Vec::new();
         }
-        let tokens = subject.split('.').collect::<Vec<_>>();
+        let tokens = subject.split('/').collect::<Vec<_>>();
         let mut matches = BTreeSet::new();
         collect_matches(&self.root, &tokens, 0, &mut matches);
         matches.into_iter().collect()
@@ -139,7 +133,7 @@ impl<T: Clone + Ord> SubjectTrie<T> {
         if !validate_subject(subject) {
             return false;
         }
-        matches_node(&self.root, &subject.split('.').collect::<Vec<_>>(), 0)
+        matches_node(&self.root, &subject.split('/').collect::<Vec<_>>(), 0)
     }
 }
 
@@ -184,29 +178,29 @@ mod tests {
 
     #[test]
     fn validates_publish_subjects() {
-        assert!(validate_subject("orders.created"));
-        assert!(!validate_subject("orders.*"));
-        assert!(!validate_subject(".orders"));
-        assert!(!validate_subject("orders."));
-        assert!(!validate_subject("orders..created"));
+        assert!(validate_subject("orders/created"));
+        assert!(!validate_subject("orders/*"));
+        assert!(!validate_subject("/orders"));
+        assert!(!validate_subject("orders/"));
+        assert!(!validate_subject("orders//created"));
     }
 
     #[test]
     fn validates_subscription_patterns() {
-        assert!(validate_subscription("orders.*"));
-        assert!(validate_subscription("orders.>"));
-        assert!(validate_subscription(">"));
-        assert!(!validate_subscription("orders.>.created"));
-        assert!(!validate_subscription("orders.foo*"));
+        assert!(validate_subscription("orders/*"));
+        assert!(validate_subscription("orders/**"));
+        assert!(validate_subscription("**"));
+        assert!(!validate_subscription("orders/**/created"));
+        assert!(!validate_subscription("orders/foo*"));
     }
 
     #[test]
-    fn matches_nats_wildcards() {
-        assert!(matches("orders.*", "orders.created"));
-        assert!(!matches("orders.*", "orders.us.created"));
-        assert!(matches("orders.>", "orders.us.created"));
-        assert!(matches(">", "anything"));
-        assert!(!matches("orders.created", "orders.deleted"));
+    fn matches_morrow_path_wildcards() {
+        assert!(matches("orders/*", "orders/created"));
+        assert!(!matches("orders/*", "orders/us/created"));
+        assert!(matches("orders/**", "orders/us/created"));
+        assert!(matches("**", "anything"));
+        assert!(!matches("orders/created", "orders/deleted"));
     }
 
     #[test]
@@ -215,14 +209,14 @@ mod tests {
         let mut patterns = Vec::new();
         for first in literals {
             patterns.push(first.to_string());
-            patterns.push(format!("{first}.*"));
-            patterns.push(format!("{first}.>"));
+            patterns.push(format!("{first}/*"));
+            patterns.push(format!("{first}/**"));
             for second in literals {
-                patterns.push(format!("{first}.{second}"));
-                patterns.push(format!("{first}.{second}.*"));
+                patterns.push(format!("{first}/{second}"));
+                patterns.push(format!("{first}/{second}/*"));
             }
         }
-        patterns.push(">".to_string());
+        patterns.push("**".to_string());
         let mut trie = SubjectTrie::default();
         for (id, pattern) in patterns.iter().enumerate() {
             assert!(trie.insert(pattern, id));
@@ -230,8 +224,8 @@ mod tests {
         for first in literals {
             for subject in [
                 first.to_string(),
-                format!("{first}.a"),
-                format!("{first}.b.c"),
+                format!("{first}/a"),
+                format!("{first}/b/c"),
             ] {
                 let expected = patterns
                     .iter()
@@ -247,11 +241,11 @@ mod tests {
     #[test]
     fn trie_removal_preserves_other_interests() {
         let mut trie = SubjectTrie::default();
-        trie.insert("orders.*", 1);
-        trie.insert("orders.>", 2);
-        assert!(trie.remove("orders.*", &1));
-        assert_eq!(trie.matching("orders.created"), vec![2]);
-        assert_eq!(trie.matching("orders.eu.created"), vec![2]);
+        trie.insert("orders/*", 1);
+        trie.insert("orders/**", 2);
+        assert!(trie.remove("orders/*", &1));
+        assert_eq!(trie.matching("orders/created"), vec![2]);
+        assert_eq!(trie.matching("orders/eu/created"), vec![2]);
     }
 
     #[test]
@@ -264,8 +258,8 @@ mod tests {
         for id in 0..10_000usize {
             let pattern = match id % 3 {
                 0 => format!("tenant.{id}.event"),
-                1 => format!("tenant.*.event{id}"),
-                _ => format!("tenant.{id}.>"),
+                1 => format!("tenant/*/event{id}"),
+                _ => format!("tenant.{id}/**"),
             };
             trie.insert(&pattern, id);
             patterns.push(pattern);

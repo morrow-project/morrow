@@ -103,7 +103,7 @@ impl AckLevel {
             "1" => Ok(Self::Durable),
             "2" => Ok(Self::HighDurability),
             "3" => Ok(Self::ClusterDurable),
-            _ => Err(ProtocolError("Broker-QoS must be 0, 1, 2, or 3".into())),
+            _ => Err(ProtocolError("Morrow-QoS must be 0, 1, 2, or 3".into())),
         }
     }
 }
@@ -150,7 +150,7 @@ pub async fn read_command<R: AsyncBufRead + Unpin>(
     };
 
     match op.to_ascii_uppercase().as_str() {
-        "CONNECT" => {
+        "CONN" => {
             let payload = line
                 .strip_prefix(op)
                 .map(str::trim)
@@ -212,7 +212,7 @@ async fn read_control_line<R: AsyncBufRead + Unpin>(
 
 fn parse_connect(payload: &str) -> Result<Command, ProtocolError> {
     let value: serde_json::Value = serde_json::from_str(payload)
-        .map_err(|err| ProtocolError(format!("invalid CONNECT payload: {err}")))?;
+        .map_err(|err| ProtocolError(format!("invalid CONN payload: {err}")))?;
     let verbose = get_bool(&value, "verbose")?.unwrap_or(false);
     let durable_id = get_string(&value, "durable_id")?.map(str::to_string);
     if let Some(durable_id) = &durable_id {
@@ -257,7 +257,7 @@ fn parse_connect_auth(value: &serde_json::Value) -> Result<Option<ConnectAuth>, 
         })),
         (None, None) => Ok(None),
         _ => Err(ProtocolError(
-            "CONNECT client_id and signature must be provided together".into(),
+            "CONN client_id and signature must be provided together".into(),
         )),
     }
 }
@@ -265,9 +265,7 @@ fn parse_connect_auth(value: &serde_json::Value) -> Result<Option<ConnectAuth>, 
 fn get_bool(value: &serde_json::Value, key: &str) -> Result<Option<bool>, ProtocolError> {
     match value.get(key) {
         Some(serde_json::Value::Bool(value)) => Ok(Some(*value)),
-        Some(_) => Err(ProtocolError(format!(
-            "CONNECT field {key} must be a boolean"
-        ))),
+        Some(_) => Err(ProtocolError(format!("CONN field {key} must be a boolean"))),
         None => Ok(None),
     }
 }
@@ -278,9 +276,7 @@ fn get_string<'a>(
 ) -> Result<Option<&'a str>, ProtocolError> {
     match value.get(key) {
         Some(serde_json::Value::String(value)) => Ok(Some(value)),
-        Some(_) => Err(ProtocolError(format!(
-            "CONNECT field {key} must be a string"
-        ))),
+        Some(_) => Err(ProtocolError(format!("CONN field {key} must be a string"))),
         None => Ok(None),
     }
 }
@@ -289,12 +285,10 @@ fn get_u64(value: &serde_json::Value, key: &str) -> Result<Option<u64>, Protocol
     match value.get(key) {
         Some(serde_json::Value::Number(value)) => value
             .as_u64()
-            .ok_or_else(|| {
-                ProtocolError(format!("CONNECT field {key} must be an unsigned integer"))
-            })
+            .ok_or_else(|| ProtocolError(format!("CONN field {key} must be an unsigned integer")))
             .map(Some),
         Some(_) => Err(ProtocolError(format!(
-            "CONNECT field {key} must be an unsigned integer"
+            "CONN field {key} must be an unsigned integer"
         ))),
         None => Ok(None),
     }
@@ -473,13 +467,13 @@ async fn read_hpub<'a, R: AsyncBufRead + Unpin>(
     let payload = frame.split_off(headers_len);
     let headers = parse_headers(&frame)?;
     let ack = parse_producer_ack_request(&headers)?;
-    let key = header_value(&headers, "Broker-Key").map(|value| value.as_bytes().to_vec());
+    let key = header_value(&headers, "Morrow-Key").map(|value| value.as_bytes().to_vec());
     let headers = headers
         .into_iter()
         .filter(|(name, _)| {
-            !name.eq_ignore_ascii_case("Broker-QoS")
-                && !name.eq_ignore_ascii_case("Broker-Msg-Id")
-                && !name.eq_ignore_ascii_case("Broker-Key")
+            !name.eq_ignore_ascii_case("Morrow-QoS")
+                && !name.eq_ignore_ascii_case("Morrow-Msg-Id")
+                && !name.eq_ignore_ascii_case("Morrow-Key")
         })
         .collect();
 
@@ -504,8 +498,8 @@ fn parse_headers(bytes: &[u8]) -> Result<Vec<(String, String)>, ProtocolError> {
         .map_err(|err| ProtocolError(format!("HPUB headers are not UTF-8: {err}")))?;
     let mut lines = text.split("\r\n");
     match lines.next() {
-        Some("NATS/1.0") => {}
-        _ => return Err(ProtocolError("HPUB headers missing NATS/1.0 line".into())),
+        Some("MORROW/1.0") => {}
+        _ => return Err(ProtocolError("HPUB headers missing MORROW/1.0 line".into())),
     }
     let mut headers = Vec::new();
     for line in lines {
@@ -523,12 +517,12 @@ fn parse_headers(bytes: &[u8]) -> Result<Vec<(String, String)>, ProtocolError> {
 fn parse_producer_ack_request(
     headers: &[(String, String)],
 ) -> Result<Option<ProducerAckRequest>, ProtocolError> {
-    let Some(level) = header_value(headers, "Broker-QoS") else {
+    let Some(level) = header_value(headers, "Morrow-QoS") else {
         return Ok(None);
     };
     let level = AckLevel::parse(level)?;
-    let msg_id = header_value(headers, "Broker-Msg-Id")
-        .ok_or_else(|| ProtocolError("Broker-Msg-Id is required when Broker-QoS is set".into()))?;
+    let msg_id = header_value(headers, "Morrow-Msg-Id")
+        .ok_or_else(|| ProtocolError("Morrow-Msg-Id is required when Morrow-QoS is set".into()))?;
     validate_msg_id(msg_id)?;
     Ok(Some(ProducerAckRequest {
         level,
@@ -550,7 +544,7 @@ fn validate_msg_id(value: &str) -> Result<(), ProtocolError> {
         || value.chars().any(char::is_whitespace)
     {
         return Err(ProtocolError(
-            "Broker-Msg-Id must be non-empty, at most 128 bytes, and contain no whitespace".into(),
+            "Morrow-Msg-Id must be non-empty, at most 128 bytes, and contain no whitespace".into(),
         ));
     }
     Ok(())

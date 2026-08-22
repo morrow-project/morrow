@@ -1,6 +1,6 @@
 use super::*;
 
-impl Broker {
+impl Morrow {
     pub(super) async fn handle_command(&self, connection_id: u64, command: Command) -> Result<()> {
         match command {
             Command::Connect {
@@ -71,7 +71,7 @@ impl Broker {
                 seq,
                 delivery_id,
             } => {
-                self.control_pull_delivery(connection_id, name, seq, delivery_id, PullControl::Ack)
+                self.ack_delivery(connection_id, name, seq, delivery_id)
                     .await
             }
             Command::Nack {
@@ -174,20 +174,20 @@ impl Broker {
         let max_in_flight = max_in_flight.unwrap_or(DEFAULT_MAX_IN_FLIGHT);
         crate::broker_ensure!(
             ack_timeout_ms > 0,
-            "CONNECT ack_timeout_ms must be greater than zero"
+            "CONN ack_timeout_ms must be greater than zero"
         );
         crate::broker_ensure!(
             ack_timeout_ms <= self.config.max_ack_timeout_ms,
-            "CONNECT ack_timeout_ms exceeds server limit {}",
+            "CONN ack_timeout_ms exceeds server limit {}",
             self.config.max_ack_timeout_ms
         );
         crate::broker_ensure!(
             max_in_flight > 0,
-            "CONNECT max_in_flight must be greater than zero"
+            "CONN max_in_flight must be greater than zero"
         );
         crate::broker_ensure!(
             max_in_flight <= self.config.max_in_flight,
-            "CONNECT max_in_flight exceeds server limit {}",
+            "CONN max_in_flight exceeds server limit {}",
             self.config.max_in_flight
         );
         let protocol_version = protocol_version.unwrap_or(1);
@@ -200,7 +200,7 @@ impl Broker {
             .clients
             .get(&id)
             .ok_or_else(|| BrokerError::msg("unknown connection"))?;
-        crate::broker_ensure!(!client.configured, "CONNECT already received");
+        crate::broker_ensure!(!client.configured, "CONN already received");
         let (durable_id, authenticated) = if self.config.auth.enabled {
             let nonce = client
                 .auth_nonce
@@ -208,7 +208,7 @@ impl Broker {
                 .ok_or_else(|| BrokerError::msg("missing auth nonce"))?;
             let auth = auth
                 .as_ref()
-                .ok_or_else(|| BrokerError::msg("CONNECT client_id and signature are required"))?;
+                .ok_or_else(|| BrokerError::msg("CONN client_id and signature are required"))?;
             let public_key = self
                 .config
                 .auth
@@ -219,7 +219,7 @@ impl Broker {
             if let Some(durable_id) = durable_id {
                 crate::broker_ensure!(
                     durable_id == client_id,
-                    "CONNECT durable_id must match authenticated client_id"
+                    "CONN durable_id must match authenticated client_id"
                 );
             }
             (Some(client_id), true)
@@ -370,7 +370,7 @@ impl Broker {
                         RouteInterestChanges::default(),
                     )
                 } else {
-                    crate::broker_bail!("CONNECT durable_id is required before SUB")
+                    crate::broker_bail!("CONN durable_id is required before SUB")
                 }
             }
         };

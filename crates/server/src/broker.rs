@@ -88,7 +88,7 @@ mod state;
 mod subject_helpers;
 mod wal_runtime;
 
-pub use self::broker::Broker;
+pub use self::broker::Morrow;
 #[allow(unused_imports)]
 use self::{
     cluster_runtime::*, compaction::*, consumer::*, fake_cluster::*, fake_cluster_types::*,

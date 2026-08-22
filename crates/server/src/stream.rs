@@ -166,7 +166,7 @@ impl StreamDefinition {
                 "stream contains invalid subject binding {binding}"
             );
             crate::broker_ensure!(
-                !patterns_overlap(binding, "_INBOX.>"),
+                !patterns_overlap(binding, "_MORROW/INBOX/**"),
                 "stream binding {binding} captures reserved inbox subjects"
             );
         }
@@ -217,7 +217,9 @@ impl StreamCatalog {
     }
 
     pub fn resolve_primary(&self, concrete_subject: &str) -> Option<&StreamDefinition> {
-        if !subject::validate_subject(concrete_subject) || concrete_subject.starts_with("_INBOX.") {
+        if !subject::validate_subject(concrete_subject)
+            || concrete_subject.starts_with("_MORROW/INBOX/")
+        {
             return None;
         }
         self.bindings
@@ -244,14 +246,14 @@ impl StreamCatalog {
 }
 
 fn patterns_overlap(left: &str, right: &str) -> bool {
-    let left = left.split('.').collect::<Vec<_>>();
-    let right = right.split('.').collect::<Vec<_>>();
+    let left = left.split('/').collect::<Vec<_>>();
+    let right = right.split('/').collect::<Vec<_>>();
     patterns_overlap_from(&left, 0, &right, 0)
 }
 
 fn patterns_overlap_from(left: &[&str], left_at: usize, right: &[&str], right_at: usize) -> bool {
     match (left.get(left_at), right.get(right_at)) {
-        (Some(&">"), _) | (_, Some(&">")) => true,
+        (Some(&"**"), _) | (_, Some(&"**")) => true,
         (None, None) => true,
         (Some(left_token), Some(right_token))
             if left_token == right_token || *left_token == "*" || *right_token == "*" =>

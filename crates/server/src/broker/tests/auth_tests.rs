@@ -16,7 +16,7 @@ async fn auth_rejects_unknown_missing_bad_mismatch_and_repeat_connect() {
     unknown.expect_err_contains("unknown client_id").await;
 
     let (mut missing, _) = TestClient::connect_with_info(scenario.broker()).await;
-    missing.write_line("CONNECT {}").await;
+    missing.write_line("CONN {}").await;
     missing.expect_err_contains("client_id and signature").await;
 
     let (mut bad, bad_info) = TestClient::connect_with_info(scenario.broker()).await;
@@ -45,7 +45,7 @@ async fn auth_rejects_unknown_missing_bad_mismatch_and_repeat_connect() {
     repeat
         .write_line(&connect_payload(&repeat_info, "client1", [7; 32], None))
         .await;
-    repeat.expect_err_contains("CONNECT already received").await;
+    repeat.expect_err_contains("CONN already received").await;
 }
 
 #[tokio::test]
@@ -59,9 +59,9 @@ async fn failed_auth_leaves_no_durable_or_subscription_state() {
     client
         .expect_err_contains("invalid public key signature")
         .await;
-    client.subscribe("orders.*", "sid1").await;
+    client.subscribe("orders/*", "sid1").await;
     client.expect_err_contains("authentication required").await;
-    client.subscribe("_INBOX.client1.1", "inbox1").await;
+    client.subscribe("_MORROW/INBOX/client1/1", "inbox1").await;
     client.expect_err_contains("authentication required").await;
 
     let connections = scenario.broker().connections.lock().await;
@@ -92,38 +92,38 @@ async fn omitted_permissions_allow_authenticated_publish_and_subscribe() {
     let mut subscriber = connect_authenticated(&scenario, "subscriber1", [7; 32]).await;
     let mut publisher = connect_authenticated(&scenario, "publisher1", [8; 32]).await;
 
-    subscriber.subscribe("orders.*", "sid1").await;
+    subscriber.subscribe("orders/*", "sid1").await;
     subscriber.ping_roundtrip().await;
-    publisher.publish("orders.created", b"hello").await;
+    publisher.publish("orders/created", b"hello").await;
 
     let frame = subscriber.expect_msg().await;
-    assert!(frame.starts_with("MSG orders.created sid1 _BROKER.ACK.durable-subscriber1-sid1."));
+    assert!(frame.starts_with("DELIVER orders/created sid1 _MORROW/ACK/durable-subscriber1-sid1/"));
 }
 
 #[tokio::test]
 async fn publish_and_subscribe_patterns_authorize_matching_subjects() {
     let scenario = auth_scenario(vec![
-        auth_client("subscriber1", [7; 32], None, Some(vec!["orders.>"])),
-        auth_client("publisher1", [8; 32], Some(vec!["orders.>"]), None),
+        auth_client("subscriber1", [7; 32], None, Some(vec!["orders/**"])),
+        auth_client("publisher1", [8; 32], Some(vec!["orders/**"]), None),
     ]);
     let mut subscriber = connect_authenticated(&scenario, "subscriber1", [7; 32]).await;
     let mut publisher = connect_authenticated(&scenario, "publisher1", [8; 32]).await;
 
-    subscriber.subscribe("events.created", "bad").await;
+    subscriber.subscribe("events/created", "bad").await;
     subscriber
         .expect_err_contains("subscribe not authorized")
         .await;
-    subscriber.subscribe("orders.>", "sid1").await;
+    subscriber.subscribe("orders/**", "sid1").await;
     subscriber.ping_roundtrip().await;
 
-    publisher.publish("events.created", b"blocked").await;
+    publisher.publish("events/created", b"blocked").await;
     publisher
         .expect_err_contains("publish not authorized")
         .await;
-    publisher.publish("orders.us.created", b"hello").await;
+    publisher.publish("orders/us/created", b"hello").await;
 
     let frame = subscriber.expect_msg().await;
-    assert!(frame.starts_with("MSG orders.us.created sid1 "));
+    assert!(frame.starts_with("DELIVER orders/us/created sid1 "));
 }
 
 #[tokio::test]
@@ -132,45 +132,49 @@ async fn ack_and_owned_inbox_subjects_remain_allowed_under_restrictive_permissio
         auth_client(
             "subscriber1",
             [7; 32],
-            Some(vec!["none.*"]),
-            Some(vec!["orders.*"]),
+            Some(vec!["none/*"]),
+            Some(vec!["orders/*"]),
         ),
-        auth_client("publisher1", [8; 32], Some(vec!["orders.*"]), None),
+        auth_client("publisher1", [8; 32], Some(vec!["orders/*"]), None),
         auth_client(
             "requester1",
             [9; 32],
-            Some(vec!["service.*"]),
-            Some(vec!["none.*"]),
+            Some(vec!["service/*"]),
+            Some(vec!["none/*"]),
         ),
         auth_client(
             "responder1",
             [10; 32],
-            Some(vec!["none.*"]),
-            Some(vec!["service.*"]),
+            Some(vec!["none/*"]),
+            Some(vec!["service/*"]),
         ),
     ]);
     let mut subscriber = connect_authenticated(&scenario, "subscriber1", [7; 32]).await;
     let mut publisher = connect_authenticated(&scenario, "publisher1", [8; 32]).await;
 
-    subscriber.subscribe("orders.*", "sid1").await;
+    subscriber.subscribe("orders/*", "sid1").await;
     subscriber.ping_roundtrip().await;
-    publisher.publish("orders.created", b"hello").await;
+    publisher.publish("orders/created", b"hello").await;
     let delivery = subscriber.expect_msg().await;
-    subscriber.publish(&ack_subject(&delivery), b"").await;
+    subscriber.ack(&ack_subject(&delivery)).await;
     subscriber.ping_roundtrip().await;
 
     let mut requester = connect_authenticated(&scenario, "requester1", [9; 32]).await;
     let mut responder = connect_authenticated(&scenario, "responder1", [10; 32]).await;
-    requester.subscribe("_INBOX.requester1.1", "reply").await;
-    responder.subscribe("service.echo", "svc").await;
+    requester
+        .subscribe("_MORROW/INBOX/requester1/1", "reply")
+        .await;
+    responder.subscribe("service/echo", "svc").await;
     responder.ping_roundtrip().await;
 
     requester
-        .publish_with_reply("service.echo", Some("_INBOX.requester1.1"), b"hello")
+        .publish_with_reply("service/echo", Some("_MORROW/INBOX/requester1/1"), b"hello")
         .await;
     let request = responder.expect_hmsg().await;
-    assert!(request.starts_with("HMSG service.echo svc _INBOX.requester1.1 "));
-    responder.publish("_INBOX.requester1.1", b"world").await;
+    assert!(request.starts_with("HDELIVER service/echo svc _MORROW/INBOX/requester1/1 "));
+    responder
+        .publish("_MORROW/INBOX/requester1/1", b"world")
+        .await;
     responder
         .expect_err_contains("inbox publish not authorized")
         .await;
@@ -179,17 +183,23 @@ async fn ack_and_owned_inbox_subjects_remain_allowed_under_restrictive_permissio
 #[tokio::test]
 async fn authenticated_clients_cannot_ack_other_consumers_delivery() {
     let scenario = auth_scenario(vec![
-        auth_client("subscriber1", [7; 32], None, Some(vec!["orders.*"])),
-        auth_client("publisher1", [8; 32], Some(vec!["orders.*"]), None),
+        auth_client("subscriber1", [7; 32], None, Some(vec!["orders/*"])),
+        auth_client("publisher1", [8; 32], Some(vec!["orders/*"]), None),
     ]);
     let mut subscriber = connect_authenticated(&scenario, "subscriber1", [7; 32]).await;
     let mut publisher = connect_authenticated(&scenario, "publisher1", [8; 32]).await;
 
-    subscriber.subscribe("orders.*", "sid1").await;
+    subscriber.subscribe("orders/*", "sid1").await;
     subscriber.ping_roundtrip().await;
-    publisher.publish("orders.created", b"hello").await;
+    publisher.publish("orders/created", b"hello").await;
     let delivery = subscriber.expect_msg().await;
-    publisher.publish(&ack_subject(&delivery), b"").await;
+    let ack = protocol::parse_ack_subject(&ack_subject(&delivery)).unwrap();
+    publisher
+        .write_line(&format!(
+            "ACK {} {} {}",
+            ack.consumer_id, ack.seq, ack.delivery_id
+        ))
+        .await;
     publisher.expect_err_contains("ack not authorized").await;
 
     let inner = scenario.broker().inner.lock().await;
@@ -200,22 +210,26 @@ async fn authenticated_clients_cannot_ack_other_consumers_delivery() {
 #[tokio::test]
 async fn authenticated_clients_cannot_use_other_clients_inbox_prefix() {
     let scenario = auth_scenario(vec![
-        auth_client("requester1", [9; 32], Some(vec!["service.*"]), None),
+        auth_client("requester1", [9; 32], Some(vec!["service/*"]), None),
         auth_client(
             "responder1",
             [10; 32],
-            Some(vec!["none.*"]),
-            Some(vec!["service.*"]),
+            Some(vec!["none/*"]),
+            Some(vec!["service/*"]),
         ),
     ]);
     let mut requester = connect_authenticated(&scenario, "requester1", [9; 32]).await;
     let mut responder = connect_authenticated(&scenario, "responder1", [10; 32]).await;
 
-    requester.subscribe("_INBOX.responder1.1", "bad").await;
+    requester
+        .subscribe("_MORROW/INBOX/responder1/1", "bad")
+        .await;
     requester
         .expect_err_contains("inbox subscribe not authorized")
         .await;
-    responder.publish("_INBOX.requester1.1", b"world").await;
+    responder
+        .publish("_MORROW/INBOX/requester1/1", b"world")
+        .await;
     responder
         .expect_err_contains("inbox publish not authorized")
         .await;
@@ -224,17 +238,17 @@ async fn authenticated_clients_cannot_use_other_clients_inbox_prefix() {
 #[tokio::test]
 async fn unauthorized_cluster_publish_does_not_propose_write() {
     let scenario = auth_fake_cluster_scenario(vec![
-        auth_client("subscriber1", [7; 32], None, Some(vec!["orders.*"])),
-        auth_client("publisher1", [8; 32], Some(vec!["events.*"]), None),
+        auth_client("subscriber1", [7; 32], None, Some(vec!["orders/*"])),
+        auth_client("publisher1", [8; 32], Some(vec!["events/*"]), None),
     ]);
     let mut subscriber = connect_authenticated(&scenario, "subscriber1", [7; 32]).await;
     let mut publisher = connect_authenticated(&scenario, "publisher1", [8; 32]).await;
 
-    subscriber.subscribe("orders.*", "sid1").await;
+    subscriber.subscribe("orders/*", "sid1").await;
     subscriber.ping_roundtrip().await;
     assert_eq!(scenario.fake_cluster().write_count(), 1);
 
-    publisher.publish("orders.created", b"blocked").await;
+    publisher.publish("orders/created", b"blocked").await;
     publisher
         .expect_err_contains("publish not authorized")
         .await;
@@ -246,17 +260,17 @@ async fn denied_original_subject_does_not_execute_ingress_middleware() {
     let scenario = auth_scenario(vec![auth_client(
         "publisher1",
         [8; 32],
-        Some(vec!["orders.*"]),
+        Some(vec!["orders/*"]),
         None,
     )]);
     install_middleware(
         &scenario,
-        middleware_manifest("trap", "events.denied", []),
+        middleware_manifest("trap", "events/denied", []),
         "(module (func (export \"process\") (param i32) (result i32) unreachable))",
     );
     let mut publisher = connect_authenticated(&scenario, "publisher1", [8; 32]).await;
 
-    publisher.publish("events.denied", b"secret").await;
+    publisher.publish("events/denied", b"secret").await;
     publisher
         .expect_err_contains("publish not authorized")
         .await;
@@ -268,7 +282,7 @@ async fn rewritten_and_emitted_subjects_retain_publisher_authority() {
     let scenario = auth_scenario(vec![auth_client(
         "publisher1",
         [8; 32],
-        Some(vec!["orders.*"]),
+        Some(vec!["orders/*"]),
         None,
     )]);
     scenario
@@ -278,7 +292,7 @@ async fn rewritten_and_emitted_subjects_retain_publisher_authority() {
             (
                 middleware_manifest(
                     "rewrite-denied",
-                    "orders.rewrite",
+                    "orders/rewrite",
                     [Capability::WriteSubject],
                 ),
                 wat::parse_str(rewrite_module("admin.denied")).unwrap(),
@@ -286,15 +300,15 @@ async fn rewritten_and_emitted_subjects_retain_publisher_authority() {
             (
                 middleware_manifest(
                     "rewrite-reserved",
-                    "orders.reserved",
+                    "orders/reserved",
                     [Capability::WriteSubject],
                 ),
-                wat::parse_str(rewrite_module("_BROKER.ADMIN")).unwrap(),
+                wat::parse_str(rewrite_module("_MORROW/ADMIN")).unwrap(),
             ),
             (
                 middleware_manifest(
                     "emit-denied",
-                    "orders.emit",
+                    "orders/emit",
                     [Capability::SecondaryPublish],
                 ),
                 wat::parse_str(
@@ -312,15 +326,15 @@ async fn rewritten_and_emitted_subjects_retain_publisher_authority() {
         .unwrap();
     let mut publisher = connect_authenticated(&scenario, "publisher1", [8; 32]).await;
 
-    publisher.publish("orders.rewrite", b"secret").await;
+    publisher.publish("orders/rewrite", b"secret").await;
     publisher
         .expect_err_contains("publish not authorized")
         .await;
-    publisher.publish("orders.reserved", b"secret").await;
+    publisher.publish("orders/reserved", b"secret").await;
     publisher
         .expect_err_contains("middleware produced reserved broker subject")
         .await;
-    publisher.publish("orders.emit", b"secret").await;
+    publisher.publish("orders/emit", b"secret").await;
     publisher
         .expect_err_contains("publish not authorized")
         .await;
@@ -455,7 +469,7 @@ fn connect_payload(
     if let Some(durable_id) = durable_id {
         payload["durable_id"] = serde_json::Value::String(durable_id.to_string());
     }
-    format!("CONNECT {payload}")
+    format!("CONN {payload}")
 }
 
 fn info_nonce(info: &str) -> String {

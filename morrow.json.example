@@ -16,7 +16,7 @@
     "client_idle_timeout_ms": 300000,
     "http_header_timeout_ms": 5000
   },
-  "wal_dir": "./broker-wal",
+  "wal_dir": "./morrow-wal",
   "wal_segment_bytes": 67108864,
   "fsync_interval_ms": 5,
   "max_payload": 1048576,

@@ -2,9 +2,9 @@
 
 ## Project Overview
 
-This repository is a Rust workspace for a WAL-backed, NATS-style broker.
-Durable consumer semantics are the core behavior: durable `CONNECT`, `SUB`,
-`PUB`, explicit ack subjects, redelivery after ack timeout, request/reply inbox
+This repository is a Rust workspace for a WAL-backed, Morrow-style broker.
+Durable consumer semantics are the core behavior: durable `CONN`, `SUB`,
+`PUB`, explicit Morrow ACK identities, redelivery after ack timeout, request/reply inbox
 delivery, and optional clustered durability through OpenRaft.
 
 Workspace crates:
@@ -105,8 +105,8 @@ leader behavior for broker semantics; it is not a full Raft simulator.
 ## Protocol Notes
 
 - Durable clients connect with a durable identity before subscribing.
-- Durable deliveries include broker ack subjects.
-- Ack subjects are published to; empty ack payloads are valid.
+- Durable deliveries include Morrow ACK identities.
+- ACKs use the explicit `ACK` command; publishing to an ACK path is invalid.
 - Request/reply inbox delivery is transient and should not enter durable state.
 - Followers proxy raw client TCP bytes to the known leader; TLS clients complete
   TLS with the leader.

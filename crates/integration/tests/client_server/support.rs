@@ -1,6 +1,6 @@
 pub(super) use client::{Client, ClientAuth, ServerFrame};
 pub(super) use server::{
-    Broker, Config,
+    Config, Morrow,
     config::{
         AuthClientConfig, AuthConfig, AuthPermissions, ClusterConfig, ClusterNodeConfig,
         InternalTlsConfig, TlsConfig,
@@ -67,13 +67,13 @@ impl Drop for TestDir {
 pub(super) struct Harness {
     pub(super) addr: SocketAddr,
     pub(super) max_payload: usize,
-    pub(super) broker: Broker,
+    pub(super) broker: Morrow,
     pub(super) server_task: tokio::task::JoinHandle<()>,
     pub(super) _wal_dir: TestDir,
 }
 pub(super) struct ClusterHarness {
     pub(super) nodes: Vec<ClusterHarnessNode>,
-    pub(super) brokers: Vec<Broker>,
+    pub(super) brokers: Vec<Morrow>,
     pub(super) server_tasks: Vec<tokio::task::JoinHandle<()>>,
     pub(super) max_payload: usize,
     secure: bool,
@@ -189,7 +189,7 @@ impl ClusterHarness {
                 }),
                 streams: test_streams(),
             };
-            let broker = Broker::open(config).unwrap();
+            let broker = Morrow::open(config).unwrap();
             let server = broker.clone();
             let server_task = tokio::spawn(async move {
                 if let Err(err) = server.serve_listener(listener).await {
@@ -508,7 +508,7 @@ impl Harness {
             cluster: None,
             streams: test_streams(),
         };
-        let broker = Broker::open(config).unwrap();
+        let broker = Morrow::open(config).unwrap();
         let server = broker.clone();
         let server_task = tokio::spawn(async move {
             if let Err(err) = server.serve_listener(listener).await {
@@ -539,7 +539,7 @@ pub(super) fn tls_config() -> TlsConfig {
 
 fn test_streams() -> server::stream::StreamCatalog {
     server::stream::StreamCatalog::new(
-        [("orders", "orders.>"), ("service", "service.>")]
+        [("orders", "orders/**"), ("service", "service/**")]
             .into_iter()
             .map(|(name, subject)| server::stream::StreamDefinition {
                 name: server::stream::StreamId::new(name).unwrap(),
@@ -554,10 +554,10 @@ fn test_streams() -> server::stream::StreamCatalog {
     .unwrap()
 }
 pub(super) fn tls_cert_file() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/server-cert.pem")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/morrow-cert.pem")
 }
 pub(super) fn tls_key_file() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/server-key.pem")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/morrow-key.pem")
 }
 pub(super) fn tls_ca_cert_file() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ca-cert.pem")

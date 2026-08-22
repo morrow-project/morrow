@@ -28,9 +28,9 @@ async fn age_retention_advances_cursor_rewrites_disk_and_reports_status() {
     let broker = deterministic_broker(config.clone(), clock.clone(), None);
     let mut subscriber = TestClient::connect_durable(&broker, "consumer", 25).await;
     let mut publisher = TestClient::connect_durable(&broker, "publisher", 25).await;
-    subscriber.subscribe("orders.*", "sid").await;
+    subscriber.subscribe("orders/*", "sid").await;
     subscriber.ping_roundtrip().await;
-    publisher.publish("orders.created", b"first").await;
+    publisher.publish("orders/created", b"first").await;
     publisher.ping_roundtrip().await;
 
     clock.advance_ms(11);
@@ -60,7 +60,7 @@ async fn age_retention_advances_cursor_rewrites_disk_and_reports_status() {
     let restarted = deterministic_broker(config, clock, None);
     assert!(restarted.inner.lock().await.messages.is_empty());
     let mut publisher = TestClient::connect_durable(&restarted, "publisher", 25).await;
-    publisher.publish("orders.created", b"second").await;
+    publisher.publish("orders/created", b"second").await;
     publisher.ping_roundtrip().await;
     let inner = restarted.inner.lock().await;
     assert_eq!(inner.messages.values().next().unwrap().offset, Some(1));
@@ -75,7 +75,7 @@ async fn byte_retention_is_a_hard_bound_for_oversized_records() {
     let mut publisher = TestClient::connect_durable(&broker, "publisher", 25).await;
 
     publisher
-        .publish("orders.created", b"larger-than-one-byte")
+        .publish("orders/created", b"larger-than-one-byte")
         .await;
     publisher.ping_roundtrip().await;
     assert!(broker.inner.lock().await.messages.is_empty());
@@ -97,11 +97,11 @@ async fn age_retention_removes_compacted_records_from_physical_history() {
     let broker = deterministic_broker(config.clone(), clock.clone(), None);
     let mut publisher = TestClient::connect_durable(&broker, "publisher", 25).await;
     publisher
-        .publish_hpub("orders.created", &[("Broker-Key", "customer-1")], b"first")
+        .publish_hpub("orders/created", &[("Morrow-Key", "customer-1")], b"first")
         .await;
     publisher.ping_roundtrip().await;
     publisher
-        .publish_hpub("orders.created", &[("Broker-Key", "customer-1")], b"second")
+        .publish_hpub("orders/created", &[("Morrow-Key", "customer-1")], b"second")
         .await;
     publisher.ping_roundtrip().await;
     assert_eq!(broker.inner.lock().await.messages.len(), 1);
@@ -125,9 +125,9 @@ async fn startup_applies_age_retention_before_replay() {
     let broker = deterministic_broker(config.clone(), clock.clone(), None);
     let mut subscriber = TestClient::connect_durable(&broker, "consumer", 25).await;
     let mut publisher = TestClient::connect_durable(&broker, "publisher", 25).await;
-    subscriber.subscribe("orders.*", "sid").await;
+    subscriber.subscribe("orders/*", "sid").await;
     subscriber.ping_roundtrip().await;
-    publisher.publish("orders.created", b"first").await;
+    publisher.publish("orders/created", b"first").await;
     publisher.ping_roundtrip().await;
     publisher.disconnect().await;
     subscriber.disconnect().await;
@@ -159,13 +159,13 @@ async fn clustered_sync_does_not_reintroduce_retained_records() {
     let cluster = FakeClusterRuntime::new(3, 1, Some(1));
     let broker = deterministic_broker(config, clock.clone(), Some(ClusterRuntime::Fake(cluster)));
     let mut publisher = TestClient::connect_durable(&broker, "publisher", 25).await;
-    publisher.publish("orders.created", b"first").await;
+    publisher.publish("orders/created", b"first").await;
     publisher.ping_roundtrip().await;
 
     clock.advance_ms(11);
     broker.tick_redelivery_for_test().await.unwrap();
     assert!(broker.inner.lock().await.messages.is_empty());
-    publisher.publish("orders.created", b"second").await;
+    publisher.publish("orders/created", b"second").await;
     publisher.ping_roundtrip().await;
     let inner = broker.inner.lock().await;
     assert_eq!(inner.messages.len(), 1);

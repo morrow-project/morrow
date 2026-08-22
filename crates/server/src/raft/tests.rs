@@ -13,7 +13,7 @@ fn nodes() -> BTreeMap<u64, BasicNode> {
 fn stream() -> StreamDefinition {
     StreamDefinition {
         name: StreamId::new("orders").unwrap(),
-        subjects: vec!["orders.>".into()],
+        subjects: vec!["orders/**".into()],
         partitions: 1,
         partitioning: PartitioningPolicy {
             strategy: PartitioningStrategy::Key,
@@ -44,7 +44,7 @@ fn replica_data_retention_rewrites_physical_history() {
                     stream: definition.name.clone(),
                     partition: crate::stream::PartitionId(0),
                     offset,
-                    subject: "orders.created".into(),
+                    subject: "orders/created".into(),
                     key: None,
                     headers: vec![],
                     timestamp_ms,
@@ -278,7 +278,7 @@ fn consumer_metadata_upsert_and_delete_are_consensus_managed() {
     let mut state = DurableState::new(nodes());
     let record = ConsumerRecord {
         consumer_id: "durable-client-sid".into(),
-        filter_subject: "orders.*".into(),
+        filter_subject: "orders/*".into(),
         queue_group: None,
         ack_timeout_ms: 30_000,
         max_in_flight: 1024,

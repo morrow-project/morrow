@@ -19,12 +19,12 @@ COPY third_party ./third_party
 
 FROM source AS build
 RUN mkdir -p /out/data/wal /out/data/raft \
-    && cat > /out/broker.json <<'EOF'
+    && cat > /out/morrow.json <<'EOF'
 {
   "listen": "0.0.0.0:4222",
   "http_listen": null,
   "admin_token": null,
-  "wal_dir": "/var/lib/broker/wal",
+  "wal_dir": "/var/lib/morrow/wal",
   "wal_segment_bytes": 67108864,
   "fsync_interval_ms": 5,
   "max_payload": 1048576,
@@ -40,16 +40,16 @@ RUN mkdir -p /out/data/wal /out/data/raft \
 EOF
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/workspace/target \
-    cargo build --release --locked -p server --bin broker \
-    && cp target/release/broker /out/broker
+    cargo build --release --locked -p server --bin morrow \
+    && cp target/release/morrow /out/morrow
 
 FROM ${RUNTIME_IMAGE} AS runtime
-WORKDIR /var/lib/broker
-COPY --from=build /out/broker /usr/local/bin/broker
-COPY --from=build /out/broker.json /etc/broker/broker.json
-COPY --chown=65532:65532 --from=build /out/data /var/lib/broker
+WORKDIR /var/lib/morrow
+COPY --from=build /out/morrow /usr/local/bin/morrow
+COPY --from=build /out/morrow.json /etc/morrow/morrow.json
+COPY --chown=65532:65532 --from=build /out/data /var/lib/morrow
 USER 65532:65532
 EXPOSE 4222
-VOLUME ["/var/lib/broker"]
-ENTRYPOINT ["/usr/local/bin/broker"]
-CMD ["/etc/broker/broker.json"]
+VOLUME ["/var/lib/morrow"]
+ENTRYPOINT ["/usr/local/bin/morrow"]
+CMD ["/etc/morrow/morrow.json"]

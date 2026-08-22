@@ -14,15 +14,15 @@ fn stream(name: &str, subjects: &[&str]) -> StreamDefinition {
 #[test]
 fn resolves_exact_single_and_tail_wildcard_bindings() {
     let catalog = StreamCatalog::new(vec![
-        stream("exact", &["orders.created"]),
-        stream("telemetry", &["telemetry.*.cpu"]),
-        stream("events", &["events.>"]),
+        stream("exact", &["orders/created"]),
+        stream("telemetry", &["telemetry/*/cpu"]),
+        stream("events", &["events/**"]),
     ])
     .unwrap();
 
     assert_eq!(
         catalog
-            .resolve_primary("orders.created")
+            .resolve_primary("orders/created")
             .unwrap()
             .name
             .as_str(),
@@ -30,7 +30,7 @@ fn resolves_exact_single_and_tail_wildcard_bindings() {
     );
     assert_eq!(
         catalog
-            .resolve_primary("telemetry.mumbai.cpu")
+            .resolve_primary("telemetry/mumbai/cpu")
             .unwrap()
             .name
             .as_str(),
@@ -38,20 +38,20 @@ fn resolves_exact_single_and_tail_wildcard_bindings() {
     );
     assert_eq!(
         catalog
-            .resolve_primary("events.orders.created")
+            .resolve_primary("events/orders/created")
             .unwrap()
             .name
             .as_str(),
         "events"
     );
-    assert!(catalog.resolve_primary("other.subject").is_none());
+    assert!(catalog.resolve_primary("other/subject").is_none());
 }
 
 #[test]
 fn rejects_overlapping_primary_bindings() {
     let error = StreamCatalog::new(vec![
-        stream("orders", &["orders.>"]),
-        stream("created", &["orders.*.created"]),
+        stream("orders", &["orders/**"]),
+        stream("created", &["orders/*/created"]),
     ])
     .unwrap_err();
 
@@ -60,7 +60,7 @@ fn rejects_overlapping_primary_bindings() {
 
 #[test]
 fn rejects_zero_partitions() {
-    let mut definition = stream("orders", &["orders.>"]);
+    let mut definition = stream("orders", &["orders/**"]);
     definition.partitions = 0;
 
     let error = StreamCatalog::new(vec![definition]).unwrap_err();
@@ -70,14 +70,14 @@ fn rejects_zero_partitions() {
 
 #[test]
 fn rejects_bindings_that_capture_inboxes() {
-    let error = StreamCatalog::new(vec![stream("everything", &[">"])]).unwrap_err();
+    let error = StreamCatalog::new(vec![stream("everything", &["**"])]).unwrap_err();
 
     assert!(error.to_string().contains("reserved inbox"));
 }
 
 #[test]
 fn never_resolves_inbox_subjects() {
-    let catalog = StreamCatalog::new(vec![stream("orders", &["orders.>"])]).unwrap();
+    let catalog = StreamCatalog::new(vec![stream("orders", &["orders/**"])]).unwrap();
 
-    assert!(catalog.resolve_primary("_INBOX.client.1").is_none());
+    assert!(catalog.resolve_primary("_MORROW/INBOX/client/1").is_none());
 }

@@ -7,7 +7,7 @@ use crate::{
 fn catalog() -> StreamCatalog {
     StreamCatalog::new(vec![StreamDefinition {
         name: StreamId::new("orders").unwrap(),
-        subjects: vec!["orders.>".into()],
+        subjects: vec!["orders/**".into()],
         partitions: 1,
         partitioning: Default::default(),
         storage: Default::default(),
@@ -23,7 +23,7 @@ fn message(seq: u64, offset: u64) -> PublishRecord {
         stream: Some("orders".into()),
         partition: Some(0),
         offset: Some(offset),
-        subject: "orders.created".into(),
+        subject: "orders/created".into(),
         key: None,
         headers: Vec::<MessageHeader>::new(),
         timestamp_ms: offset * 10,
@@ -40,26 +40,26 @@ fn earliest_and_latest_choose_different_initial_offsets() {
         .into_iter()
         .collect();
     let earliest = ConsumerCursorSet::new(
-        "orders.*",
+        "orders/*",
         StartPosition::Earliest,
         8,
         &catalog(),
         &messages,
     );
     let latest =
-        ConsumerCursorSet::new("orders.*", StartPosition::Latest, 8, &catalog(), &messages);
+        ConsumerCursorSet::new("orders/*", StartPosition::Latest, 8, &catalog(), &messages);
     assert_eq!(earliest.committed_offset("orders", 0), Some(0));
     assert_eq!(latest.committed_offset("orders", 0), Some(2));
 
     let exact = ConsumerCursorSet::new(
-        "orders.*",
+        "orders/*",
         StartPosition::Offset(1),
         8,
         &catalog(),
         &messages,
     );
     let timestamp = ConsumerCursorSet::new(
-        "orders.*",
+        "orders/*",
         StartPosition::Timestamp(5),
         8,
         &catalog(),
@@ -75,18 +75,18 @@ fn out_of_order_acknowledgements_close_the_gap() {
         .into_iter()
         .collect();
     let mut cursors = ConsumerCursorSet::new(
-        "orders.*",
+        "orders/*",
         StartPosition::Earliest,
         3,
         &catalog(),
         &messages,
     );
     cursors
-        .acknowledge(&messages[&2], "orders.*", &messages)
+        .acknowledge(&messages[&2], "orders/*", &messages)
         .unwrap();
     assert_eq!(cursors.committed_offset("orders", 0), Some(0));
     cursors
-        .acknowledge(&messages[&1], "orders.*", &messages)
+        .acknowledge(&messages[&1], "orders/*", &messages)
         .unwrap();
     assert_eq!(cursors.committed_offset("orders", 0), Some(2));
 }
@@ -97,25 +97,25 @@ fn acknowledgement_window_is_bounded() {
         .into_iter()
         .collect();
     let mut cursors = ConsumerCursorSet::new(
-        "orders.*",
+        "orders/*",
         StartPosition::Earliest,
         1,
         &catalog(),
         &messages,
     );
     cursors
-        .acknowledge(&messages[&2], "orders.*", &messages)
+        .acknowledge(&messages[&2], "orders/*", &messages)
         .unwrap();
     let error = cursors
-        .acknowledge(&messages[&3], "orders.*", &messages)
+        .acknowledge(&messages[&3], "orders/*", &messages)
         .unwrap_err();
     assert!(error.to_string().contains("window exceeded"));
     cursors
-        .acknowledge(&messages[&1], "orders.*", &messages)
+        .acknowledge(&messages[&1], "orders/*", &messages)
         .unwrap();
     assert_eq!(cursors.committed_offset("orders", 0), Some(2));
     cursors
-        .acknowledge(&messages[&3], "orders.*", &messages)
+        .acknowledge(&messages[&3], "orders/*", &messages)
         .unwrap();
     assert_eq!(cursors.committed_offset("orders", 0), Some(3));
 }
@@ -124,14 +124,14 @@ fn acknowledgement_window_is_bounded() {
 fn retention_gap_advances_to_earliest_observable_offset() {
     let messages = [(3, message(3, 2))].into_iter().collect();
     let mut cursors = ConsumerCursorSet::new(
-        "orders.*",
+        "orders/*",
         StartPosition::Earliest,
         8,
         &catalog(),
         &messages,
     );
     assert_eq!(
-        cursors.next_candidate("orders.*", &messages, &HashSet::new()),
+        cursors.next_candidate("orders/*", &messages, &HashSet::new()),
         Some(3)
     );
     let cursor = &cursors.partitions["orders:0"];

@@ -1,6 +1,6 @@
 use super::*;
 
-impl Broker {
+impl Morrow {
     pub(super) async fn run_after_commit_middleware(
         &self,
         publisher_id: u64,

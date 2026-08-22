@@ -5,7 +5,7 @@ async fn stream_retains_publish_before_consumer_and_across_restart() {
     let mut scenario = Scenario::new();
     let mut publisher = scenario.connect_durable("publisher1", 25).await;
 
-    publisher.publish("orders.created", b"hello").await;
+    publisher.publish("orders/created", b"hello").await;
     publisher.ping_roundtrip().await;
 
     {
@@ -31,11 +31,11 @@ async fn matching_consumers_share_one_stream_append() {
     let mut second = scenario.connect_durable("second", 25).await;
     let mut publisher = scenario.connect_durable("publisher", 25).await;
 
-    first.subscribe("orders.*", "one").await;
+    first.subscribe("orders/*", "one").await;
     first.ping_roundtrip().await;
-    second.subscribe("orders.*", "two").await;
+    second.subscribe("orders/*", "two").await;
     second.ping_roundtrip().await;
-    publisher.publish("orders.created", b"hello").await;
+    publisher.publish("orders/created", b"hello").await;
     publisher.ping_roundtrip().await;
 
     let inner = scenario.broker().inner.lock().await;
@@ -58,15 +58,15 @@ async fn unbound_publish_remains_transient() {
     let mut subscriber = scenario.connect().await;
     let mut publisher = scenario.connect().await;
 
-    subscriber.write_line("CONNECT {}").await;
-    publisher.write_line("CONNECT {}").await;
-    subscriber.subscribe("events.*", "live").await;
+    subscriber.write_line("CONN {}").await;
+    publisher.write_line("CONN {}").await;
+    subscriber.subscribe("events/*", "live").await;
     subscriber.ping_roundtrip().await;
-    publisher.publish("events.created", b"hello").await;
+    publisher.publish("events/created", b"hello").await;
 
     assert_eq!(
         subscriber.expect_msg().await,
-        "MSG events.created live 5\r\nhello\r\n"
+        "DELIVER events/created live 5\r\nhello\r\n"
     );
     assert!(scenario.broker().inner.lock().await.messages.is_empty());
 }
@@ -76,7 +76,7 @@ async fn clustered_stream_retains_publish_without_consumer() {
     let scenario = Scenario::new_fake_cluster(3);
     let mut publisher = scenario.connect_durable("publisher", 25).await;
 
-    publisher.publish("orders.created", b"hello").await;
+    publisher.publish("orders/created", b"hello").await;
     publisher.ping_roundtrip().await;
 
     let inner = scenario.broker().inner.lock().await;
@@ -91,11 +91,11 @@ async fn ack_does_not_delete_stream_owned_record() {
     let mut subscriber = scenario.connect_durable("consumer", 25).await;
     let mut publisher = scenario.connect_durable("publisher", 25).await;
 
-    subscriber.subscribe("orders.*", "sid").await;
+    subscriber.subscribe("orders/*", "sid").await;
     subscriber.ping_roundtrip().await;
-    publisher.publish("orders.created", b"hello").await;
+    publisher.publish("orders/created", b"hello").await;
     let delivery = subscriber.expect_msg().await;
-    subscriber.publish(&ack_subject(&delivery), b"").await;
+    subscriber.ack(&ack_subject(&delivery)).await;
     subscriber.ping_roundtrip().await;
 
     let inner = scenario.broker().inner.lock().await;
@@ -114,23 +114,23 @@ async fn keyed_headers_and_envelope_metadata_survive_restart_and_delivery() {
     let mut scenario = Scenario::new();
     let mut subscriber = TestClient::connect_pull(scenario.broker(), "consumer", 25).await;
     let mut publisher = scenario.connect_durable("tenant-a", 25).await;
-    subscriber.subscribe("orders.*", "sid").await;
+    subscriber.subscribe("orders/*", "sid").await;
     subscriber.write_line("CREDIT sid 1 1024").await;
     subscriber.ping_roundtrip().await;
 
     publisher
         .publish_hpub(
-            "orders.created",
-            &[("Broker-Key", "customer-7"), ("Trace-Id", "trace-1")],
+            "orders/created",
+            &[("Morrow-Key", "customer-7"), ("Trace-Id", "trace-1")],
             b"hello",
         )
         .await;
     let delivery = subscriber.read_frame().await;
-    assert!(delivery.starts_with("HMSG orders.created sid "));
+    assert!(delivery.starts_with("HDELIVER orders/created sid "));
     assert!(delivery.contains("Trace-Id: trace-1\r\n"));
-    assert!(!delivery.contains("Broker-Key:"));
-    assert!(delivery.contains("Broker-Key-Hex: 637573746f6d65722d37\r\n"));
-    assert!(delivery.contains("Broker-Timestamp: 1000\r\n"));
+    assert!(!delivery.contains("Morrow-Key:"));
+    assert!(delivery.contains("Morrow-Key-Hex: 637573746f6d65722d37\r\n"));
+    assert!(delivery.contains("Morrow-Timestamp: 1000\r\n"));
 
     subscriber.disconnect().await;
     publisher.disconnect().await;
@@ -146,10 +146,10 @@ async fn keyed_headers_and_envelope_metadata_survive_restart_and_delivery() {
     drop(inner);
 
     let mut restarted = TestClient::connect_pull(scenario.broker(), "consumer", 25).await;
-    restarted.subscribe("orders.*", "sid").await;
+    restarted.subscribe("orders/*", "sid").await;
     restarted.write_line("CREDIT sid 1 1024").await;
     let redelivery = restarted.read_frame().await;
-    assert!(redelivery.starts_with("HMSG orders.created sid "));
+    assert!(redelivery.starts_with("HDELIVER orders/created sid "));
     assert!(redelivery.contains("Trace-Id: trace-1\r\n"));
 }
 
@@ -163,12 +163,12 @@ async fn transitional_stream_wal_records_migrate_to_partition_history() {
         config.wal_segment_bytes,
     )
     .unwrap();
-    wal.append_stream_publish("orders", "orders.created", None, b"legacy")
+    wal.append_stream_publish("orders", "orders/created", None, b"legacy")
         .unwrap();
     wal.flush().unwrap();
     drop(wal);
 
-    let broker = Broker::open(config.clone()).unwrap();
+    let broker = Morrow::open(config.clone()).unwrap();
     let metadata = {
         let inner = broker.inner.lock().await;
         assert_eq!(inner.messages[&1].partition, Some(0));

@@ -8,7 +8,7 @@ async fn keyed_qos_publish_encodes_partition_key_and_waits_for_commit_ack() {
     let mut client = Client {
         stream: BufReader::new(Box::new(client_io)),
         max_payload: 1024,
-        inbox_prefix: "_INBOX.test".to_string(),
+        inbox_prefix: "_MORROW/INBOX/test".to_string(),
         inbox_counter: 0,
         durable: true,
         push_credit_messages: 1,
@@ -20,12 +20,12 @@ async fn keyed_qos_publish_encodes_partition_key_and_waits_for_commit_ack() {
         server.read_line(&mut line).await.unwrap();
         let parts = line.split_whitespace().collect::<Vec<_>>();
         assert_eq!(parts[0], "HPUB");
-        assert_eq!(parts[1], "orders.created");
+        assert_eq!(parts[1], "orders/created");
         let total = parts[3].parse::<usize>().unwrap();
         let mut body = vec![0; total + 2];
         server.read_exact(&mut body).await.unwrap();
         let encoded = String::from_utf8(body).unwrap();
-        assert!(encoded.contains("Broker-Key: customer-7\r\n"));
+        assert!(encoded.contains("Morrow-Key: customer-7\r\n"));
         assert!(encoded.ends_with("\r\n\r\nhello\r\n"));
         server
             .get_mut()
@@ -36,7 +36,7 @@ async fn keyed_qos_publish_encodes_partition_key_and_waits_for_commit_ack() {
 
     let ack = client
         .publish_with_qos_and_key(
-            "orders.created",
+            "orders/created",
             None,
             b"hello",
             protocol::AckLevel::HighDurability,
@@ -55,7 +55,7 @@ async fn ping_roundtrip_buffers_delivery_that_arrives_before_pong() {
     let mut client = Client {
         stream: BufReader::new(Box::new(client_io)),
         max_payload: 1024,
-        inbox_prefix: "_INBOX.test".to_string(),
+        inbox_prefix: "_MORROW/INBOX/test".to_string(),
         inbox_counter: 0,
         durable: true,
         push_credit_messages: 1,
@@ -68,30 +68,30 @@ async fn ping_roundtrip_buffers_delivery_that_arrives_before_pong() {
         assert_eq!(ping, "PING\r\n");
         server
             .get_mut()
-            .write_all(b"MSG orders.created sid1 5\r\nhello\r\nPONG\r\n")
+            .write_all(b"DELIVER orders/created sid1 5\r\nhello\r\nPONG\r\n")
             .await
             .unwrap();
     });
 
     client.ping_roundtrip().await.unwrap();
     let message = client.next_message().await.unwrap();
-    assert_eq!(message.subject, "orders.created");
+    assert_eq!(message.subject, "orders/created");
     assert_eq!(message.payload, b"hello");
     server.await.unwrap();
 }
 
 #[tokio::test]
-async fn parses_hmsg_with_reply_and_broker_ack_header() {
+async fn parses_hdeliver_with_reply_and_morrow_ack_header() {
     let (mut writer, reader) = tokio::io::duplex(128);
     writer
-        .write_all(b"NATS/1.0\r\nBroker-Ack: _BROKER.ACK.consumer.1.2\r\n\r\nhello\r\n")
+        .write_all(b"MORROW/1.0\r\nMorrow-Ack: _MORROW/ACK/consumer/1/2\r\n\r\nhello\r\n")
         .await
         .unwrap();
     let mut reader = BufReader::new(Box::new(reader) as Box<dyn ClientStream>);
 
     let frame = parse_frame(
         &mut reader,
-        "HMSG service.echo sid1 _INBOX.client.1 50 55",
+        "HDELIVER service/echo sid1 _MORROW/INBOX/client/1 52 57",
         1024,
     )
     .await
@@ -99,27 +99,27 @@ async fn parses_hmsg_with_reply_and_broker_ack_header() {
     .unwrap();
 
     let ServerFrame::Message(message) = frame else {
-        panic!("expected HMSG to parse as Message");
+        panic!("expected HDELIVER to parse as Message");
     };
-    assert_eq!(message.subject, "service.echo");
+    assert_eq!(message.subject, "service/echo");
     assert_eq!(message.sid, "sid1");
-    assert_eq!(message.reply_to.as_deref(), Some("_INBOX.client.1"));
+    assert_eq!(message.reply_to.as_deref(), Some("_MORROW/INBOX/client/1"));
     assert_eq!(
         message.ack_subject.as_deref(),
-        Some("_BROKER.ACK.consumer.1.2")
+        Some("_MORROW/ACK/consumer/1/2")
     );
     assert_eq!(message.payload, b"hello");
 }
 
 #[tokio::test]
-async fn parses_msg_ack_reply_as_ack_subject() {
+async fn parses_deliver_ack_reply_as_ack_identity() {
     let (mut writer, reader) = tokio::io::duplex(64);
     writer.write_all(b"hello\r\n").await.unwrap();
     let mut reader = BufReader::new(Box::new(reader) as Box<dyn ClientStream>);
 
     let frame = parse_frame(
         &mut reader,
-        "MSG orders.created sid1 _BROKER.ACK.consumer.1.2 5",
+        "DELIVER orders/created sid1 _MORROW/ACK/consumer/1/2 5",
         1024,
     )
     .await
@@ -127,12 +127,12 @@ async fn parses_msg_ack_reply_as_ack_subject() {
     .unwrap();
 
     let ServerFrame::Message(message) = frame else {
-        panic!("expected MSG to parse as Message");
+        panic!("expected DELIVER to parse as Message");
     };
     assert!(message.reply_to.is_none());
     assert_eq!(
         message.ack_subject.as_deref(),
-        Some("_BROKER.ACK.consumer.1.2")
+        Some("_MORROW/ACK/consumer/1/2")
     );
 }
 
@@ -181,21 +181,21 @@ async fn parses_partition_position_from_producer_ack() {
 }
 
 #[tokio::test]
-async fn rejects_malformed_hmsg_lengths() {
+async fn rejects_malformed_hdeliver_lengths() {
     let (_writer, reader) = tokio::io::duplex(64);
     let mut reader = BufReader::new(Box::new(reader) as Box<dyn ClientStream>);
 
-    let err = parse_frame(&mut reader, "HMSG service.echo sid1 nope 5", 1024)
+    let err = parse_frame(&mut reader, "HDELIVER service/echo sid1 nope 5", 1024)
         .await
         .unwrap_err();
     assert!(err.to_string().contains("headers length"));
 
-    let err = parse_frame(&mut reader, "HMSG service.echo sid1 6 5", 1024)
+    let err = parse_frame(&mut reader, "HDELIVER service/echo sid1 6 5", 1024)
         .await
         .unwrap_err();
     assert!(err.to_string().contains("exceeds total"));
 
-    let err = parse_frame(&mut reader, "HMSG service.echo sid1 1 2048", 1024)
+    let err = parse_frame(&mut reader, "HDELIVER service/echo sid1 1 2048", 1024)
         .await
         .unwrap_err();
     assert!(err.to_string().contains("exceeds max payload"));
@@ -241,13 +241,13 @@ async fn parses_pull_batch_and_durable_message_frames() {
 
     let (mut writer, reader) = tokio::io::duplex(64);
     writer
-        .write_all(b"NATS/1.0\r\nTrace-Id: abc\r\n\r\nhello\r\n")
+        .write_all(b"MORROW/1.0\r\nTrace-Id: abc\r\n\r\nhello\r\n")
         .await
         .unwrap();
     let mut reader = BufReader::new(Box::new(reader) as Box<dyn ClientStream>);
     let frame = parse_frame(
         &mut reader,
-        "DMSG worker orders.created _INBOX.reply orders 2 41 637573746f6d65722d37 1234 3 900 7 9 27 32",
+        "DDELIVER worker orders/created _MORROW/INBOX/reply orders 2 41 637573746f6d65722d37 1234 3 900 7 9 29 34",
         1024,
     )
     .await
@@ -257,8 +257,8 @@ async fn parses_pull_batch_and_durable_message_frames() {
         frame,
         ServerFrame::DurableMessage(DurableMessage {
             consumer: "worker".into(),
-            subject: "orders.created".into(),
-            reply_to: Some("_INBOX.reply".into()),
+            subject: "orders/created".into(),
+            reply_to: Some("_MORROW/INBOX/reply".into()),
             headers: vec![("Trace-Id".into(), "abc".into())],
             stream: "orders".into(),
             partition: 2,
@@ -280,7 +280,7 @@ async fn rejects_oversized_pull_delivery_before_allocating_body() {
     let mut reader = BufReader::new(Box::new(reader) as Box<dyn ClientStream>);
     let error = parse_frame(
         &mut reader,
-        "DMSG worker orders.created - orders 0 0 - 0 1 900 7 9 12 2048",
+        "DDELIVER worker orders/created - orders 0 0 - 0 1 900 7 9 12 2048",
         1024,
     )
     .await

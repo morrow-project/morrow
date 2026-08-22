@@ -4,7 +4,6 @@ const MAX_FETCH_WAIT_MS: u64 = 300_000;
 
 #[derive(Debug, Clone, Copy)]
 pub(super) enum PullControl {
-    Ack,
     Nack(u64),
     Extend(u64),
 }
@@ -19,7 +18,7 @@ pub(super) struct PullDelivery {
     pub(super) lease: DeliveryAttemptRecord,
 }
 
-impl Broker {
+impl Morrow {
     pub(super) async fn create_pull_consumer(
         &self,
         connection_id: u64,
@@ -320,18 +319,6 @@ impl Broker {
     ) -> Result<()> {
         let (consumer_id, _, _) = self.pull_consumer_context(connection_id, &name).await?;
         let operation = match control {
-            PullControl::Ack => {
-                crate::broker_ensure!(
-                    self.ack(AckSubject {
-                        consumer_id,
-                        seq,
-                        delivery_id,
-                    })
-                    .await?,
-                    "stale or unknown delivery identity"
-                );
-                "ACK"
-            }
             PullControl::Nack(delay_ms) => {
                 crate::broker_ensure!(
                     delay_ms <= self.config.max_ack_timeout_ms,
@@ -373,6 +360,36 @@ impl Broker {
         self.send_to(
             connection_id,
             protocol::control_ok(operation, &name, seq, delivery_id),
+        )
+        .await
+    }
+
+    pub(super) async fn ack_delivery(
+        &self,
+        connection_id: u64,
+        name: String,
+        seq: u64,
+        delivery_id: u64,
+    ) -> Result<()> {
+        let response_name = name.clone();
+        let consumer_id = if self.inner.lock().await.consumers.contains_key(&name) {
+            name.clone()
+        } else {
+            self.pull_consumer_context(connection_id, &name)
+                .await
+                .map(|(consumer_id, _, _)| consumer_id)
+                .unwrap_or_else(|_| name.clone())
+        };
+        let ack = AckSubject {
+            consumer_id: consumer_id.clone(),
+            seq,
+            delivery_id,
+        };
+        self.authorize_ack_publish(connection_id, &ack).await?;
+        crate::broker_ensure!(self.ack(ack).await?, "stale or unknown delivery identity");
+        self.send_to(
+            connection_id,
+            protocol::control_ok("ACK", &response_name, seq, delivery_id),
         )
         .await
     }
@@ -443,7 +460,7 @@ impl Broker {
             .clients
             .get(&connection_id)
             .ok_or_else(|| BrokerError::msg("unknown connection"))?;
-        crate::broker_ensure!(client.configured, "CONNECT required");
+        crate::broker_ensure!(client.configured, "CONN required");
         crate::broker_ensure!(
             client.protocol_version >= 2,
             "pull consumers require protocol version 2"

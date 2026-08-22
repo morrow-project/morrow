@@ -18,11 +18,11 @@ pub(super) async fn parse_frame(
         "C-OK" => parse_consumer_ok(parts).map(Some),
         "D-OK" => parse_delivery_control_ok(parts).map(Some),
         "BATCH" => parse_batch(parts).map(Some),
-        "DMSG" => parse_durable_message(stream, parts, max_payload)
+        "DDELIVER" => parse_durable_message(stream, parts, max_payload)
             .await
             .map(Some),
-        "MSG" => parse_msg(stream, parts, max_payload).await.map(Some),
-        "HMSG" => parse_hmsg(stream, parts, max_payload).await.map(Some),
+        "DELIVER" => parse_msg(stream, parts, max_payload).await.map(Some),
+        "HDELIVER" => parse_hmsg(stream, parts, max_payload).await.map(Some),
         _ => Err(ClientError::msg(format!("unsupported server frame {op}"))),
     }
 }
@@ -117,68 +117,73 @@ pub(super) async fn parse_durable_message<'a>(
     mut parts: impl Iterator<Item = &'a str>,
     max_payload: usize,
 ) -> Result<ServerFrame> {
-    let consumer = next_part(&mut parts, "DMSG missing consumer name")?.to_string();
-    let subject = next_part(&mut parts, "DMSG missing subject")?.to_string();
-    let reply_to = match next_part(&mut parts, "DMSG missing reply subject")? {
+    let consumer = next_part(&mut parts, "DDELIVER missing consumer name")?.to_string();
+    let subject = next_part(&mut parts, "DDELIVER missing subject")?.to_string();
+    let reply_to = match next_part(&mut parts, "DDELIVER missing reply subject")? {
         "-" => None,
         reply_to => Some(reply_to.to_string()),
     };
-    let durable_stream = next_part(&mut parts, "DMSG missing stream")?.to_string();
+    let durable_stream = next_part(&mut parts, "DDELIVER missing stream")?.to_string();
     let partition = parse_number(
-        next_part(&mut parts, "DMSG missing partition")?,
-        "DMSG partition",
+        next_part(&mut parts, "DDELIVER missing partition")?,
+        "DDELIVER partition",
     )?;
-    let offset = parse_number(next_part(&mut parts, "DMSG missing offset")?, "DMSG offset")?;
-    let key = match next_part(&mut parts, "DMSG missing key")? {
+    let offset = parse_number(
+        next_part(&mut parts, "DDELIVER missing offset")?,
+        "DDELIVER offset",
+    )?;
+    let key = match next_part(&mut parts, "DDELIVER missing key")? {
         "-" => None,
-        key => Some(decode_hex(key, "DMSG key")?),
+        key => Some(decode_hex(key, "DDELIVER key")?),
     };
     let timestamp_ms = parse_number(
-        next_part(&mut parts, "DMSG missing timestamp")?,
-        "DMSG timestamp",
+        next_part(&mut parts, "DDELIVER missing timestamp")?,
+        "DDELIVER timestamp",
     )?;
     let attempt = parse_number(
-        next_part(&mut parts, "DMSG missing attempt")?,
-        "DMSG attempt",
+        next_part(&mut parts, "DDELIVER missing attempt")?,
+        "DDELIVER attempt",
     )?;
     let lease_deadline_ms = parse_number(
-        next_part(&mut parts, "DMSG missing lease deadline")?,
-        "DMSG lease deadline",
+        next_part(&mut parts, "DDELIVER missing lease deadline")?,
+        "DDELIVER lease deadline",
     )?;
     let seq = parse_number(
-        next_part(&mut parts, "DMSG missing sequence")?,
-        "DMSG sequence",
+        next_part(&mut parts, "DDELIVER missing sequence")?,
+        "DDELIVER sequence",
     )?;
     let delivery_id = parse_number(
-        next_part(&mut parts, "DMSG missing delivery id")?,
-        "DMSG delivery id",
+        next_part(&mut parts, "DDELIVER missing delivery id")?,
+        "DDELIVER delivery id",
     )?;
     let headers_len = parse_frame_len(
-        next_part(&mut parts, "DMSG missing headers length")?,
-        "DMSG headers length",
+        next_part(&mut parts, "DDELIVER missing headers length")?,
+        "DDELIVER headers length",
     )?;
     let total_len = parse_frame_len(
-        next_part(&mut parts, "DMSG missing total length")?,
-        "DMSG total length",
+        next_part(&mut parts, "DDELIVER missing total length")?,
+        "DDELIVER total length",
     )?;
-    reject_extra(&mut parts, "DMSG")?;
+    reject_extra(&mut parts, "DDELIVER")?;
     if headers_len > total_len {
         return Err(ClientError::msg(
-            "DMSG headers length exceeds total frame length",
+            "DDELIVER headers length exceeds total frame length",
         ));
     }
     if total_len > max_payload {
         return Err(ClientError::msg(format!(
-            "DMSG total length {total_len} exceeds max payload {max_payload}"
+            "DDELIVER total length {total_len} exceeds max payload {max_payload}"
         )));
     }
     let mut body = vec![0; total_len + 2];
     stream
         .read_exact(&mut body)
         .await
-        .map_err(|err| ClientError::with_source("reading DMSG payload", err))?;
+        .map_err(|err| ClientError::with_source("reading DDELIVER payload", err))?;
     if &body[total_len..] != b"\r\n" {
-        return Err(ClientError::msg("DMSG payload must be followed by CRLF"));
+        return Err(ClientError::msg(
+            "DDELIVER payload must be followed by CRLF",
+        ));
     }
     body.truncate(total_len);
     let payload = body.split_off(headers_len);
@@ -323,18 +328,18 @@ pub(super) async fn parse_msg<'a>(
 ) -> Result<ServerFrame> {
     let subject = parts
         .next()
-        .ok_or_else(|| ClientError::msg("MSG missing subject"))?
+        .ok_or_else(|| ClientError::msg("DELIVER missing subject"))?
         .to_string();
     let sid = parts
         .next()
-        .ok_or_else(|| ClientError::msg("MSG missing sid"))?
+        .ok_or_else(|| ClientError::msg("DELIVER missing sid"))?
         .to_string();
     let third = parts
         .next()
-        .ok_or_else(|| ClientError::msg("MSG missing payload size"))?;
+        .ok_or_else(|| ClientError::msg("DELIVER missing payload size"))?;
     let fourth = parts.next();
     if parts.next().is_some() {
-        return Err(ClientError::msg("MSG has too many arguments"));
+        return Err(ClientError::msg("DELIVER has too many arguments"));
     }
     let (reply_to, size_token) = match fourth {
         Some(size) => (Some(third.to_string()), size),
@@ -342,19 +347,19 @@ pub(super) async fn parse_msg<'a>(
     };
     let size = size_token
         .parse::<usize>()
-        .map_err(|_| ClientError::msg("MSG payload size must be an integer"))?;
+        .map_err(|_| ClientError::msg("DELIVER payload size must be an integer"))?;
     if size > max_payload {
         return Err(ClientError::msg(format!(
-            "MSG payload size {size} exceeds max payload {max_payload}"
+            "DELIVER payload size {size} exceeds max payload {max_payload}"
         )));
     }
     let mut payload = vec![0; size + 2];
     stream
         .read_exact(&mut payload)
         .await
-        .map_err(|err| ClientError::with_source("reading MSG payload", err))?;
+        .map_err(|err| ClientError::with_source("reading DELIVER payload", err))?;
     if &payload[size..] != b"\r\n" {
-        return Err(ClientError::msg("MSG payload must be followed by CRLF"));
+        return Err(ClientError::msg("DELIVER payload must be followed by CRLF"));
     }
     payload.truncate(size);
     let (reply_to, ack_subject) = match reply_to {
@@ -382,36 +387,36 @@ pub(super) async fn parse_hmsg<'a>(
 ) -> Result<ServerFrame> {
     let subject = parts
         .next()
-        .ok_or_else(|| ClientError::msg("HMSG missing subject"))?
+        .ok_or_else(|| ClientError::msg("HDELIVER missing subject"))?
         .to_string();
     let sid = parts
         .next()
-        .ok_or_else(|| ClientError::msg("HMSG missing sid"))?
+        .ok_or_else(|| ClientError::msg("HDELIVER missing sid"))?
         .to_string();
     let third = parts
         .next()
-        .ok_or_else(|| ClientError::msg("HMSG missing headers length"))?;
+        .ok_or_else(|| ClientError::msg("HDELIVER missing headers length"))?;
     let fourth = parts
         .next()
-        .ok_or_else(|| ClientError::msg("HMSG missing total length"))?;
+        .ok_or_else(|| ClientError::msg("HDELIVER missing total length"))?;
     let fifth = parts.next();
     if parts.next().is_some() {
-        return Err(ClientError::msg("HMSG has too many arguments"));
+        return Err(ClientError::msg("HDELIVER has too many arguments"));
     }
     let (reply_to, headers_len_token, total_len_token) = match fifth {
         Some(total_len) => (Some(third.to_string()), fourth, total_len),
         None => (None, third, fourth),
     };
-    let headers_len = parse_frame_len(headers_len_token, "HMSG headers length")?;
-    let total_len = parse_frame_len(total_len_token, "HMSG total length")?;
+    let headers_len = parse_frame_len(headers_len_token, "HDELIVER headers length")?;
+    let total_len = parse_frame_len(total_len_token, "HDELIVER total length")?;
     if headers_len > total_len {
         return Err(ClientError::msg(
-            "HMSG headers length exceeds total frame length",
+            "HDELIVER headers length exceeds total frame length",
         ));
     }
     if total_len > max_payload {
         return Err(ClientError::msg(format!(
-            "HMSG total length {total_len} exceeds max payload {max_payload}"
+            "HDELIVER total length {total_len} exceeds max payload {max_payload}"
         )));
     }
 
@@ -419,19 +424,21 @@ pub(super) async fn parse_hmsg<'a>(
     stream
         .read_exact(&mut frame)
         .await
-        .map_err(|err| ClientError::with_source("reading HMSG payload", err))?;
+        .map_err(|err| ClientError::with_source("reading HDELIVER payload", err))?;
     if &frame[total_len..] != b"\r\n" {
-        return Err(ClientError::msg("HMSG payload must be followed by CRLF"));
+        return Err(ClientError::msg(
+            "HDELIVER payload must be followed by CRLF",
+        ));
     }
     frame.truncate(total_len);
     let payload = frame.split_off(headers_len);
     let headers = parse_headers(&frame)?;
-    let ack_subject = header_value(&headers, "Broker-Ack").map(str::to_string);
-    let key = header_value(&headers, "Broker-Key-Hex")
-        .map(|key| decode_hex(key, "Broker-Key-Hex"))
+    let ack_subject = header_value(&headers, "Morrow-Ack").map(str::to_string);
+    let key = header_value(&headers, "Morrow-Key-Hex")
+        .map(|key| decode_hex(key, "Morrow-Key-Hex"))
         .transpose()?;
-    let timestamp_ms = header_value(&headers, "Broker-Timestamp")
-        .map(|value| parse_number(value, "Broker-Timestamp"))
+    let timestamp_ms = header_value(&headers, "Morrow-Timestamp")
+        .map(|value| parse_number(value, "Morrow-Timestamp"))
         .transpose()?;
     Ok(ServerFrame::Message(Message {
         subject,
@@ -468,11 +475,11 @@ pub(super) fn parse_frame_len(value: &str, field: &str) -> Result<usize> {
 
 pub(super) fn parse_headers(bytes: &[u8]) -> Result<Vec<(String, String)>> {
     let text = std::str::from_utf8(bytes)
-        .map_err(|err| ClientError::with_source("HMSG headers are not UTF-8", err))?;
+        .map_err(|err| ClientError::with_source("HDELIVER headers are not UTF-8", err))?;
     let mut lines = text.split("\r\n");
     match lines.next() {
-        Some("NATS/1.0") => {}
-        _ => return Err(ClientError::msg("HMSG headers missing NATS/1.0 line")),
+        Some("MORROW/1.0") => {}
+        _ => return Err(ClientError::msg("HDELIVER headers missing MORROW/1.0 line")),
     }
     let mut headers = Vec::new();
     for line in lines {
@@ -481,7 +488,7 @@ pub(super) fn parse_headers(bytes: &[u8]) -> Result<Vec<(String, String)>> {
         }
         let (name, value) = line
             .split_once(':')
-            .ok_or_else(|| ClientError::msg("malformed HMSG header line"))?;
+            .ok_or_else(|| ClientError::msg("malformed HDELIVER header line"))?;
         headers.push((name.trim().to_string(), value.trim().to_string()));
     }
     Ok(headers)

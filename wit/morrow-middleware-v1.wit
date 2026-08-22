@@ -1,4 +1,4 @@
-package broker:middleware@1.0.0;
+package morrow:middleware@1.0.0;
 
 interface host {
   resource message;

@@ -172,7 +172,7 @@ fn compaction_identity(
     })
 }
 
-impl Broker {
+impl Morrow {
     pub(super) async fn schedule_physical_compaction(&self) {
         if self.compaction_running.load(Ordering::Acquire) {
             return;

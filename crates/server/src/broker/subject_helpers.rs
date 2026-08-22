@@ -13,17 +13,17 @@ pub(super) fn consumer_id(
 }
 
 pub(super) fn is_inbox_subscription(subject: &str) -> bool {
-    subject == "_INBOX.>" || subject.starts_with("_INBOX.")
+    subject == "_MORROW/INBOX/**" || subject.starts_with("_MORROW/INBOX/")
 }
 
 pub(super) fn is_inbox_publish(subject: &str) -> bool {
-    subject.starts_with("_INBOX.")
+    subject.starts_with("_MORROW/INBOX/")
 }
 
 pub(super) fn inbox_belongs_to(subject: &str, client_id: &str) -> bool {
     subject
-        .strip_prefix("_INBOX.")
-        .is_some_and(|tail| tail == client_id || tail.starts_with(&format!("{client_id}.")))
+        .strip_prefix("_MORROW/INBOX/")
+        .is_some_and(|tail| tail == client_id || tail.starts_with(&format!("{client_id}/")))
 }
 
 pub(super) fn hex(bytes: &[u8]) -> String {

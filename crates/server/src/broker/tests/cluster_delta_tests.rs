@@ -17,7 +17,7 @@ async fn randomized_incremental_application_matches_full_reconciliation() {
                 let consumer_id = format!("consumer-{}", random % 8);
                 let record = ConsumerRecord {
                     consumer_id: consumer_id.clone(),
-                    filter_subject: "orders.>".into(),
+                    filter_subject: "orders/**".into(),
                     queue_group: None,
                     ack_timeout_ms: 1_000 + step,
                     max_in_flight: 16,
@@ -57,7 +57,7 @@ async fn randomized_incremental_application_matches_full_reconciliation() {
                     stream: crate::stream::StreamId::new("orders").unwrap(),
                     partition: crate::stream::PartitionId(0),
                     offset: 0,
-                    subject: "orders.created".into(),
+                    subject: "orders/created".into(),
                     key: None,
                     headers: vec![],
                     timestamp_ms: step,
@@ -115,7 +115,7 @@ async fn duplicate_consumer_delta_is_idempotent_and_does_not_regress_cursors() {
     let scenario = Scenario::new();
     let record = ConsumerRecord {
         consumer_id: "consumer".into(),
-        filter_subject: "orders.>".into(),
+        filter_subject: "orders/**".into(),
         queue_group: None,
         ack_timeout_ms: 1_000,
         max_in_flight: 16,
@@ -163,7 +163,7 @@ async fn duplicate_consumer_delta_is_idempotent_and_does_not_regress_cursors() {
     );
 }
 
-async fn assert_equivalent(incremental: &Broker, reconciled: &Broker) {
+async fn assert_equivalent(incremental: &Morrow, reconciled: &Morrow) {
     let incremental = incremental.inner.lock().await;
     let reconciled = reconciled.inner.lock().await;
     assert_eq!(incremental.messages, reconciled.messages);

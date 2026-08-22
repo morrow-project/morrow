@@ -23,7 +23,7 @@ async fn follower_applies_committed_consumer_and_partition_deltas() {
         .connect_durable("delta-subscriber", false, 5_000, 16)
         .await
         .unwrap();
-    subscriber.subscribe("orders.*", "sid-delta").await.unwrap();
+    subscriber.subscribe("orders/*", "sid-delta").await.unwrap();
     subscriber.ping_roundtrip().await.unwrap();
 
     wait_for_admin(follower.http_addr, "/subscriptions", |value| {
@@ -32,7 +32,7 @@ async fn follower_applies_committed_consumer_and_partition_deltas() {
             .is_some_and(|consumers| {
                 consumers
                     .iter()
-                    .any(|consumer| consumer["filter_subject"] == "orders.*")
+                    .any(|consumer| consumer["filter_subject"] == "orders/*")
             })
     })
     .await;
@@ -48,7 +48,7 @@ async fn follower_applies_committed_consumer_and_partition_deltas() {
     for message in 0..3 {
         publisher
             .publish_with_qos(
-                "orders.created",
+                "orders/created",
                 None,
                 b"delta",
                 client::protocol::AckLevel::Durable,

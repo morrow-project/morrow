@@ -13,4 +13,4 @@ broker-pem.workspace = true
 tokio-rustls.workspace = true
 
 [dev-dependencies]
-wat = "1.254.0"
+wat = "1.257.1"

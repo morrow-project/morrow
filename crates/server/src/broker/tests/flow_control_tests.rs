@@ -11,18 +11,18 @@ async fn connect_rejects_server_limit_overflow_before_configuring_client() {
 
     let mut timeout = TestClient::connect(&broker).await;
     timeout
-        .write_line(r#"CONNECT {"ack_timeout_ms":26,"max_in_flight":1}"#)
+        .write_line(r#"CONN {"ack_timeout_ms":26,"max_in_flight":1}"#)
         .await;
     timeout
-        .expect_err_contains("CONNECT ack_timeout_ms exceeds server limit 25")
+        .expect_err_contains("CONN ack_timeout_ms exceeds server limit 25")
         .await;
 
     let mut window = TestClient::connect(&broker).await;
     window
-        .write_line(r#"CONNECT {"ack_timeout_ms":25,"max_in_flight":1025}"#)
+        .write_line(r#"CONN {"ack_timeout_ms":25,"max_in_flight":1025}"#)
         .await;
     window
-        .expect_err_contains("CONNECT max_in_flight exceeds server limit 1024")
+        .expect_err_contains("CONN max_in_flight exceeds server limit 1024")
         .await;
 
     let connections = broker.connections.lock().await;
@@ -47,11 +47,11 @@ async fn fetch_limits_reject_without_creating_leases_and_allow_the_boundary() {
     let broker = deterministic_broker(config, clock, None);
     let mut consumer = TestClient::connect_pull(&broker, "puller", 25).await;
     consumer
-        .write_line("CONSUMER CREATE worker orders.* @earliest")
+        .write_line("CONSUMER CREATE worker orders/* @earliest")
         .await;
     assert_eq!(consumer.read_frame().await, "C-OK CREATE worker\r\n");
     let mut publisher = TestClient::connect_durable(&broker, "publisher", 25).await;
-    publisher.publish("orders.created", b"one").await;
+    publisher.publish("orders/created", b"one").await;
     publisher.ping_roundtrip().await;
 
     consumer.write_line("FETCH worker 2 3 0").await;
@@ -71,7 +71,7 @@ async fn fetch_limits_reject_without_creating_leases_and_allow_the_boundary() {
 
     consumer.write_line("FETCH worker 1 3 0").await;
     assert_eq!(consumer.read_frame().await, "BATCH worker 1 3\r\n");
-    assert!(consumer.read_frame().await.starts_with("DMSG worker "));
+    assert!(consumer.read_frame().await.starts_with("DDELIVER worker "));
 }
 
 #[tokio::test]
@@ -84,11 +84,11 @@ async fn encoded_batch_limit_rejects_before_creating_leases() {
     let broker = deterministic_broker(config, clock, None);
     let mut consumer = TestClient::connect_pull(&broker, "puller", 25).await;
     consumer
-        .write_line("CONSUMER CREATE worker orders.* @earliest")
+        .write_line("CONSUMER CREATE worker orders/* @earliest")
         .await;
     assert_eq!(consumer.read_frame().await, "C-OK CREATE worker\r\n");
     let mut publisher = TestClient::connect_durable(&broker, "publisher", 25).await;
-    publisher.publish("orders.created", b"one").await;
+    publisher.publish("orders/created", b"one").await;
     publisher.ping_roundtrip().await;
 
     consumer.write_line("FETCH worker 1 3 0").await;
@@ -112,16 +112,16 @@ async fn nack_and_extend_reject_deadlines_above_the_server_limit() {
     let broker = deterministic_broker(config, clock, None);
     let mut consumer = TestClient::connect_pull(&broker, "puller", 25).await;
     consumer
-        .write_line("CONSUMER CREATE worker orders.* @earliest")
+        .write_line("CONSUMER CREATE worker orders/* @earliest")
         .await;
     assert_eq!(consumer.read_frame().await, "C-OK CREATE worker\r\n");
     let mut publisher = TestClient::connect_durable(&broker, "publisher", 25).await;
-    publisher.publish("orders.created", b"one").await;
+    publisher.publish("orders/created", b"one").await;
     publisher.ping_roundtrip().await;
     consumer.write_line("FETCH worker 1 3 0").await;
     assert_eq!(consumer.read_frame().await, "BATCH worker 1 3\r\n");
     let delivery = consumer.read_frame().await;
-    assert!(delivery.starts_with("DMSG worker "));
+    assert!(delivery.starts_with("DDELIVER worker "));
 
     consumer.write_line("NACK worker 1 1 26").await;
     consumer

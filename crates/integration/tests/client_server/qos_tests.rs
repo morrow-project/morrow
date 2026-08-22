@@ -12,7 +12,7 @@ async fn client_publish_with_qos_receives_producer_ack() {
         .connect_durable("subscriber1", false, 5_000, 16)
         .await
         .unwrap();
-    subscriber.subscribe("orders.*", "sid1").await.unwrap();
+    subscriber.subscribe("orders/*", "sid1").await.unwrap();
     subscriber.ping_roundtrip().await.unwrap();
 
     let mut publisher = Client::connect(harness.addr, harness.max_payload)
@@ -25,7 +25,7 @@ async fn client_publish_with_qos_receives_producer_ack() {
         .unwrap();
     let ack = publisher
         .publish_with_qos(
-            "orders.created",
+            "orders/created",
             None,
             b"hello",
             client::protocol::AckLevel::Durable,
@@ -52,7 +52,7 @@ async fn unauthorized_qos_publish_returns_error() {
     let harness = Harness::start_with_config(
         auth_config_with_permissions(vec![(
             &publisher_auth,
-            Some(vec!["orders.*".to_string()]),
+            Some(vec!["orders/*".to_string()]),
             None,
         )]),
         None,
@@ -69,7 +69,7 @@ async fn unauthorized_qos_publish_returns_error() {
         .unwrap();
     let err = publisher
         .publish_with_qos(
-            "events.created",
+            "events/created",
             None,
             b"blocked",
             client::protocol::AckLevel::Durable,

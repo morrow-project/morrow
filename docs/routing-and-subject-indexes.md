@@ -44,9 +44,9 @@ queries per filter:
 
 | Filter | Adaptive segment query | In-memory full scan | Decision |
 | --- | ---: | ---: | --- |
-| `orders.42.event` | 0.538 ms | 37.696 ms | Keep exact index lookup |
-| `orders.*.event` | 2,016.517 ms | 56.068 ms | Use live in-memory scan for broad wildcard |
-| `orders.>` | 1,981.971 ms | 35.619 ms | Use live in-memory scan for broad tail wildcard |
+| `orders/42/event` | 0.538 ms | 37.696 ms | Keep exact index lookup |
+| `orders/*.event` | 2,016.517 ms | 56.068 ms | Use live in-memory scan for broad wildcard |
+| `orders/**` | 1,981.971 ms | 35.619 ms | Use live in-memory scan for broad tail wildcard |
 
 The broad-filter numbers include bounded fallback reads from immutable segment
 files and therefore are not a claim that disk scans beat the broker's existing

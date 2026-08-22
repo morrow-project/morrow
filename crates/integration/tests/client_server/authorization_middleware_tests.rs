@@ -7,7 +7,7 @@ async fn clustered_follower_authorizes_before_leader_middleware() {
     let publisher_auth = ClientAuth::from_seed("publisher1", [8; 32]);
     let harness = ClusterHarness::start_three_with_auth(auth_config_with_permissions(vec![(
         &publisher_auth,
-        Some(vec!["orders.*".to_string()]),
+        Some(vec!["orders/*".to_string()]),
         None,
     )]))
     .await;
@@ -22,7 +22,7 @@ async fn clustered_follower_authorizes_before_leader_middleware() {
         .install(vec![(
             MiddlewareManifest {
                 name: "must-not-run".to_string(),
-                subject: "events.denied".to_string(),
+                subject: "events/denied".to_string(),
                 stage: MiddlewareStage::Ingress,
                 capabilities: BTreeSet::new(),
                 failure_policy: FailurePolicy::FailClosed,
@@ -54,7 +54,7 @@ async fn clustered_follower_authorizes_before_leader_middleware() {
         .connect_authenticated(&info, &publisher_auth, false, 5_000, 16)
         .await
         .unwrap();
-    publisher.publish("events.denied", b"secret").await.unwrap();
+    publisher.publish("events/denied", b"secret").await.unwrap();
     match publisher.next_frame().await.unwrap().unwrap() {
         ServerFrame::Err(error) => assert!(error.contains("publish not authorized")),
         frame => panic!("expected publish auth error, got {frame:?}"),

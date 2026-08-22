@@ -1,6 +1,6 @@
 use super::*;
 
-impl Broker {
+impl Morrow {
     pub(super) async fn send_producer_ack(
         &self,
         publisher_id: u64,

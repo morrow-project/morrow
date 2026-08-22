@@ -11,19 +11,19 @@ fn equal_wildcard_route_binds_use_distinct_advertised_hostnames() {
                     "raft_listen": "0.0.0.0:5222",
                     "allow_insecure_internal_transports": true,
                     "route_listen": "0.0.0.0:6222",
-                    "route_advertise": format!("broker-{node_id}:6222"),
+                    "route_advertise": format!("morrow-{node_id}:6222"),
                     "routes": (1..=3)
                         .filter(|peer_id| *peer_id != node_id)
-                        .map(|peer_id| format!("broker-{peer_id}:6222"))
+                        .map(|peer_id| format!("morrow-{peer_id}:6222"))
                         .collect::<Vec<_>>(),
                     "raft_dir": format!("./target/equal-route-bind-node-{node_id}/raft"),
                     "bootstrap": node_id == 1,
                     "nodes": (1..=3)
                         .map(|peer_id| serde_json::json!({
                             "node_id": peer_id,
-                            "raft_addr": format!("broker-{peer_id}:5222"),
-                            "client_addr": format!("broker-{peer_id}:4222"),
-                            "route_addr": format!("broker-{peer_id}:6222")
+                            "raft_addr": format!("morrow-{peer_id}:5222"),
+                            "client_addr": format!("morrow-{peer_id}:4222"),
+                            "route_addr": format!("morrow-{peer_id}:6222")
                         }))
                         .collect::<Vec<_>>()
                 }

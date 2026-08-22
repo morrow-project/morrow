@@ -12,7 +12,7 @@ async fn auth_enabled_generates_fresh_nonce_per_connection() {
             permissions: None,
         },
     );
-    let broker = Broker::open(config).unwrap();
+    let broker = Morrow::open(config).unwrap();
     let (tx1, _rx1) = test_outbound_queue(&broker, 8);
     let (tx2, _rx2) = test_outbound_queue(&broker, 8);
 
@@ -44,13 +44,13 @@ async fn non_durable_connect_subscribes_as_transient_core() {
     let mut subscriber = scenario.connect().await;
     let mut publisher = scenario.connect_durable("publisher1", 25).await;
 
-    subscriber.write_line("CONNECT {}").await;
-    subscriber.subscribe("orders.*", "sid1").await;
+    subscriber.write_line("CONN {}").await;
+    subscriber.subscribe("orders/*", "sid1").await;
     subscriber.ping_roundtrip().await;
-    publisher.publish("orders.created", b"hello").await;
+    publisher.publish("orders/created", b"hello").await;
 
     let frame = subscriber.expect_msg().await;
-    assert_eq!(frame, "MSG orders.created sid1 5\r\nhello\r\n");
+    assert_eq!(frame, "DELIVER orders/created sid1 5\r\nhello\r\n");
     let inner = scenario.broker().inner.lock().await;
     assert!(inner.consumers.is_empty());
     drop(inner);
@@ -65,14 +65,14 @@ async fn durable_subscribe_publish_delivery_and_ack_are_deterministic() {
     let mut subscriber = scenario.connect_durable("client1", 25).await;
     let mut publisher = scenario.connect_durable("publisher1", 25).await;
 
-    subscriber.subscribe("orders.*", "sid1").await;
+    subscriber.subscribe("orders/*", "sid1").await;
     subscriber.ping_roundtrip().await;
-    publisher.publish("orders.created", b"hello").await;
+    publisher.publish("orders/created", b"hello").await;
 
     let frame = subscriber.expect_msg().await;
-    assert!(frame.starts_with("MSG orders.created sid1 _BROKER.ACK.durable-client1-sid1."));
+    assert!(frame.starts_with("DELIVER orders/created sid1 _MORROW/ACK/durable-client1-sid1/"));
     assert!(frame.ends_with("5\r\nhello\r\n"));
-    publisher.publish(&ack_subject(&frame), b"").await;
+    publisher.ack(&ack_subject(&frame)).await;
     publisher.ping_roundtrip().await;
 
     let inner = scenario.broker().inner.lock().await;
@@ -88,11 +88,11 @@ async fn redelivery_waits_for_manual_clock_deadline() {
     let mut subscriber = scenario.connect_durable("client1", 25).await;
     let mut publisher = scenario.connect_durable("publisher1", 25).await;
 
-    subscriber.subscribe("orders.*", "sid1").await;
+    subscriber.subscribe("orders/*", "sid1").await;
     subscriber.ping_roundtrip().await;
-    publisher.publish("orders.created", b"hello").await;
+    publisher.publish("orders/created", b"hello").await;
     let first = subscriber.expect_msg().await;
-    assert!(first.contains(".1.1 "));
+    assert!(first.contains("/1/1 "));
 
     scenario.advance_ms(24);
     scenario.tick_redelivery().await;
@@ -107,7 +107,7 @@ async fn redelivery_waits_for_manual_clock_deadline() {
     scenario.advance_ms(1);
     scenario.tick_redelivery().await;
     let second = subscriber.expect_msg().await;
-    assert!(second.starts_with("MSG orders.created sid1 _BROKER.ACK.durable-client1-sid1.1.2"));
+    assert!(second.starts_with("DELIVER orders/created sid1 _MORROW/ACK/durable-client1-sid1/1/2"));
     assert!(second.ends_with("5\r\nhello\r\n"));
 }
 #[tokio::test]
@@ -116,11 +116,11 @@ async fn acked_message_does_not_redeliver_after_manual_ticks() {
     let mut subscriber = scenario.connect_durable("client1", 25).await;
     let mut publisher = scenario.connect_durable("publisher1", 25).await;
 
-    subscriber.subscribe("orders.*", "sid1").await;
+    subscriber.subscribe("orders/*", "sid1").await;
     subscriber.ping_roundtrip().await;
-    publisher.publish("orders.created", b"hello").await;
+    publisher.publish("orders/created", b"hello").await;
     let frame = subscriber.expect_msg().await;
-    publisher.publish(&ack_subject(&frame), b"").await;
+    publisher.ack(&ack_subject(&frame)).await;
     publisher.ping_roundtrip().await;
 
     scenario.advance_ms(1_000);
@@ -138,11 +138,11 @@ async fn wal_replay_preserves_unacked_delivery_state_and_next_ids() {
     {
         let mut subscriber = scenario.connect_durable("client1", 25).await;
         let mut publisher = scenario.connect_durable("publisher1", 25).await;
-        subscriber.subscribe("orders.*", "sid1").await;
+        subscriber.subscribe("orders/*", "sid1").await;
         subscriber.ping_roundtrip().await;
-        publisher.publish("orders.created", b"hello").await;
+        publisher.publish("orders/created", b"hello").await;
         let first = subscriber.expect_msg().await;
-        assert!(first.contains(".1.1 "));
+        assert!(first.contains("/1/1 "));
         subscriber.disconnect().await;
         publisher.disconnect().await;
     }
@@ -150,11 +150,13 @@ async fn wal_replay_preserves_unacked_delivery_state_and_next_ids() {
     scenario.restart_broker().await;
     scenario.advance_ms(25);
     let mut subscriber = scenario.connect_durable("client1", 25).await;
-    subscriber.subscribe("orders.*", "sid1").await;
+    subscriber.subscribe("orders/*", "sid1").await;
     scenario.tick_redelivery().await;
 
     let redelivery = subscriber.expect_msg().await;
-    assert!(redelivery.starts_with("MSG orders.created sid1 _BROKER.ACK.durable-client1-sid1.1.2"));
+    assert!(
+        redelivery.starts_with("DELIVER orders/created sid1 _MORROW/ACK/durable-client1-sid1/1/2")
+    );
 }
 #[tokio::test]
 async fn acked_message_does_not_redeliver_after_restart() {
@@ -162,11 +164,11 @@ async fn acked_message_does_not_redeliver_after_restart() {
     {
         let mut subscriber = scenario.connect_durable("client1", 25).await;
         let mut publisher = scenario.connect_durable("publisher1", 25).await;
-        subscriber.subscribe("orders.*", "sid1").await;
+        subscriber.subscribe("orders/*", "sid1").await;
         subscriber.ping_roundtrip().await;
-        publisher.publish("orders.created", b"hello").await;
+        publisher.publish("orders/created", b"hello").await;
         let frame = subscriber.expect_msg().await;
-        publisher.publish(&ack_subject(&frame), b"").await;
+        publisher.ack(&ack_subject(&frame)).await;
         publisher.ping_roundtrip().await;
         subscriber.disconnect().await;
         publisher.disconnect().await;
@@ -174,7 +176,7 @@ async fn acked_message_does_not_redeliver_after_restart() {
 
     scenario.restart_broker().await;
     let mut subscriber = scenario.connect_durable("client1", 25).await;
-    subscriber.subscribe("orders.*", "sid1").await;
+    subscriber.subscribe("orders/*", "sid1").await;
     subscriber.ping_roundtrip().await;
     scenario.advance_ms(1_000);
     scenario.tick_redelivery().await;
@@ -196,14 +198,14 @@ async fn wal_rotation_and_shutdown_checkpoint_preserve_durable_state() {
     {
         let mut subscriber = scenario.connect_durable("client1", 25).await;
         let mut publisher = scenario.connect_durable("publisher1", 25).await;
-        subscriber.subscribe("orders.*", "sid1").await;
+        subscriber.subscribe("orders/*", "sid1").await;
         subscriber.ping_roundtrip().await;
-        publisher.publish("orders.one", b"first").await;
+        publisher.publish("orders/one", b"first").await;
         let first = subscriber.expect_msg().await;
-        publisher.publish(&ack_subject(&first), b"").await;
-        publisher.publish("orders.two", b"second").await;
+        publisher.ack(&ack_subject(&first)).await;
+        publisher.publish("orders/two", b"second").await;
         let second = subscriber.expect_msg().await;
-        assert!(second.contains(".2.2 "));
+        assert!(second.contains("/2/2 "));
         subscriber.disconnect().await;
         publisher.disconnect().await;
     }
@@ -215,11 +217,11 @@ async fn wal_rotation_and_shutdown_checkpoint_preserve_durable_state() {
 
     scenario.advance_ms(25);
     let mut subscriber = scenario.connect_durable("client1", 25).await;
-    subscriber.subscribe("orders.*", "sid1").await;
+    subscriber.subscribe("orders/*", "sid1").await;
     scenario.tick_redelivery().await;
 
     let redelivery = subscriber.expect_msg().await;
-    assert!(redelivery.starts_with("MSG orders.two sid1 _BROKER.ACK.durable-client1-sid1.2.3"));
+    assert!(redelivery.starts_with("DELIVER orders/two sid1 _MORROW/ACK/durable-client1-sid1/2/3"));
     let inner = scenario.broker().inner.lock().await;
     assert_eq!(inner.messages[&1].stream.as_deref(), Some("orders"));
     assert!(inner.messages.contains_key(&2));
@@ -237,21 +239,28 @@ async fn request_reply_inbox_delivery_is_transient() {
     let mut responder = scenario.connect_durable("responder1", 25).await;
     let mut requester = scenario.connect_durable("requester1", 25).await;
 
-    responder.subscribe("service.echo", "sid1").await;
+    responder.subscribe("service/echo", "sid1").await;
     responder.ping_roundtrip().await;
-    requester.subscribe("_INBOX.requester.1", "inbox1").await;
+    requester
+        .subscribe("_MORROW/INBOX/requester/1", "inbox1")
+        .await;
     requester.ping_roundtrip().await;
     requester
-        .publish_with_reply("service.echo", Some("_INBOX.requester.1"), b"hello")
+        .publish_with_reply("service/echo", Some("_MORROW/INBOX/requester/1"), b"hello")
         .await;
 
     let request = responder.expect_hmsg().await;
-    assert!(request.starts_with("HMSG service.echo sid1 _INBOX.requester.1 "));
-    assert!(request.contains("\r\nBroker-Ack: _BROKER.ACK.durable-responder1-sid1."));
-    responder.publish("_INBOX.requester.1", b"world").await;
+    assert!(request.starts_with("HDELIVER service/echo sid1 _MORROW/INBOX/requester/1 "));
+    assert!(request.contains("\r\nMorrow-Ack: _MORROW/ACK/durable-responder1-sid1/"));
+    responder
+        .publish("_MORROW/INBOX/requester/1", b"world")
+        .await;
 
     let response = requester.expect_msg().await;
-    assert_eq!(response, "MSG _INBOX.requester.1 inbox1 5\r\nworld\r\n");
+    assert_eq!(
+        response,
+        "DELIVER _MORROW/INBOX/requester/1 inbox1 5\r\nworld\r\n"
+    );
     let inner = scenario.broker().inner.lock().await;
     assert!(inner.messages.contains_key(&1));
     assert_eq!(inner.consumers.len(), 1);
@@ -277,17 +286,17 @@ async fn durable_queue_group_delivers_one_copy() {
     let mut second = scenario.connect_durable("client2", 25).await;
     let mut publisher = scenario.connect_durable("publisher1", 25).await;
 
-    first.subscribe_queue("orders.*", "workers", "a").await;
+    first.subscribe_queue("orders/*", "workers", "a").await;
     first.ping_roundtrip().await;
-    second.subscribe_queue("orders.*", "workers", "b").await;
+    second.subscribe_queue("orders/*", "workers", "b").await;
     second.ping_roundtrip().await;
-    publisher.publish("orders.created", b"hello").await;
+    publisher.publish("orders/created", b"hello").await;
     publisher.ping_roundtrip().await;
 
     let inner = scenario.broker().inner.lock().await;
     let consumer = inner
         .consumers
-        .get("queue-workers-6f72646572732e2a")
+        .get("queue-workers-6f72646572732f2a")
         .unwrap();
     assert_eq!(consumer.delivered, 1);
     assert_eq!(consumer.in_flight.len(), 1);
@@ -298,14 +307,14 @@ async fn unsub_with_max_receives_one_more_durable_delivery_then_detaches() {
     let mut subscriber = scenario.connect_durable("client1", 25).await;
     let mut publisher = scenario.connect_durable("publisher1", 25).await;
 
-    subscriber.subscribe("orders.*", "sid1").await;
+    subscriber.subscribe("orders/*", "sid1").await;
     subscriber.ping_roundtrip().await;
     subscriber.write_line("UNSUB sid1 1").await;
-    publisher.publish("orders.created", b"one").await;
+    publisher.publish("orders/created", b"one").await;
     let first = subscriber.expect_msg().await;
     assert!(first.ends_with("3\r\none\r\n"));
 
-    publisher.publish("orders.created", b"two").await;
+    publisher.publish("orders/created", b"two").await;
     publisher.ping_roundtrip().await;
     subscriber.expect_no_frame_short().await;
     let inner = scenario.broker().inner.lock().await;
@@ -318,24 +327,24 @@ async fn queue_unsub_with_max_detaches_only_that_member_after_count() {
     let mut second = scenario.connect_durable("client2", 25).await;
     let mut publisher = scenario.connect_durable("publisher1", 25).await;
 
-    first.subscribe_queue("orders.*", "workers", "a").await;
+    first.subscribe_queue("orders/*", "workers", "a").await;
     first.ping_roundtrip().await;
-    second.subscribe_queue("orders.*", "workers", "b").await;
+    second.subscribe_queue("orders/*", "workers", "b").await;
     second.ping_roundtrip().await;
     first.write_line("UNSUB a 2").await;
 
-    publisher.publish("orders.created", b"one").await;
+    publisher.publish("orders/created", b"one").await;
     assert!(first.expect_msg().await.ends_with("3\r\none\r\n"));
-    publisher.publish("orders.created", b"two").await;
+    publisher.publish("orders/created", b"two").await;
     assert!(first.expect_msg().await.ends_with("3\r\ntwo\r\n"));
-    publisher.publish("orders.created", b"three").await;
+    publisher.publish("orders/created", b"three").await;
     assert!(second.expect_msg().await.ends_with("5\r\nthree\r\n"));
     first.expect_no_frame_short().await;
 
     let inner = scenario.broker().inner.lock().await;
     let consumer = inner
         .consumers
-        .get("queue-workers-6f72646572732e2a")
+        .get("queue-workers-6f72646572732f2a")
         .unwrap();
     assert_eq!(consumer.members.len(), 1);
     assert!(consumer.members.values().any(|member| member.sid == "b"));
@@ -346,14 +355,16 @@ async fn transient_unsub_with_max_receives_one_more_live_message_then_detaches()
     let mut subscriber = scenario.connect_durable("client1", 25).await;
     let mut publisher = scenario.connect_durable("publisher1", 25).await;
 
-    subscriber.subscribe("_INBOX.client1.1", "inbox1").await;
+    subscriber
+        .subscribe("_MORROW/INBOX/client1/1", "inbox1")
+        .await;
     subscriber.ping_roundtrip().await;
     subscriber.write_line("UNSUB inbox1 1").await;
-    publisher.publish("_INBOX.client1.1", b"one").await;
+    publisher.publish("_MORROW/INBOX/client1/1", b"one").await;
     let first = subscriber.expect_msg().await;
-    assert_eq!(first, "MSG _INBOX.client1.1 inbox1 3\r\none\r\n");
+    assert_eq!(first, "DELIVER _MORROW/INBOX/client1/1 inbox1 3\r\none\r\n");
 
-    publisher.publish("_INBOX.client1.1", b"two").await;
+    publisher.publish("_MORROW/INBOX/client1/1", b"two").await;
     publisher.ping_roundtrip().await;
     subscriber.expect_no_frame_short().await;
     assert!(
@@ -372,20 +383,20 @@ async fn route_origin_publish_delivers_only_to_transient_subscribers() {
     let mut transient = scenario.connect().await;
     let mut durable = scenario.connect_durable("client1", 25).await;
 
-    transient.write_line("CONNECT {}").await;
-    transient.subscribe("orders.*", "sid1").await;
-    durable.subscribe("orders.*", "durable1").await;
+    transient.write_line("CONN {}").await;
+    transient.subscribe("orders/*", "sid1").await;
+    durable.subscribe("orders/*", "durable1").await;
     transient.ping_roundtrip().await;
     durable.ping_roundtrip().await;
 
     scenario
         .broker()
-        .deliver_route_publish("orders.created", None, b"hello")
+        .deliver_route_publish("orders/created", None, b"hello")
         .await
         .unwrap();
 
     let frame = transient.expect_msg().await;
-    assert_eq!(frame, "MSG orders.created sid1 5\r\nhello\r\n");
+    assert_eq!(frame, "DELIVER orders/created sid1 5\r\nhello\r\n");
     durable.expect_no_frame_short().await;
     let inner = scenario.broker().inner.lock().await;
     assert!(inner.messages.is_empty());
@@ -401,21 +412,23 @@ async fn disconnected_in_flight_message_redelivers_after_reconnect() {
     let mut subscriber = scenario.connect_durable("client1", 25).await;
     let mut publisher = scenario.connect_durable("publisher1", 25).await;
 
-    subscriber.subscribe("orders.*", "sid1").await;
+    subscriber.subscribe("orders/*", "sid1").await;
     subscriber.ping_roundtrip().await;
-    publisher.publish("orders.created", b"hello").await;
+    publisher.publish("orders/created", b"hello").await;
     let first = subscriber.expect_msg().await;
-    assert!(first.starts_with("MSG orders.created sid1 _BROKER.ACK.durable-client1-sid1.1.1"));
+    assert!(first.starts_with("DELIVER orders/created sid1 _MORROW/ACK/durable-client1-sid1/1/1"));
     subscriber.disconnect().await;
 
     scenario.advance_ms(25);
     let mut subscriber = scenario.connect_durable("client1", 25).await;
-    subscriber.subscribe("orders.*", "sid1").await;
+    subscriber.subscribe("orders/*", "sid1").await;
     subscriber.ping_roundtrip().await;
     scenario.tick_redelivery().await;
 
     let redelivery = subscriber.expect_msg().await;
-    assert!(redelivery.starts_with("MSG orders.created sid1 _BROKER.ACK.durable-client1-sid1.1.2"));
+    assert!(
+        redelivery.starts_with("DELIVER orders/created sid1 _MORROW/ACK/durable-client1-sid1/1/2")
+    );
     assert!(redelivery.ends_with("5\r\nhello\r\n"));
 }
 #[tokio::test]
@@ -424,16 +437,16 @@ async fn disconnected_in_flight_message_does_not_redeliver_before_deadline() {
     let mut subscriber = scenario.connect_durable("client1", 25).await;
     let mut publisher = scenario.connect_durable("publisher1", 25).await;
 
-    subscriber.subscribe("orders.*", "sid1").await;
+    subscriber.subscribe("orders/*", "sid1").await;
     subscriber.ping_roundtrip().await;
-    publisher.publish("orders.created", b"hello").await;
+    publisher.publish("orders/created", b"hello").await;
     let first = subscriber.expect_msg().await;
-    assert!(first.starts_with("MSG orders.created sid1 _BROKER.ACK.durable-client1-sid1.1.1"));
+    assert!(first.starts_with("DELIVER orders/created sid1 _MORROW/ACK/durable-client1-sid1/1/1"));
     subscriber.disconnect().await;
 
     scenario.advance_ms(24);
     let mut subscriber = scenario.connect_durable("client1", 25).await;
-    subscriber.subscribe("orders.*", "sid1").await;
+    subscriber.subscribe("orders/*", "sid1").await;
     subscriber.ping_roundtrip().await;
     scenario.tick_redelivery().await;
     subscriber.expect_no_frame_short().await;
@@ -447,7 +460,9 @@ async fn disconnected_in_flight_message_does_not_redeliver_before_deadline() {
     scenario.advance_ms(1);
     scenario.tick_redelivery().await;
     let redelivery = subscriber.expect_msg().await;
-    assert!(redelivery.starts_with("MSG orders.created sid1 _BROKER.ACK.durable-client1-sid1.1.2"));
+    assert!(
+        redelivery.starts_with("DELIVER orders/created sid1 _MORROW/ACK/durable-client1-sid1/1/2")
+    );
 }
 #[tokio::test]
 async fn ack_after_reconnect_survives_restart() {
@@ -455,21 +470,23 @@ async fn ack_after_reconnect_survives_restart() {
     let mut subscriber = scenario.connect_durable("client1", 25).await;
     let mut publisher = scenario.connect_durable("publisher1", 25).await;
 
-    subscriber.subscribe("orders.*", "sid1").await;
+    subscriber.subscribe("orders/*", "sid1").await;
     subscriber.ping_roundtrip().await;
-    publisher.publish("orders.created", b"hello").await;
+    publisher.publish("orders/created", b"hello").await;
     let first = subscriber.expect_msg().await;
-    assert!(first.starts_with("MSG orders.created sid1 _BROKER.ACK.durable-client1-sid1.1.1"));
+    assert!(first.starts_with("DELIVER orders/created sid1 _MORROW/ACK/durable-client1-sid1/1/1"));
     subscriber.disconnect().await;
 
     scenario.advance_ms(25);
     let mut subscriber = scenario.connect_durable("client1", 25).await;
-    subscriber.subscribe("orders.*", "sid1").await;
+    subscriber.subscribe("orders/*", "sid1").await;
     subscriber.ping_roundtrip().await;
     scenario.tick_redelivery().await;
     let redelivery = subscriber.expect_msg().await;
-    assert!(redelivery.starts_with("MSG orders.created sid1 _BROKER.ACK.durable-client1-sid1.1.2"));
-    publisher.publish(&ack_subject(&redelivery), b"").await;
+    assert!(
+        redelivery.starts_with("DELIVER orders/created sid1 _MORROW/ACK/durable-client1-sid1/1/2")
+    );
+    publisher.ack(&ack_subject(&redelivery)).await;
     publisher.ping_roundtrip().await;
     subscriber.disconnect().await;
     publisher.disconnect().await;
@@ -482,7 +499,7 @@ async fn ack_after_reconnect_survives_restart() {
         assert!(consumer.pending.is_empty());
     }
     let mut subscriber = scenario.connect_durable("client1", 25).await;
-    subscriber.subscribe("orders.*", "sid1").await;
+    subscriber.subscribe("orders/*", "sid1").await;
     subscriber.ping_roundtrip().await;
     scenario.advance_ms(1_000);
     scenario.tick_redelivery().await;
@@ -495,7 +512,7 @@ async fn ack_after_reconnect_survives_restart() {
     assert_eq!(consumer.cursors.committed_offset("orders", 0), Some(1));
 }
 #[tokio::test]
-async fn fake_cluster_runtime_drives_broker_flow_across_100_nodes() {
+async fn fake_cluster_runtime_drives_morrow_flow_across_100_nodes() {
     let scenario = Scenario::new_fake_cluster(100);
     let mut subscriber = scenario.connect_durable("client1", 25).await;
     let mut publisher = scenario.connect_durable("publisher1", 25).await;
@@ -503,15 +520,17 @@ async fn fake_cluster_runtime_drives_broker_flow_across_100_nodes() {
     assert_eq!(scenario.fake_cluster().node_count(), 100);
     assert_eq!(scenario.broker().cluster_leader().await, Some(1));
 
-    subscriber.subscribe("orders.*", "sid1").await;
+    subscriber.subscribe("orders/*", "sid1").await;
     subscriber.ping_roundtrip().await;
-    publisher.publish("orders.created", b"hello").await;
+    publisher.publish("orders/created", b"hello").await;
 
     let delivery = subscriber.expect_msg().await;
-    assert!(delivery.starts_with("MSG orders.created sid1 _BROKER.ACK.durable-client1-sid1.1.1"));
+    assert!(
+        delivery.starts_with("DELIVER orders/created sid1 _MORROW/ACK/durable-client1-sid1/1/1")
+    );
     assert!(delivery.ends_with("5\r\nhello\r\n"));
 
-    publisher.publish(&ack_subject(&delivery), b"").await;
+    publisher.ack(&ack_subject(&delivery)).await;
     publisher.ping_roundtrip().await;
 
     let inner = scenario.broker().inner.lock().await;

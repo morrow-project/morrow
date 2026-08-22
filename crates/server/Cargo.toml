@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [[bin]]
-name = "broker"
+name = "morrow"
 path = "src/main.rs"
 
 [dependencies]
@@ -23,5 +23,5 @@ wasmtime.workspace = true
 
 [dev-dependencies]
 ed25519-dalek.workspace = true
-tempfile = "3.23.0"
-wat = "1.254.0"
+tempfile = "3.27.0"
+wat = "1.257.1"

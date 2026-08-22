@@ -1,4 +1,4 @@
-use server::{Broker, Config};
+use server::{Config, Morrow};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -10,6 +10,6 @@ async fn main() -> server::error::Result<()> {
         .init();
 
     let config = Config::load_from_args()?;
-    let broker = Broker::open(config)?;
+    let broker = Morrow::open(config)?;
     broker.serve().await
 }

@@ -7,7 +7,7 @@ use std::{
     path::{Path, PathBuf},
     time::Duration,
 };
-const DEFAULT_CONFIG_PATH: &str = "broker.json";
+const DEFAULT_CONFIG_PATH: &str = "morrow.json";
 pub const DEFAULT_MAX_ACK_TIMEOUT_MS: u64 = 300_000;
 pub const DEFAULT_MAX_IN_FLIGHT: usize = 4_096;
 pub const DEFAULT_MAX_FETCH_MESSAGES: usize = 1_024;
@@ -144,7 +144,7 @@ impl Config {
         let admin_token = get_secret(value, "admin_token", "admin_token_file")?;
         let admin_tls = get_named_tls_config(value, "admin_tls")?;
         let quotas = get_resource_quotas(value)?;
-        let wal_dir = PathBuf::from(get_string(value, "wal_dir")?.unwrap_or("./broker-wal"));
+        let wal_dir = PathBuf::from(get_string(value, "wal_dir")?.unwrap_or("./morrow-wal"));
         let wal_segment_bytes =
             get_u64(value, "wal_segment_bytes")?.unwrap_or(crate::wal::DEFAULT_WAL_SEGMENT_BYTES);
         let fsync_interval_ms = get_u64(value, "fsync_interval_ms")?.unwrap_or(5);

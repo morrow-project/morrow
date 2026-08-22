@@ -55,7 +55,7 @@ fn parses_cluster_route_mesh_config() {
             "raft_listen": "127.0.0.1:5221",
             "allow_insecure_internal_transports": true,
             "route_listen": "127.0.0.1:6221",
-            "route_advertise": "broker-1:6221",
+            "route_advertise": "morrow-1:6221",
             "routes": ["127.0.0.1:6222", "127.0.0.1:6223"],
             "raft_dir": "./target/test-wal-config-routes/raft",
             "bootstrap": true,
@@ -75,7 +75,7 @@ fn parses_cluster_route_mesh_config() {
         cluster.route_listen,
         Some("127.0.0.1:6221".parse().unwrap())
     );
-    assert_eq!(cluster.route_advertise.as_deref(), Some("broker-1:6221"));
+    assert_eq!(cluster.route_advertise.as_deref(), Some("morrow-1:6221"));
     assert_eq!(cluster.routes, vec!["127.0.0.1:6222", "127.0.0.1:6223"]);
     assert_eq!(cluster.route_reconnect_ms, 500);
 }
@@ -85,7 +85,7 @@ fn derives_route_advertisement_from_self_node_metadata() {
     let config = Config::from_json(&route_advertisement_config()).unwrap();
     let cluster = config.cluster.unwrap();
     assert_eq!(cluster.route_listen, Some("0.0.0.0:6222".parse().unwrap()));
-    assert_eq!(cluster.advertised_route_addr(), Some("broker-1:6222"));
+    assert_eq!(cluster.advertised_route_addr(), Some("morrow-1:6222"));
 }
 
 #[test]
@@ -109,7 +109,7 @@ fn rejects_wildcard_duplicate_and_self_route_advertisements() {
     );
 
     let mut duplicate = route_advertisement_config();
-    duplicate["cluster"]["nodes"][1]["route_addr"] = serde_json::json!("broker-1:6222");
+    duplicate["cluster"]["nodes"][1]["route_addr"] = serde_json::json!("morrow-1:6222");
     assert!(
         Config::from_json(&duplicate)
             .unwrap_err()
@@ -118,7 +118,7 @@ fn rejects_wildcard_duplicate_and_self_route_advertisements() {
     );
 
     let mut self_seed = route_advertisement_config();
-    self_seed["cluster"]["routes"] = serde_json::json!(["broker-1:6222"]);
+    self_seed["cluster"]["routes"] = serde_json::json!(["morrow-1:6222"]);
     assert!(
         Config::from_json(&self_seed)
             .unwrap_err()
@@ -127,7 +127,7 @@ fn rejects_wildcard_duplicate_and_self_route_advertisements() {
     );
 
     let mut conflict = route_advertisement_config();
-    conflict["cluster"]["route_advertise"] = serde_json::json!("broker-other:6222");
+    conflict["cluster"]["route_advertise"] = serde_json::json!("morrow-other:6222");
     assert!(
         Config::from_json(&conflict)
             .unwrap_err()
@@ -146,21 +146,21 @@ fn route_advertisement_config() -> serde_json::Value {
             "raft_listen": "0.0.0.0:5222",
             "allow_insecure_internal_transports": true,
             "route_listen": "0.0.0.0:6222",
-            "routes": ["broker-2:6222"],
+            "routes": ["morrow-2:6222"],
             "raft_dir": "./target/test-route-advertisement-config/raft",
             "bootstrap": true,
             "nodes": [
                 {
                     "node_id": 1,
-                    "raft_addr": "broker-1:5222",
-                    "client_addr": "broker-1:4222",
-                    "route_addr": "broker-1:6222"
+                    "raft_addr": "morrow-1:5222",
+                    "client_addr": "morrow-1:4222",
+                    "route_addr": "morrow-1:6222"
                 },
                 {
                     "node_id": 2,
-                    "raft_addr": "broker-2:5222",
-                    "client_addr": "broker-2:4222",
-                    "route_addr": "broker-2:6222"
+                    "raft_addr": "morrow-2:5222",
+                    "client_addr": "morrow-2:4222",
+                    "route_addr": "morrow-2:6222"
                 }
             ]
         }
@@ -181,15 +181,15 @@ fn rejects_invalid_field_types() {
 fn parses_tls_config_without_validation() {
     let value = serde_json::json!({
         "tls": {
-            "cert_file": "./server-cert.pem",
-            "key_file": "./server-key.pem",
+            "cert_file": "./morrow-cert.pem",
+            "key_file": "./morrow-key.pem",
             "handshake_timeout_ms": 5000
         }
     });
 
     let tls = get_tls_config(&value).unwrap().unwrap();
-    assert_eq!(tls.cert_file, PathBuf::from("./server-cert.pem"));
-    assert_eq!(tls.key_file, PathBuf::from("./server-key.pem"));
+    assert_eq!(tls.cert_file, PathBuf::from("./morrow-cert.pem"));
+    assert_eq!(tls.key_file, PathBuf::from("./morrow-key.pem"));
     assert_eq!(tls.handshake_timeout_ms, 5000);
 }
 
@@ -420,8 +420,8 @@ fn parses_auth_config() {
                     "client_id": "client1",
                     "public_key": "ABCD",
                     "permissions": {
-                        "publish": ["orders.*", "events.>"],
-                        "subscribe": ["orders.created"]
+                        "publish": ["orders/*", "events/**"],
+                        "subscribe": ["orders/created"]
                     }
                 }
             ]
@@ -435,11 +435,11 @@ fn parses_auth_config() {
     let permissions = client.permissions.as_ref().unwrap();
     assert_eq!(
         permissions.publish.as_ref().unwrap(),
-        &["orders.*".to_string(), "events.>".to_string()]
+        &["orders/*".to_string(), "events/**".to_string()]
     );
     assert_eq!(
         permissions.subscribe.as_ref().unwrap(),
-        &["orders.created".to_string()]
+        &["orders/created".to_string()]
     );
 }
 
@@ -463,7 +463,7 @@ fn rejects_invalid_auth_permission_pattern() {
                     "client_id": "client1",
                     "public_key": "abcd",
                     "permissions": {
-                        "publish": ["orders.>.created"]
+                        "publish": ["orders/**.created"]
                     }
                 }
             ]

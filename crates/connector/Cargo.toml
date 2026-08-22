@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [[bin]]
-name = "broker-connector"
+name = "morrow-connector"
 path = "src/main.rs"
 
 [dependencies]
@@ -15,4 +15,4 @@ tokio.workspace = true
 
 [dev-dependencies]
 server.workspace = true
-tempfile = "3.23.0"
+tempfile = "3.27.0"

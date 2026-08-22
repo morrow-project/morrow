@@ -13,7 +13,7 @@ fn config_control_record_allowlist_never_serializes_secret_contents_or_unknown_f
         "broker": "127.0.0.1:4222",
         "durable_id": "orders-sink",
         "consumer": "orders",
-        "filter_subject": "orders.>",
+        "filter_subject": "orders/**",
         "generation": 7,
         "checkpoint_file": dir.path().join("checkpoint.json"),
         "tls": {
@@ -78,7 +78,7 @@ async fn secure_secret_permissions_are_used_for_tls_authentication() {
     let addr = listener.local_addr().unwrap();
     let valid_seed = [7_u8; 32];
     let auth = ClientAuth::from_seed("connector-orders", valid_seed);
-    let broker = server::Broker::open(server::Config {
+    let broker = server::Morrow::open(server::Config {
         listen: addr,
         http_listen: None,
         admin_token: None,
@@ -96,8 +96,8 @@ async fn secure_secret_permissions_are_used_for_tls_authentication() {
         max_encoded_batch_bytes: server::config::DEFAULT_MAX_ENCODED_BATCH_BYTES,
         verbose: false,
         tls: Some(TlsConfig {
-            cert_file: fixture("server-cert.pem"),
-            key_file: fixture("server-key.pem"),
+            cert_file: fixture("morrow-cert.pem"),
+            key_file: fixture("morrow-key.pem"),
             handshake_timeout_ms: 500,
         }),
         auth: AuthConfig {
@@ -143,7 +143,7 @@ fn connector_config(
         broker,
         durable_id: "connector-orders".to_string(),
         consumer: "orders".to_string(),
-        filter_subject: "orders.>".to_string(),
+        filter_subject: "orders/**".to_string(),
         generation: 1,
         checkpoint_file: root.join("checkpoint.json"),
         tls: ConnectorTlsConfig {

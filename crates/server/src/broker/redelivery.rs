@@ -1,6 +1,6 @@
 use super::*;
 
-impl Broker {
+impl Morrow {
     pub(super) async fn redelivery_loop(self) {
         loop {
             let deadline = self.inner.lock().await.next_lease_deadline();

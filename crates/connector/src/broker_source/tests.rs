@@ -4,7 +4,7 @@ use super::*;
 fn source_batch_limits_reject_misbehaving_tasks() {
     let record = SourceRecord {
         source_offset: "1".to_string(),
-        subject: "orders.created".to_string(),
+        subject: "orders/created".to_string(),
         key: None,
         payload: vec![0; 5],
     };
