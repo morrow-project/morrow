@@ -71,9 +71,8 @@ jobs:
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
-          PROFILE_FLAG: ${{ github.event_name == 'pull_request' && '' || '--release' }}
         run: |
-          cargo test --target "${TARGET}" --workspace --locked ${PROFILE_FLAG}
+          cargo test --target "${TARGET}" --workspace --locked
 
   build:
     name: Build (${{ matrix.name }})
