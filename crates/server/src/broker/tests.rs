@@ -575,6 +575,7 @@ mod cluster_admin_tests;
 mod cluster_delta_tests;
 mod compaction_tests;
 mod cursor_tests;
+mod delivery_index_tests;
 mod flow_control_tests;
 mod middleware_tests;
 mod pull_tests;

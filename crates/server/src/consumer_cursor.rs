@@ -1,8 +1,5 @@
 use crate::{
-    error::Result,
-    partition_log::PartitionLogSet,
-    stream::{PartitionId, StreamCatalog},
-    wal::PublishRecord,
+    error::Result, partition_log::PartitionLogSet, stream::StreamCatalog, wal::PublishRecord,
 };
 use protocol::{StartPosition, subject};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -89,33 +86,32 @@ impl ConsumerCursorSet {
         &mut self,
         filter_subject: &str,
         messages: &HashMap<u64, PublishRecord>,
-        partition_sequences: &HashMap<(String, u32, u64), u64>,
+        partition_sequences: &BTreeMap<(String, u32, u64), u64>,
         logs: &PartitionLogSet,
         leased: &HashSet<u64>,
     ) -> Option<u64> {
-        self.observe_retention(messages);
         self.partitions
             .values()
-            .flat_map(|cursor| {
+            .filter_map(|cursor| {
                 logs.matching_offsets(
                     &cursor.stream,
-                    PartitionId(cursor.partition),
+                    crate::stream::PartitionId(cursor.partition),
                     filter_subject,
                 )
-                .ok()
+                .ok()?
+                .offsets
                 .into_iter()
-                .flat_map(|query| query.offsets)
-                .filter(move |offset| {
+                .filter(|offset| {
                     *offset >= cursor.committed_offset
                         && !cursor.acknowledged_offsets.contains(offset)
                 })
-                .filter_map(|offset| {
+                .find_map(|offset| {
                     partition_sequences
                         .get(&(cursor.stream.clone(), cursor.partition, offset))
+                        .filter(|seq| !leased.contains(seq))
                         .copied()
                 })
             })
-            .filter(|seq| !leased.contains(seq))
             .filter_map(|seq| {
                 messages
                     .get(&seq)
@@ -132,19 +128,6 @@ impl ConsumerCursorSet {
         if let Some(cursor) = self.cursor_for_mut(record) {
             cursor.delivered_offset = Some(cursor.delivered_offset.unwrap_or(0).max(offset));
         }
-    }
-
-    pub fn is_deliverable(
-        &mut self,
-        record: &PublishRecord,
-        messages: &HashMap<u64, PublishRecord>,
-    ) -> bool {
-        self.observe_retention(messages);
-        self.cursor_for(record).is_some_and(|cursor| {
-            record.offset.is_some_and(|offset| {
-                offset >= cursor.committed_offset && !cursor.acknowledged_offsets.contains(&offset)
-            })
-        })
     }
 
     pub fn acknowledge(

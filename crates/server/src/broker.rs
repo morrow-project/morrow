@@ -1,5 +1,6 @@
 use std::{
-    collections::{BTreeSet, HashMap, HashSet},
+    cmp::Reverse,
+    collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, HashSet},
     net::SocketAddr,
     sync::{
         Arc,
@@ -11,7 +12,7 @@ use std::{
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream},
-    sync::{Mutex, mpsc},
+    sync::{Mutex, Notify, mpsc},
 };
 use tokio_rustls::TlsAcceptor;
 use tracing::{error, info, warn};
@@ -20,7 +21,7 @@ use tracing::{error, info, warn};
 use openraft::BasicNode;
 use protocol::{AckSubject, Command, ConnectAuth, auth, subject};
 #[cfg(test)]
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::VecDeque;
 #[cfg(test)]
 use tokio::sync::oneshot;
 
@@ -44,7 +45,8 @@ use crate::{
 
 const DEFAULT_ACK_TIMEOUT_MS: u64 = 30_000;
 pub(crate) const DEFAULT_MAX_IN_FLIGHT: usize = 1024;
-const REDELIVERY_SCAN_INTERVAL_MS: u64 = 50;
+const MAX_EXPIRED_LEASES_PER_TICK: usize = 1_024;
+const RETENTION_TICK_INTERVAL_MS: u64 = 1_000;
 const CLUSTER_LOG_SCAN_INTERVAL_MS: u64 = 500;
 const UNAUTHENTICATED_READ_TIMEOUT_MS: u64 = 5_000;
 const ROUTE_FRAME_READ_TIMEOUT_MS: u64 = 5_000;
@@ -61,6 +63,7 @@ mod cluster_operations;
 mod cluster_runtime;
 mod compaction;
 mod consumer;
+mod delivery_index;
 mod fake_cluster;
 mod fake_cluster_types;
 mod hooks;
@@ -72,6 +75,8 @@ mod manual_clock;
 mod middleware_hooks;
 mod producer_ack;
 mod pull_consumer;
+mod pull_delivery;
+mod redelivery;
 mod retention;
 mod route_mesh;
 mod route_state;

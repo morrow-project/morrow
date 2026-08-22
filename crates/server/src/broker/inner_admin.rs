@@ -130,6 +130,7 @@ impl DurableBrokerState {
         }
         self.consumer_interest_index
             .insert(&record.filter_subject, consumer_id.clone());
+        self.ready_consumers.insert(consumer_id.clone());
         let initial_cursors = crate::consumer_cursor::ConsumerCursorSet::new(
             &record.filter_subject,
             record.start_position,

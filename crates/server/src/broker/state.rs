@@ -5,7 +5,17 @@ pub(super) struct DurableBrokerState {
     pub(super) consumers: HashMap<String, Consumer>,
     pub(super) consumer_interest_index: subject::SubjectTrie<String>,
     pub(super) messages: HashMap<u64, PublishRecord>,
-    pub(super) partition_sequences: HashMap<(String, u32, u64), u64>,
+    pub(super) partition_sequences: BTreeMap<(String, u32, u64), u64>,
+    pub(super) ready_consumers: BTreeSet<String>,
+    pub(super) lease_deadlines: BinaryHeap<Reverse<LeaseDeadline>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) struct LeaseDeadline {
+    pub(super) deadline_ms: u64,
+    pub(super) consumer_id: String,
+    pub(super) seq: u64,
+    pub(super) delivery_id: u64,
 }
 
 pub(super) struct ConnectionState {

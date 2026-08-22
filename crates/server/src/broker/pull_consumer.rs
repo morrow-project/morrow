@@ -9,14 +9,14 @@ pub(super) enum PullControl {
     Extend(u64),
 }
 
-struct PullBatch {
-    deliveries: Vec<PullDelivery>,
-    bytes: usize,
+pub(super) struct PullBatch {
+    pub(super) deliveries: Vec<PullDelivery>,
+    pub(super) bytes: usize,
 }
 
-struct PullDelivery {
-    message: PublishRecord,
-    lease: DeliveryAttemptRecord,
+pub(super) struct PullDelivery {
+    pub(super) message: PublishRecord,
+    pub(super) lease: DeliveryAttemptRecord,
 }
 
 impl Broker {
@@ -107,7 +107,7 @@ impl Broker {
                 .consumer_interest_index
                 .insert(&record.filter_subject, consumer_id.clone());
             inner.consumers.insert(
-                consumer_id,
+                consumer_id.clone(),
                 Consumer {
                     record,
                     cursors,
@@ -119,6 +119,7 @@ impl Broker {
                     delivered: 0,
                 },
             );
+            inner.mark_consumer_ready(&consumer_id);
             drop(inner);
             self.wal.flush_due().await?;
         }
@@ -152,6 +153,7 @@ impl Broker {
                     .consumer_interest_index
                     .remove(&consumer.record.filter_subject, &consumer_id);
             }
+            inner.ready_consumers.remove(&consumer_id);
             drop(inner);
             self.wal.flush_due().await?;
         }
@@ -375,7 +377,9 @@ impl Broker {
             .get_mut(&seq)
             .unwrap()
             .deadline_ms = deadline_ms;
+        inner.schedule_lease(consumer_id, seq, &record);
         drop(inner);
+        self.redelivery_notify.notify_one();
         self.wal.flush_due().await?;
         Ok(())
     }
@@ -441,16 +445,16 @@ impl Broker {
             .ok_or_else(|| BrokerError::msg("unknown connection"))?;
         crate::broker_ensure!(protocol_version >= 2, "CREDIT requires protocol version 2");
         let mut inner = self.inner.lock().await;
-        let (member, max_messages) = inner
+        let (consumer_id, member, max_messages) = inner
             .consumers
-            .values_mut()
-            .find_map(|consumer| {
+            .iter_mut()
+            .find_map(|(consumer_id, consumer)| {
                 let max_messages = consumer.record.max_in_flight;
                 consumer
                     .members
                     .get_mut(&connection_id)
                     .filter(|member| member.sid == sid)
-                    .map(|member| (member, max_messages))
+                    .map(|member| (consumer_id.clone(), member, max_messages))
             })
             .ok_or_else(|| BrokerError::msg("unknown durable subscription sid"))?;
         let max_bytes = self.config.max_payload.saturating_mul(max_messages);
@@ -459,130 +463,11 @@ impl Broker {
             .saturating_add(messages)
             .min(max_messages);
         member.credit_bytes = member.credit_bytes.saturating_add(bytes).min(max_bytes);
+        inner.mark_consumer_ready(&consumer_id);
         drop(inner);
         self.deliver_pending().await?;
         self.send_verbose_ok(connection_id).await
     }
-}
-
-impl DurableBrokerState {
-    fn prepare_pull_batch(
-        &mut self,
-        consumer_id: &str,
-        max_messages: usize,
-        max_bytes: usize,
-        max_encoded_bytes: usize,
-        partition_logs: &PartitionLogSet,
-        now: u64,
-    ) -> Result<PullBatch> {
-        let mut deliveries = Vec::new();
-        let mut bytes = 0usize;
-        let mut encoded_bytes = 0usize;
-        while deliveries.len() < max_messages {
-            let Some((seq, attempt, deadline_ms)) = self.next_pull_candidate(consumer_id, now)
-            else {
-                break;
-            };
-            let Some(metadata) = self.messages.get(&seq) else {
-                break;
-            };
-            let message = partition_logs.load_record(metadata)?;
-            let Some(next_payload_bytes) = bytes.checked_add(message.payload.len()) else {
-                crate::broker_bail!("FETCH payload byte count overflow")
-            };
-            if next_payload_bytes > max_bytes {
-                break;
-            }
-            let encoded_upper_bound = encoded_delivery_upper_bound(consumer_id, &message);
-            let Some(next_encoded_bytes) = encoded_bytes.checked_add(encoded_upper_bound) else {
-                crate::broker_bail!("FETCH encoded byte count overflow")
-            };
-            if next_encoded_bytes > max_encoded_bytes {
-                break;
-            }
-            let lease = self
-                .wal
-                .append_delivery_attempt(seq, consumer_id, deadline_ms, attempt)?;
-            let cursors = {
-                let consumer = self.consumers.get_mut(consumer_id).unwrap();
-                consumer.cursors.mark_delivered(&message);
-                consumer.in_flight.insert(
-                    seq,
-                    InFlight {
-                        delivery_id: lease.delivery_id,
-                        deadline_ms,
-                        attempt,
-                    },
-                );
-                consumer.pending_attempts.remove(&seq);
-                consumer.delivered += 1;
-                consumer.cursors.clone()
-            };
-            self.wal.append_consumer_cursor(&ConsumerCursorRecord {
-                consumer_id: consumer_id.to_string(),
-                cursors,
-            })?;
-            bytes = next_payload_bytes;
-            encoded_bytes = next_encoded_bytes;
-            deliveries.push(PullDelivery { message, lease });
-        }
-        Ok(PullBatch { deliveries, bytes })
-    }
-
-    fn next_pull_candidate(&mut self, consumer_id: &str, now: u64) -> Option<(u64, u32, u64)> {
-        let consumer = self.consumers.get_mut(consumer_id)?;
-        let expired = consumer
-            .in_flight
-            .iter()
-            .filter(|(_, lease)| lease.deadline_ms <= now)
-            .min_by_key(|(seq, _)| **seq)
-            .map(|(seq, lease)| (*seq, lease.attempt.saturating_add(1)));
-        let (seq, attempt) = if let Some(expired) = expired {
-            expired
-        } else {
-            if consumer.in_flight.len() >= consumer.record.max_in_flight {
-                return None;
-            }
-            let leased = consumer.in_flight.keys().copied().collect::<HashSet<_>>();
-            let seq = consumer.cursors.next_candidate(
-                &consumer.record.filter_subject,
-                &self.messages,
-                &leased,
-            )?;
-            let attempt = consumer.pending_attempts.get(&seq).copied().unwrap_or(1);
-            (seq, attempt)
-        };
-        Some((
-            seq,
-            attempt,
-            now.checked_add(consumer.record.ack_timeout_ms)?,
-        ))
-    }
-}
-
-fn encoded_delivery_upper_bound(consumer_id: &str, message: &PublishRecord) -> usize {
-    let headers = message
-        .headers
-        .iter()
-        .map(|header| (header.name.as_str(), header.value.as_str()))
-        .collect::<Vec<_>>();
-    protocol::durable_message(
-        consumer_id,
-        &message.subject,
-        message.reply_to.as_deref(),
-        &headers,
-        message.stream.as_deref().unwrap_or_default(),
-        message.partition.unwrap_or_default(),
-        message.offset.unwrap_or_default(),
-        message.key.as_deref(),
-        message.timestamp_ms,
-        u32::MAX,
-        u64::MAX,
-        u64::MAX,
-        u64::MAX,
-        &message.payload,
-    )
-    .len()
 }
 
 fn pull_consumer_id(durable_id: &str, name: &str) -> String {

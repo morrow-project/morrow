@@ -367,7 +367,7 @@ impl Broker {
             }
         };
 
-        if let Some((_consumer_id, record, sid, protocol_version)) = durable_record {
+        if let Some((consumer_id, record, sid, protocol_version)) = durable_record {
             if let Some(cluster) = self.cluster_runtime().await {
                 let cursors = {
                     let inner = self.inner.lock().await;
@@ -411,6 +411,7 @@ impl Broker {
                     credit_bytes: if protocol_version >= 2 { 0 } else { usize::MAX },
                 },
             );
+            inner.mark_consumer_ready(&consumer_id);
             drop(inner);
             self.deliver_pending().await?;
         }

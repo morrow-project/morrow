@@ -140,6 +140,20 @@ impl Broker {
                 ))
             })
             .collect();
+        let ready_consumers = consumers.keys().cloned().collect();
+        let lease_deadlines = consumers
+            .iter()
+            .flat_map(|(consumer_id, consumer)| {
+                consumer.in_flight.iter().map(|(seq, lease)| {
+                    Reverse(LeaseDeadline {
+                        deadline_ms: lease.deadline_ms,
+                        consumer_id: consumer_id.clone(),
+                        seq: *seq,
+                        delivery_id: lease.delivery_id,
+                    })
+                })
+            })
+            .collect();
         let cluster = {
             #[cfg(test)]
             {
@@ -160,6 +174,8 @@ impl Broker {
                 consumer_interest_index,
                 messages: replay.messages,
                 partition_sequences,
+                ready_consumers,
+                lease_deadlines,
             })),
             wal,
             partition_logs: Arc::new(partition_logs),
@@ -181,6 +197,7 @@ impl Broker {
             cluster_applied_index: Arc::new(AtomicU64::new(0)),
             cluster_delta_gate: Arc::new(Mutex::new(())),
             cluster_application_metrics: Arc::new(ClusterApplicationMetrics::default()),
+            redelivery_notify: Arc::new(Notify::new()),
             route_mesh,
             middleware: hooks.middleware.clone(),
             hooks,

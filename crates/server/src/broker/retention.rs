@@ -60,6 +60,7 @@ impl DurableBrokerState {
                 change.earliest_offset,
             );
         }
+        self.ready_consumers.extend(self.consumers.keys().cloned());
         Ok(())
     }
 }

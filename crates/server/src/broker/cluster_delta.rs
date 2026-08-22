@@ -130,6 +130,7 @@ impl DurableBrokerState {
                     self.consumer_interest_index
                         .remove(&consumer.record.filter_subject, &consumer_id);
                 }
+                self.ready_consumers.remove(&consumer_id);
             }
             _ => {}
         }
@@ -162,8 +163,10 @@ impl DurableBrokerState {
             subject: record.subject.clone(),
         })?;
         self.partition_sequences.insert(key, record.seq);
+        let subject = record.subject.clone();
         self.messages
             .insert(record.seq, record.into_resident_metadata());
+        self.mark_subject_ready(&subject);
         self.apply_stream_compaction(catalog);
         Ok(())
     }
@@ -180,5 +183,6 @@ impl DurableBrokerState {
         if !existed && let Some(cursors) = committed_cursors {
             consumer.cursors = cursors;
         }
+        self.ready_consumers.insert(consumer_id);
     }
 }

@@ -18,6 +18,7 @@ pub struct Broker {
     pub(super) cluster_applied_index: Arc<AtomicU64>,
     pub(super) cluster_delta_gate: Arc<Mutex<()>>,
     pub(super) cluster_application_metrics: Arc<ClusterApplicationMetrics>,
+    pub(super) redelivery_notify: Arc<Notify>,
     pub(super) route_mesh: Option<RouteMesh>,
     pub(super) middleware: MiddlewareRuntime,
     pub(super) hooks: BrokerHooks,

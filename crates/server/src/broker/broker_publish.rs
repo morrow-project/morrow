@@ -338,6 +338,7 @@ impl Broker {
             inner
                 .messages
                 .insert(record.seq, record.clone().into_resident_metadata());
+            inner.mark_subject_ready(&record.subject);
             inner.enforce_stream_retention(
                 &self.partition_logs,
                 &self.config.streams,
@@ -455,6 +456,7 @@ impl Broker {
                 consumer_id: ack.consumer_id.clone(),
                 cursors: cursor_snapshot,
             })?;
+            inner.mark_consumer_ready(&ack.consumer_id);
             should_cleanup = true;
         }
         if should_cleanup {
@@ -487,6 +489,9 @@ impl Broker {
                 "after-ack middleware rejected acknowledgement"
             );
         }
+        if valid {
+            self.deliver_pending().await?;
+        }
         Ok(valid)
     }
 
@@ -518,61 +523,13 @@ impl Broker {
                 self.hooks.clock.now_ms(),
             )?
         };
+        self.redelivery_notify.notify_one();
         self.wal.flush_due().await?;
 
         for delivery in deliveries {
             let _ = delivery.sender.send(delivery.frame).await;
         }
         Ok(())
-    }
-
-    pub(super) async fn redelivery_loop(self) {
-        let mut interval =
-            tokio::time::interval(Duration::from_millis(REDELIVERY_SCAN_INTERVAL_MS));
-        loop {
-            interval.tick().await;
-            if let Err(err) = self.expire_and_redeliver().await {
-                error!(error = ?err, "redelivery error");
-            }
-        }
-    }
-
-    pub(super) async fn expire_and_redeliver(&self) -> Result<()> {
-        let now = self.hooks.clock.now_ms();
-        if let Some(cluster) = self.cluster_runtime().await {
-            cluster.enforce_retention(now)?;
-            self.sync_cluster_deltas(&cluster).await?;
-        }
-        {
-            let _storage_operation = self.storage_gate.read().await;
-            let mut inner = self.inner.lock().await;
-            inner.enforce_stream_retention(&self.partition_logs, &self.config.streams, now)?;
-            let partitioned = inner
-                .messages
-                .iter()
-                .filter(|(_, message)| message.offset.is_some())
-                .map(|(seq, _)| *seq)
-                .collect::<HashSet<_>>();
-            for consumer in inner.consumers.values_mut() {
-                let expired: Vec<_> = consumer
-                    .in_flight
-                    .iter()
-                    .filter(|(_, in_flight)| in_flight.deadline_ms <= now)
-                    .map(|(seq, _)| *seq)
-                    .collect();
-                for seq in expired {
-                    if let Some(in_flight) = consumer.in_flight.remove(&seq) {
-                        if !partitioned.contains(&seq) {
-                            consumer.pending.insert(seq);
-                        }
-                        consumer
-                            .pending_attempts
-                            .insert(seq, in_flight.attempt.saturating_add(1));
-                    }
-                }
-            }
-        }
-        self.deliver_pending().await
     }
 
     pub(super) async fn send_to(&self, connection_id: u64, frame: Vec<u8>) -> Result<()> {

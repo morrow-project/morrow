@@ -9,19 +9,7 @@ impl DurableBrokerState {
         now: u64,
     ) -> Result<Vec<Delivery>> {
         let mut deliveries = Vec::new();
-        let mut consumer_ids = BTreeSet::new();
-        let mut subjects = HashSet::new();
-        for message in self.messages.values() {
-            if subjects.insert(message.subject.as_str()) {
-                consumer_ids.extend(self.consumer_interest_index.matching(&message.subject));
-            }
-        }
-        consumer_ids.extend(
-            self.consumers
-                .iter()
-                .filter(|(_, consumer)| !consumer.pending.is_empty())
-                .map(|(consumer_id, _)| consumer_id.clone()),
-        );
+        let consumer_ids = std::mem::take(&mut self.ready_consumers);
         for consumer_id in consumer_ids {
             loop {
                 let Some((seq, connection_id, sid, attempt, deadline_ms, message)) =
@@ -99,6 +87,7 @@ impl DurableBrokerState {
                         cursors,
                     })?;
                 }
+                self.schedule_lease(&consumer_id, seq, &delivery);
                 if let Some(client) = connections.clients.get(&connection_id) {
                     let frame = durable_message_frame(
                         &delivery_message,
@@ -157,30 +146,22 @@ impl DurableBrokerState {
             return Ok(None);
         }
         let leased = consumer.in_flight.keys().copied().collect::<HashSet<_>>();
-        let seq = if consumer.record.filter_subject.contains('*')
-            || consumer.record.filter_subject.contains('>')
-        {
-            consumer.cursors.next_candidate(
-                &consumer.record.filter_subject,
-                &self.messages,
-                &leased,
-            )
-        } else {
-            consumer.cursors.next_indexed_candidate(
+        let seq = consumer
+            .cursors
+            .next_indexed_candidate(
                 &consumer.record.filter_subject,
                 &self.messages,
                 &self.partition_sequences,
                 partition_logs,
                 &leased,
             )
-        }
-        .or_else(|| {
-            consumer
-                .pending
-                .iter()
-                .find(|seq| !leased.contains(seq))
-                .copied()
-        });
+            .or_else(|| {
+                consumer
+                    .pending
+                    .iter()
+                    .find(|seq| !leased.contains(seq))
+                    .copied()
+            });
         let Some(seq) = seq else {
             return Ok(None);
         };
@@ -344,6 +325,21 @@ impl DurableBrokerState {
             self.consumer_interest_index
                 .insert(&consumer.record.filter_subject, consumer_id.clone());
         }
+        self.ready_consumers = self.consumers.keys().cloned().collect();
+        self.lease_deadlines = self
+            .consumers
+            .iter()
+            .flat_map(|(consumer_id, consumer)| {
+                consumer.in_flight.iter().map(|(seq, lease)| {
+                    Reverse(LeaseDeadline {
+                        deadline_ms: lease.deadline_ms,
+                        consumer_id: consumer_id.clone(),
+                        seq: *seq,
+                        delivery_id: lease.delivery_id,
+                    })
+                })
+            })
+            .collect();
         Ok(())
     }
 
