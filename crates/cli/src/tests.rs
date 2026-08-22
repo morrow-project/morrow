@@ -57,6 +57,13 @@ fn parses_ping_args() {
 }
 
 #[test]
+fn parses_version_args_without_a_config_path() {
+    let args = Args::parse(["morrow-cli", "--version"].into_iter().map(str::to_string)).unwrap();
+    assert_eq!(args.config_path, PathBuf::from(DEFAULT_CONFIG_PATH));
+    assert_eq!(args.command, Command::Version);
+}
+
+#[test]
 fn parses_pub_args() {
     let args = Args::parse(
         [
