@@ -147,21 +147,48 @@ impl ConsumerCursorSet {
             .offset
             .ok_or_else(|| crate::error::BrokerError::msg("message has no partition offset"))?;
         let ack_window = self.ack_window;
-        let cursor = self
-            .cursor_for_mut(record)
-            .ok_or_else(|| crate::error::BrokerError::msg("consumer has no partition cursor"))?;
+        let key = cursor_key(
+            record.stream.as_deref().unwrap_or_default(),
+            record.partition.unwrap_or_default(),
+        );
+        let mut frontier = self.frontiers.remove(&key);
+        let Some(cursor) = self.cursor_for_mut(record) else {
+            if let Some(frontier) = frontier {
+                self.frontiers.insert(key, frontier);
+            }
+            return Err(crate::error::BrokerError::msg(
+                "consumer has no partition cursor",
+            ));
+        };
         if offset < cursor.committed_offset {
+            if let Some(frontier) = frontier.take() {
+                self.frontiers.insert(key, frontier);
+            }
             return Ok(());
         }
-        let closes_gap = next_matching_offset(cursor, filter_subject, messages) == Some(offset);
-        crate::broker_ensure!(
-            cursor.acknowledged_offsets.contains(&offset)
-                || cursor.acknowledged_offsets.len() < ack_window
-                || closes_gap,
-            "consumer acknowledgement window exceeded"
+        let closes_gap = frontier.as_ref().map_or_else(
+            || next_matching_offset(cursor, filter_subject, messages) == Some(offset),
+            |frontier| next_frontier_offset(cursor, frontier) == Some(offset),
         );
+        let allowed = cursor.acknowledged_offsets.contains(&offset)
+            || cursor.acknowledged_offsets.len() < ack_window
+            || closes_gap;
+        if !allowed {
+            let _ = cursor;
+            if let Some(frontier) = frontier {
+                self.frontiers.insert(key, frontier);
+            }
+            crate::broker_bail!("consumer acknowledgement window exceeded");
+        }
         cursor.acknowledged_offsets.insert(offset);
-        advance_committed(cursor, filter_subject, messages);
+        if let Some(frontier) = frontier.as_ref() {
+            advance_committed_from_frontier(cursor, frontier);
+        } else {
+            advance_committed(cursor, filter_subject, messages);
+        }
+        if let Some(frontier) = frontier {
+            self.frontiers.insert(key, frontier);
+        }
         Ok(())
     }
 
@@ -323,6 +350,22 @@ fn advance_committed(
         }
         cursor.committed_offset = next.saturating_add(1);
     }
+}
+
+fn advance_committed_from_frontier(cursor: &mut PartitionCursor, frontier: &VecDeque<u64>) {
+    while let Some(next) = next_frontier_offset(cursor, frontier) {
+        if !cursor.acknowledged_offsets.remove(&next) {
+            break;
+        }
+        cursor.committed_offset = next.saturating_add(1);
+    }
+}
+
+fn next_frontier_offset(cursor: &PartitionCursor, frontier: &VecDeque<u64>) -> Option<u64> {
+    frontier
+        .iter()
+        .copied()
+        .find(|offset| *offset >= cursor.committed_offset)
 }
 
 fn next_matching_offset(
