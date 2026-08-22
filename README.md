@@ -8,6 +8,17 @@ create live transient subscriptions. By default the broker runs as a single
 node; clustered mode uses OpenRaft for metadata consensus and leader election,
 with message data replicated directly between partition replicas.
 
+## Development and AI assistance
+
+Morrow is developed with AI-assisted tools. Human maintainers define the
+product direction and protocol, review and test changes, and remain responsible
+for the implementation's correctness, security, licensing, and releases. AI
+tools have contributed to portions of the implementation, refactoring, tests,
+and documentation; this project does not claim that every line was manually
+authored by a human. AI systems are not copyright holders or project members;
+credit and legal responsibility belong to the human contributors and rights
+holders.
+
 ## Configuration
 
 Runtime configuration is read from a JSON file. Start from the example:
