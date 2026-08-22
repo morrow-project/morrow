@@ -1,3 +1,4 @@
+use super::port_allocator::free_addr;
 pub(super) use client::{Client, ClientAuth, ServerFrame};
 pub(super) use server::{
     Config, Morrow,
@@ -7,11 +8,10 @@ pub(super) use server::{
     },
 };
 pub(super) use std::{
-    collections::HashSet,
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::{
-        Mutex, OnceLock,
+        Arc, OnceLock,
         atomic::{AtomicU64, Ordering},
     },
 };
@@ -82,7 +82,9 @@ pub(super) struct ClusterHarness {
     pub(super) max_payload: usize,
     secure: bool,
     pub(super) _dirs: Vec<TestDir>,
+    _test_lock: tokio::sync::OwnedMutexGuard<()>,
 }
+static CLUSTER_TEST_LOCK: OnceLock<Arc<tokio::sync::Mutex<()>>> = OnceLock::new();
 pub(super) struct ClusterHarnessNode {
     pub(super) node_id: u64,
     pub(super) client_addr: SocketAddr,
@@ -116,6 +118,11 @@ impl ClusterHarness {
         secure: bool,
         auth: AuthConfig,
     ) -> Self {
+        let test_lock = CLUSTER_TEST_LOCK
+            .get_or_init(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+            .lock_owned()
+            .await;
         let max_payload = 1024;
         let mut nodes = Vec::new();
         for node_id in 1..=3 {
@@ -212,6 +219,7 @@ impl ClusterHarness {
             max_payload,
             secure,
             _dirs: dirs,
+            _test_lock: test_lock,
         }
     }
 
@@ -345,21 +353,6 @@ impl ClusterHarness {
         }
         for task in self.server_tasks {
             task.abort();
-        }
-    }
-}
-pub(super) async fn free_addr() -> SocketAddr {
-    static RESERVED_PORTS: OnceLock<Mutex<HashSet<u16>>> = OnceLock::new();
-    let reserved_ports = RESERVED_PORTS.get_or_init(|| Mutex::new(HashSet::new()));
-
-    loop {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        drop(listener);
-
-        let mut reserved_ports = reserved_ports.lock().unwrap();
-        if reserved_ports.insert(addr.port()) {
-            return addr;
         }
     }
 }
@@ -587,7 +580,6 @@ pub(super) fn tls_key_file() -> PathBuf {
 pub(super) fn tls_ca_cert_file() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ca-cert.pem")
 }
-
 pub(super) fn internal_tls_config(node_id: u64) -> InternalTlsConfig {
     InternalTlsConfig {
         cert_file: internal_cert_file(node_id),
