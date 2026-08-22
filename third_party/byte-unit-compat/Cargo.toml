@@ -1,0 +1,15 @@
+[package]
+name = "byte-unit"
+version = "5.2.5"
+edition = "2024"
+publish = false
+
+[features]
+default = ["std", "byte"]
+std = []
+byte = []
+bit = []
+u128 = []
+serde = []
+schemars = []
+rocket = []
