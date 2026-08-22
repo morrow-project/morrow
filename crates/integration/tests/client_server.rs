@@ -1,3 +1,6 @@
+#[path = "client_server/port_allocator.rs"]
+mod port_allocator;
+
 #[path = "client_server/support.rs"]
 mod support;
 use support::*;
