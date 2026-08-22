@@ -1,7 +1,7 @@
 use super::{codec::*, subject_index::*, *};
 use crate::error::{BrokerError, ResultExt};
 use std::{
-    collections::{BTreeSet, VecDeque},
+    collections::{BTreeSet, HashSet, VecDeque},
     fs::{File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
     path::PathBuf,
@@ -13,6 +13,8 @@ const INDEX_STRIDE: u64 = 64;
 const RETENTION_OFFSET_FILE: &str = "retention-offset";
 const REWRITE_TMP_FILE: &str = "rewrite.plog.tmp";
 const REWRITE_MARKER_FILE: &str = "rewrite.marker";
+const COMPACTION_TMP_FILE: &str = "compact.plog.tmp";
+const COMPACTION_MARKER_FILE: &str = "compact.marker";
 
 #[derive(Debug)]
 struct RetentionRecord {
@@ -63,6 +65,7 @@ impl PartitionLog {
         std::fs::create_dir_all(&dir)
             .with_context(|| format!("creating partition-log directory {}", dir.display()))?;
         install_pending_rewrite(&dir)?;
+        install_pending_segment_compaction(&dir)?;
         let mut paths = segment_paths(&dir)?;
         if paths.is_empty() {
             let path = segment_path(&dir, 1);
@@ -269,6 +272,90 @@ impl PartitionLog {
         Ok(())
     }
 
+    pub(super) fn compact_visible_offsets(
+        &mut self,
+        visible_offsets: &BTreeSet<u64>,
+    ) -> Result<bool> {
+        let sealed_ranges = self.segment_ranges.len().saturating_sub(1);
+        for range_index in 0..sealed_ranges {
+            let path = self.segment_ranges[range_index].path.clone();
+            let records = read_segment_records(&path)?;
+            let retained = records
+                .iter()
+                .filter(|record| visible_offsets.contains(&record.offset))
+                .cloned()
+                .collect::<Vec<_>>();
+            if retained.len() == records.len() {
+                continue;
+            }
+
+            stage_segment_compaction(&self.dir, &path, &retained)?;
+            install_pending_segment_compaction(&self.dir)?;
+            rebuild_index(&path, &self.stream, self.partition)?;
+
+            let retained_offsets = retained
+                .iter()
+                .map(|record| record.offset)
+                .collect::<HashSet<_>>();
+            let old_bytes = self
+                .retention_records
+                .iter()
+                .filter(|record| {
+                    record.offset >= self.segment_ranges[range_index].first_offset
+                        && record.offset <= self.segment_ranges[range_index].last_offset
+                        && !retained_offsets.contains(&record.offset)
+                })
+                .map(|record| record.bytes)
+                .sum::<u64>();
+            let removed = self
+                .retention_records
+                .iter()
+                .filter(|record| {
+                    record.offset >= self.segment_ranges[range_index].first_offset
+                        && record.offset <= self.segment_ranges[range_index].last_offset
+                        && !retained_offsets.contains(&record.offset)
+                })
+                .count() as u64;
+            self.retention_records.retain(|record| {
+                retained_offsets.contains(&record.offset)
+                    || record.offset < self.segment_ranges[range_index].first_offset
+                    || record.offset > self.segment_ranges[range_index].last_offset
+            });
+            self.retained_bytes = self.retained_bytes.saturating_sub(old_bytes);
+            self.deleted_messages = self.deleted_messages.saturating_add(removed);
+            self.deleted_bytes = self.deleted_bytes.saturating_add(old_bytes);
+
+            if retained.is_empty() {
+                self.segment_ranges.remove(range_index);
+                self.sealed_subject_segments
+                    .retain(|segment| segment.path != path);
+                remove_segment_files(&path)?;
+            } else {
+                let range = &mut self.segment_ranges[range_index];
+                range.first_offset = retained[0].offset;
+                range.last_offset = retained.last().unwrap().offset;
+                range.reader = open_segment_reader(&path)?;
+                range.sparse_index = load_sparse_index(&path)?;
+                if let Some(segment) = self
+                    .sealed_subject_segments
+                    .iter_mut()
+                    .find(|segment| segment.path == path)
+                {
+                    *segment = SubjectSegment::new(
+                        path.clone(),
+                        retained
+                            .iter()
+                            .map(|record| (record.subject.clone(), record.offset))
+                            .collect(),
+                    );
+                    segment.rebuild(0)?;
+                }
+            }
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
     pub(super) fn enforce_retention(
         &mut self,
         policy: &RetentionPolicy,
@@ -394,6 +481,60 @@ fn open_segment_reader(path: &Path) -> Result<File> {
     let mut file = OpenOptions::new().read(true).open(path)?;
     validate_segment_header(&mut file, path)?;
     Ok(file)
+}
+
+fn read_segment_records(path: &Path) -> Result<Vec<MessageEnvelope>> {
+    let mut file = OpenOptions::new().read(true).open(path)?;
+    validate_segment_header(&mut file, path)?;
+    let mut records = Vec::new();
+    while let Some((record, _)) = read_batch(&mut file)? {
+        records.push(record);
+    }
+    Ok(records)
+}
+
+fn stage_segment_compaction(dir: &Path, path: &Path, records: &[MessageEnvelope]) -> Result<()> {
+    let tmp = dir.join(COMPACTION_TMP_FILE);
+    if tmp.exists() {
+        std::fs::remove_file(&tmp)?;
+    }
+    let mut file = create_segment(&tmp)?;
+    for record in records {
+        file.write_all(&encode_batch(record)?)?;
+    }
+    file.flush()?;
+    file.sync_data()?;
+    let marker = dir.join(COMPACTION_MARKER_FILE);
+    let target = path
+        .file_name()
+        .ok_or_else(|| BrokerError::msg("partition compaction target has no filename"))?;
+    std::fs::write(&marker, target.to_string_lossy().as_bytes())?;
+    OpenOptions::new().read(true).open(&marker)?.sync_data()?;
+    File::open(dir)?.sync_data()?;
+    Ok(())
+}
+
+fn install_pending_segment_compaction(dir: &Path) -> Result<()> {
+    let marker = dir.join(COMPACTION_MARKER_FILE);
+    if !marker.exists() {
+        return Ok(());
+    }
+    let target = String::from_utf8(std::fs::read(&marker)?)
+        .map_err(|_| BrokerError::msg("invalid partition compaction marker"))?;
+    let target = dir.join(target);
+    let tmp = dir.join(COMPACTION_TMP_FILE);
+    if tmp.exists() {
+        for extension in [INDEX_EXTENSION, "sidx"] {
+            let sidecar = target.with_extension(extension);
+            if sidecar.exists() {
+                std::fs::remove_file(sidecar)?;
+            }
+        }
+        std::fs::rename(&tmp, &target)?;
+    }
+    std::fs::remove_file(marker)?;
+    File::open(dir)?.sync_data()?;
+    Ok(())
 }
 
 fn load_sparse_index(path: &Path) -> Result<Vec<(u64, u64)>> {
