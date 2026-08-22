@@ -232,6 +232,7 @@ impl Broker {
             if ack.is_none() && verbose {
                 self.send_to(publisher_id, protocol::ok().to_vec()).await?;
             }
+            self.schedule_physical_compaction().await;
             return Ok(());
         }
         let stream = stream.unwrap();
@@ -344,7 +345,7 @@ impl Broker {
                 &self.config.streams,
                 self.hooks.clock.now_ms(),
             )?;
-            inner.apply_stream_compaction(&self.config.streams);
+            inner.apply_record_compaction(record.seq, &self.config.streams);
             record
         };
 
@@ -366,6 +367,7 @@ impl Broker {
             }
         }
         drop(storage_operation);
+        self.schedule_physical_compaction().await;
 
         if let Some(ack) = ack.filter(|_| !accepted_ack) {
             self.send_positioned_producer_ack(publisher_id, ack, &record)

@@ -164,10 +164,10 @@ impl DurableBrokerState {
         })?;
         self.partition_sequences.insert(key, record.seq);
         let subject = record.subject.clone();
-        self.messages
-            .insert(record.seq, record.into_resident_metadata());
+        let seq = record.seq;
+        self.messages.insert(seq, record.into_resident_metadata());
         self.mark_subject_ready(&subject);
-        self.apply_stream_compaction(catalog);
+        self.apply_record_compaction(seq, catalog);
         Ok(())
     }
 

@@ -268,6 +268,47 @@ impl PartitionLogSet {
             .rewrite(records, Some(change.earliest_offset))
     }
 
+    pub(crate) fn compact_visible_records(
+        &self,
+        records: &[PublishRecord],
+        catalog: &StreamCatalog,
+    ) -> Result<()> {
+        for stream in catalog
+            .definitions()
+            .iter()
+            .filter(|stream| stream.retention.compaction == crate::stream::CompactionPolicy::Key)
+        {
+            for partition in 0..stream.partitions {
+                let partition = PartitionId(partition);
+                let mut log = self
+                    .logs
+                    .get(&(stream.name.as_str().to_string(), partition))
+                    .expect("catalog partitions are opened together")
+                    .lock()
+                    .expect("partition log lock poisoned");
+                let mut retained = records
+                    .iter()
+                    .filter(|record| {
+                        record.stream.as_deref() == Some(stream.name.as_str())
+                            && record.partition == Some(partition.0)
+                    })
+                    .map(|record| {
+                        let offset = record.offset.ok_or_else(|| {
+                            crate::error::BrokerError::msg("compacted record has no offset")
+                        })?;
+                        log.read_offset(offset)?.ok_or_else(|| {
+                            crate::error::BrokerError::msg("compacted record is unavailable")
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                retained.sort_by_key(|record| record.offset);
+                let next_offset = log.retention_status(partition).next_offset;
+                log.rewrite(&retained, Some(next_offset))?;
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn retention_status(
         &self,
         stream: &str,
@@ -360,6 +401,22 @@ impl PartitionLogSet {
             .lock()
             .expect("partition log lock poisoned");
         operation()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn stage_partition_rewrite_for_test(
+        &self,
+        stream: &str,
+        partition: PartitionId,
+        records: &[MessageEnvelope],
+        next_offset: u64,
+    ) -> Result<()> {
+        self.logs
+            .get(&(stream.to_string(), partition))
+            .expect("test partition exists")
+            .lock()
+            .expect("partition log lock poisoned")
+            .stage_rewrite_for_test(records, next_offset)
     }
 }
 

@@ -270,7 +270,7 @@ impl DurableBrokerState {
             }
         }
         self.messages = state.messages;
-        self.apply_stream_compaction(catalog);
+        self.rebuild_compaction_index(catalog);
         self.partition_sequences = self
             .messages
             .values()

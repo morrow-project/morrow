@@ -11,6 +11,8 @@ const SEGMENT_EXTENSION: &str = "plog";
 const INDEX_EXTENSION: &str = "idx";
 const INDEX_STRIDE: u64 = 64;
 const RETENTION_OFFSET_FILE: &str = "retention-offset";
+const REWRITE_TMP_FILE: &str = "rewrite.plog.tmp";
+const REWRITE_MARKER_FILE: &str = "rewrite.marker";
 
 #[derive(Debug)]
 struct RetentionRecord {
@@ -29,6 +31,8 @@ struct SegmentRange {
 #[derive(Debug)]
 pub(super) struct PartitionLog {
     dir: PathBuf,
+    stream: StreamId,
+    partition: PartitionId,
     file: File,
     segment_id: u64,
     active_bytes: u64,
@@ -56,6 +60,7 @@ impl PartitionLog {
             .join(format!("partition-{:05}", partition.0));
         std::fs::create_dir_all(&dir)
             .with_context(|| format!("creating partition-log directory {}", dir.display()))?;
+        install_pending_rewrite(&dir)?;
         let mut paths = segment_paths(&dir)?;
         if paths.is_empty() {
             let path = segment_path(&dir, 1);
@@ -112,12 +117,10 @@ impl PartitionLog {
             }
         }
         envelopes.sort_by_key(|envelope| envelope.offset);
-        let first_offset = envelopes.first().map_or(0, |envelope| envelope.offset);
-        for (index, envelope) in envelopes.iter().enumerate() {
+        for pair in envelopes.windows(2) {
             crate::broker_ensure!(
-                envelope.offset == first_offset.saturating_add(index as u64),
-                "non-contiguous offset {} in stream {} partition {}",
-                envelope.offset,
+                pair[0].offset < pair[1].offset,
+                "partition offsets are not strictly increasing in stream {} partition {}",
                 stream.as_str(),
                 partition.0
             );
@@ -131,15 +134,13 @@ impl PartitionLog {
             .with_context(|| format!("opening partition-log segment {}", active_path.display()))?;
         let persisted_next_offset = read_retention_offset(&dir)?;
         let next_offset = envelopes.last().map_or(persisted_next_offset, |envelope| {
-            envelope.offset.saturating_add(1)
+            persisted_next_offset.max(envelope.offset.saturating_add(1))
         });
-        crate::broker_ensure!(
-            persisted_next_offset <= next_offset,
-            "partition-log retention offset exceeds the durable high watermark"
-        );
         Ok((
             Self {
                 dir,
+                stream: stream.clone(),
+                partition,
                 file,
                 segment_id,
                 active_bytes,
@@ -233,45 +234,26 @@ impl PartitionLog {
     pub(super) fn rewrite(
         &mut self,
         records: &[MessageEnvelope],
-        empty_next_offset: Option<u64>,
+        next_offset_floor: Option<u64>,
     ) -> Result<()> {
-        let next_offset = records.last().map_or_else(
-            || empty_next_offset.unwrap_or_default(),
-            |record| record.offset.saturating_add(1),
-        );
-        let first_offset = records.first().map_or(next_offset, |record| record.offset);
         self.flush()?;
-        for (_, path) in segment_paths(&self.dir)? {
-            std::fs::remove_file(&path)?;
-            let index = path.with_extension(INDEX_EXTENSION);
-            if index.exists() {
-                std::fs::remove_file(index)?;
-            }
-            let subject_index = path.with_extension("sidx");
-            if subject_index.exists() {
-                std::fs::remove_file(subject_index)?;
-            }
-        }
-        self.segment_id = 1;
-        let path = segment_path(&self.dir, self.segment_id);
-        self.file = create_segment(&path)?;
-        self.active_bytes = SEGMENT_HEADER_LEN;
-        self.next_offset = first_offset;
-        self.segment_ranges.clear();
-        self.sealed_subject_segments.clear();
-        self.active_subjects.clear();
-        self.subject_index_cache_bytes = 0;
-        self.retention_records.clear();
-        self.retained_bytes = 0;
-        for record in records {
-            self.append_committed(record.clone())?;
-        }
-        crate::broker_ensure!(
-            self.next_offset == next_offset,
-            "partition rewrite offset mismatch"
-        );
-        self.flush()?;
-        persist_retention_offset(&self.dir, next_offset)
+        let next_offset = records
+            .last()
+            .map_or(0, |record| record.offset.saturating_add(1))
+            .max(next_offset_floor.unwrap_or_default());
+        stage_rewrite(&self.dir, records, next_offset)?;
+        install_pending_rewrite(&self.dir)?;
+        let root = self
+            .dir
+            .parent()
+            .and_then(Path::parent)
+            .ok_or_else(|| BrokerError::msg("partition log has no stream root"))?;
+        let (mut replacement, _, _) =
+            PartitionLog::open(root, &self.stream, self.partition, self.segment_bytes)?;
+        replacement.deleted_messages = self.deleted_messages;
+        replacement.deleted_bytes = self.deleted_bytes;
+        *self = replacement;
+        Ok(())
     }
 
     pub(super) fn enforce_retention(
@@ -377,6 +359,15 @@ impl PartitionLog {
         }
         Ok(None)
     }
+
+    #[cfg(test)]
+    pub(super) fn stage_rewrite_for_test(
+        &self,
+        records: &[MessageEnvelope],
+        next_offset: u64,
+    ) -> Result<()> {
+        stage_rewrite(&self.dir, records, next_offset)
+    }
 }
 
 fn indexed_position(path: &Path, target: u64) -> Result<Option<u64>> {
@@ -420,6 +411,76 @@ fn persist_retention_offset(dir: &Path, next_offset: u64) -> Result<()> {
     OpenOptions::new().read(true).open(&tmp)?.sync_data()?;
     std::fs::rename(tmp, path)?;
     File::open(dir)?.sync_data()?;
+    Ok(())
+}
+
+fn stage_rewrite(dir: &Path, records: &[MessageEnvelope], next_offset: u64) -> Result<()> {
+    crate::broker_ensure!(
+        records
+            .windows(2)
+            .all(|pair| pair[0].offset < pair[1].offset),
+        "partition rewrite offsets are not strictly increasing"
+    );
+    crate::broker_ensure!(
+        records
+            .last()
+            .is_none_or(|record| record.offset < next_offset),
+        "partition rewrite next offset does not exceed retained offsets"
+    );
+    let tmp = dir.join(REWRITE_TMP_FILE);
+    if tmp.exists() {
+        std::fs::remove_file(&tmp)?;
+    }
+    let mut file = create_segment(&tmp)?;
+    for record in records {
+        file.write_all(&encode_batch(record)?)?;
+    }
+    file.flush()?;
+    file.sync_data()?;
+    let marker = dir.join(REWRITE_MARKER_FILE);
+    std::fs::write(&marker, next_offset.to_le_bytes())?;
+    OpenOptions::new().read(true).open(&marker)?.sync_data()?;
+    File::open(dir)?.sync_data()?;
+    Ok(())
+}
+
+fn install_pending_rewrite(dir: &Path) -> Result<()> {
+    let marker = dir.join(REWRITE_MARKER_FILE);
+    if !marker.exists() {
+        return Ok(());
+    }
+    let bytes = std::fs::read(&marker)?;
+    crate::broker_ensure!(bytes.len() == 8, "invalid partition rewrite marker");
+    let next_offset = u64::from_le_bytes(bytes.try_into().unwrap());
+    let tmp = dir.join(REWRITE_TMP_FILE);
+    let canonical = segment_path(dir, 1);
+    if tmp.exists() {
+        for (_, path) in segment_paths(dir)? {
+            remove_segment_files(&path)?;
+        }
+        std::fs::rename(&tmp, &canonical)?;
+    } else {
+        crate::broker_ensure!(canonical.exists(), "partition rewrite data is missing");
+        for (_, path) in segment_paths(dir)? {
+            if path != canonical {
+                remove_segment_files(&path)?;
+            }
+        }
+    }
+    persist_retention_offset(dir, next_offset)?;
+    std::fs::remove_file(marker)?;
+    File::open(dir)?.sync_data()?;
+    Ok(())
+}
+
+fn remove_segment_files(path: &Path) -> Result<()> {
+    std::fs::remove_file(path)?;
+    for extension in [INDEX_EXTENSION, "sidx"] {
+        let sidecar = path.with_extension(extension);
+        if sidecar.exists() {
+            std::fs::remove_file(sidecar)?;
+        }
+    }
     Ok(())
 }
 

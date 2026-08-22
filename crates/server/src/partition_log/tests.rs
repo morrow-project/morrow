@@ -221,6 +221,45 @@ fn rewriting_a_partition_removes_an_uncommitted_suffix() {
 }
 
 #[test]
+fn interrupted_sparse_rewrite_installs_atomically_on_restart() {
+    let dir = TempDir::new().unwrap();
+    let catalog = catalog(1);
+    let stream = &catalog.definitions()[0];
+    let (logs, _) = PartitionLogSet::open(dir.path(), &catalog, 4096).unwrap();
+    let first = logs.append(request(stream, None, &[])).unwrap();
+    let mut second_request = request(stream, None, &[]);
+    second_request.payload = b"superseded";
+    logs.append(second_request).unwrap();
+    let mut third_request = request(stream, Some(b"other"), &[]);
+    third_request.payload = b"latest";
+    let third = logs.append(third_request).unwrap();
+    logs.flush().unwrap();
+
+    logs.stage_partition_rewrite_for_test(
+        "orders",
+        PartitionId(0),
+        &[first.clone(), third.clone()],
+        3,
+    )
+    .unwrap();
+    drop(logs);
+
+    let (logs, replay) = PartitionLogSet::open(dir.path(), &catalog, 4096).unwrap();
+    assert_eq!(
+        replay
+            .iter()
+            .map(|record| record.offset)
+            .collect::<Vec<_>>(),
+        vec![0, 2]
+    );
+    assert_eq!(
+        logs.load_envelope("orders", PartitionId(0), 2).unwrap(),
+        Some(third)
+    );
+    assert_eq!(logs.append(request(stream, None, &[])).unwrap().offset, 3);
+}
+
+#[test]
 fn sealed_subject_index_matches_ordered_full_scan_results() {
     let dir = TempDir::new().unwrap();
     let catalog = catalog(1);

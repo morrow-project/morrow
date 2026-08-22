@@ -72,35 +72,12 @@ impl Broker {
             .into_iter()
             .map(|envelope| (envelope.legacy_seq, envelope))
             .collect::<HashMap<_, _>>();
-        replay.partition_appends.retain(|seq, reference| {
-            envelope_by_seq.contains_key(seq)
-                || !partition_logs.is_before_retention_floor(
-                    &reference.stream,
-                    crate::stream::PartitionId(reference.partition),
-                    reference.offset,
-                )
-        });
-        for reference in replay.partition_appends.values() {
-            let envelope = envelope_by_seq.get(&reference.seq).ok_or_else(|| {
-                BrokerError::msg(format!(
-                    "control WAL references missing stream record {}:{}:{}",
-                    reference.stream, reference.partition, reference.offset
-                ))
-            })?;
-            crate::broker_ensure!(
-                envelope.stream.as_str() == reference.stream
-                    && envelope.partition.0 == reference.partition
-                    && envelope.offset == reference.offset,
-                "control WAL partition reference does not match stream data"
-            );
-        }
-        replay.messages.retain(|_, record| record.stream.is_none());
-        replay.messages.extend(
-            envelope_by_seq.into_iter().map(|(seq, envelope)| {
-                (seq, PublishRecord::from(envelope).into_resident_metadata())
-            }),
-        );
-        compact_stream_records(&mut replay.messages, &config.streams);
+        let compaction_latest = reconcile_replayed_compaction(
+            &mut replay,
+            envelope_by_seq,
+            &partition_logs,
+            &config.streams,
+        )?;
         let tls_acceptor = config
             .tls
             .as_ref()
@@ -176,6 +153,8 @@ impl Broker {
                 partition_sequences,
                 ready_consumers,
                 lease_deadlines,
+                compaction_latest,
+                superseded_since_compaction: 0,
             })),
             wal,
             partition_logs: Arc::new(partition_logs),
@@ -198,6 +177,7 @@ impl Broker {
             cluster_delta_gate: Arc::new(Mutex::new(())),
             cluster_application_metrics: Arc::new(ClusterApplicationMetrics::default()),
             redelivery_notify: Arc::new(Notify::new()),
+            compaction_running: Arc::new(AtomicBool::new(false)),
             route_mesh,
             middleware: hooks.middleware.clone(),
             hooks,

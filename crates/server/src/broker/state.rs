@@ -8,6 +8,8 @@ pub(super) struct DurableBrokerState {
     pub(super) partition_sequences: BTreeMap<(String, u32, u64), u64>,
     pub(super) ready_consumers: BTreeSet<String>,
     pub(super) lease_deadlines: BinaryHeap<Reverse<LeaseDeadline>>,
+    pub(super) compaction_latest: HashMap<CompactionKey, (u64, u64)>,
+    pub(super) superseded_since_compaction: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]

@@ -45,6 +45,7 @@ impl DurableBrokerState {
             .collect::<Result<Vec<_>>>()?;
         partition_logs.retain_partition(change, &retained)?;
         self.messages.retain(|seq, _| !removed.contains(seq));
+        self.remove_compaction_sequences(&removed);
         self.partition_sequences
             .retain(|_, seq| !removed.contains(seq));
         for consumer in self.consumers.values_mut() {
