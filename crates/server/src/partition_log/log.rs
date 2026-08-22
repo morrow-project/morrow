@@ -26,6 +26,8 @@ struct SegmentRange {
     path: PathBuf,
     first_offset: u64,
     last_offset: u64,
+    reader: File,
+    sparse_index: Vec<(u64, u64)>,
 }
 
 #[derive(Debug)]
@@ -104,6 +106,8 @@ impl PartitionLog {
                     path: path.clone(),
                     first_offset: first.offset,
                     last_offset: last.offset,
+                    reader: open_segment_reader(path)?,
+                    sparse_index: load_sparse_index(path)?,
                 });
             }
             if active {
@@ -208,9 +212,11 @@ impl PartitionLog {
             range.last_offset = envelope.offset;
         } else {
             self.segment_ranges.push(SegmentRange {
-                path: active_path,
+                path: active_path.clone(),
                 first_offset: envelope.offset,
                 last_offset: envelope.offset,
+                reader: open_segment_reader(&active_path)?,
+                sparse_index: load_sparse_index(&active_path)?,
             });
         }
         self.active_subjects
@@ -221,6 +227,13 @@ impl PartitionLog {
                 envelope.offset,
                 position,
             )?;
+            if let Some(range) = self
+                .segment_ranges
+                .iter_mut()
+                .find(|range| range.path == active_path)
+            {
+                range.sparse_index.push((envelope.offset, position));
+            }
         }
         Ok(envelope)
     }
@@ -315,6 +328,14 @@ impl PartitionLog {
         self.subject_index_cache_bytes += sealed.rebuild(
             MAX_PARTITION_INDEX_CACHE_BYTES.saturating_sub(self.subject_index_cache_bytes),
         )?;
+        let sealed_path = segment_path(&self.dir, self.segment_id);
+        if let Some(range) = self
+            .segment_ranges
+            .iter_mut()
+            .find(|range| range.path == sealed_path)
+        {
+            range.sparse_index = load_sparse_index(&sealed_path)?;
+        }
         self.sealed_subject_segments.push(sealed);
         self.segment_id += 1;
         let path = segment_path(&self.dir, self.segment_id);
@@ -338,17 +359,16 @@ impl PartitionLog {
         })
     }
 
-    pub(super) fn read_offset(&self, offset: u64) -> Result<Option<MessageEnvelope>> {
-        for range in &self.segment_ranges {
+    pub(super) fn read_offset(&mut self, offset: u64) -> Result<Option<MessageEnvelope>> {
+        for range in &mut self.segment_ranges {
             if offset < range.first_offset || offset > range.last_offset {
                 continue;
             }
-            let mut file = OpenOptions::new().read(true).open(&range.path)?;
-            validate_segment_header(&mut file, &range.path)?;
-            if let Some(position) = indexed_position(&range.path, offset)? {
-                file.seek(SeekFrom::Start(position))?;
+            range.reader.seek(SeekFrom::Start(SEGMENT_HEADER_LEN))?;
+            if let Some(position) = indexed_position(&range.sparse_index, offset) {
+                range.reader.seek(SeekFrom::Start(position))?;
             }
-            while let Some((envelope, _)) = read_batch(&mut file)? {
+            while let Some((envelope, _)) = read_batch(&mut range.reader)? {
                 if envelope.offset == offset {
                     return Ok(Some(envelope));
                 }
@@ -370,28 +390,39 @@ impl PartitionLog {
     }
 }
 
-fn indexed_position(path: &Path, target: u64) -> Result<Option<u64>> {
+fn open_segment_reader(path: &Path) -> Result<File> {
+    let mut file = OpenOptions::new().read(true).open(path)?;
+    validate_segment_header(&mut file, path)?;
+    Ok(file)
+}
+
+fn load_sparse_index(path: &Path) -> Result<Vec<(u64, u64)>> {
     let index_path = path.with_extension(INDEX_EXTENSION);
     if !index_path.exists() {
-        return Ok(None);
+        return Ok(Vec::new());
     }
     let mut file = File::open(index_path)?;
+    let mut entries = Vec::new();
     let mut entry = [0_u8; 16];
-    let mut position = None;
     loop {
         match file.read_exact(&mut entry) {
-            Ok(()) => {
-                let offset = u64::from_le_bytes(entry[..8].try_into().unwrap());
-                if offset > target {
-                    break;
-                }
-                position = Some(u64::from_le_bytes(entry[8..].try_into().unwrap()));
-            }
+            Ok(()) => entries.push((
+                u64::from_le_bytes(entry[..8].try_into().unwrap()),
+                u64::from_le_bytes(entry[8..].try_into().unwrap()),
+            )),
             Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => break,
             Err(err) => return Err(err.into()),
         }
     }
-    Ok(position)
+    Ok(entries)
+}
+
+fn indexed_position(index: &[(u64, u64)], target: u64) -> Option<u64> {
+    match index.binary_search_by_key(&target, |(offset, _)| *offset) {
+        Ok(position) => Some(index[position].1),
+        Err(0) => None,
+        Err(position) => Some(index[position - 1].1),
+    }
 }
 
 fn read_retention_offset(dir: &Path) -> Result<u64> {
