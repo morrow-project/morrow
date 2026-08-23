@@ -19,6 +19,7 @@ struct ReplayState {
     consumers: HashMap<String, ReplayedConsumer>,
     dead_letters: HashMap<u64, DeadLetterRecord>,
     producer_sequences: HashMap<(String, u64, u64), ProducerSequenceRecord>,
+    groups: HashMap<String, crate::consumer_group::GroupRecord>,
 }
 
 pub(super) fn replay_dir(dir: &Path) -> Result<ReplayOutput> {
@@ -62,6 +63,7 @@ pub(super) fn replay_dir(dir: &Path) -> Result<ReplayOutput> {
         consumers: state.consumers,
         dead_letters: state.dead_letters,
         producer_sequences: state.producer_sequences,
+        groups: state.groups,
         next_seq: state.max_seq + 1,
         next_delivery_id: state.max_delivery_id + 1,
         duration_ms: millis_since(started),
@@ -215,6 +217,10 @@ fn apply_record(kind: u8, body: &[u8], state: &mut ReplayState) -> Result<()> {
                 (record.producer_id.clone(), record.epoch, record.sequence),
                 record,
             );
+        }
+        KIND_GROUP_STATE => {
+            let (group, record) = decode_group_state(body)?;
+            state.groups.insert(group, record);
         }
         _ => crate::broker_bail!("unknown WAL record kind {kind}"),
     }

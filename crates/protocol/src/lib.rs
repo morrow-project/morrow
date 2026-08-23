@@ -7,7 +7,7 @@ pub mod subject;
 
 pub use frames::*;
 pub use protocol::{
-    AckLevel, AckSubject, Command, ConnectAuth, ProducerAckRequest, ProducerSequence,
-    ProtocolError, RetryBackoff, RetryPolicy, RetryTerminalAction, StartPosition, read_command,
-    validate_identifier,
+    AckLevel, AckSubject, Command, ConnectAuth, GroupAssignmentStrategy, ProducerAckRequest,
+    ProducerSequence, ProtocolError, RetryBackoff, RetryPolicy, RetryTerminalAction, StartPosition,
+    read_command, validate_identifier,
 };

@@ -21,9 +21,48 @@ pub(super) async fn parse_frame(
         "DDELIVER" => parse_durable_message(stream, parts, max_payload)
             .await
             .map(Some),
+        "G-OK" => parse_group_ok(parts).map(Some),
         "DELIVER" => parse_msg(stream, parts, max_payload).await.map(Some),
         "HDELIVER" => parse_hmsg(stream, parts, max_payload).await.map(Some),
         _ => Err(ClientError::msg(format!("unsupported server frame {op}"))),
+    }
+}
+
+fn parse_group_ok<'a>(mut parts: impl Iterator<Item = &'a str>) -> Result<ServerFrame> {
+    let operation = next_part(&mut parts, "G-OK missing operation")?.to_string();
+    if operation == "JOIN" || operation == "HEARTBEAT" {
+        let group = next_part(&mut parts, "G-OK group response missing group")?.to_string();
+        let generation = next_part(&mut parts, "G-OK group response missing generation")?
+            .parse()
+            .map_err(|_| ClientError::msg("G-OK group generation is invalid"))?;
+        let assignment = parts.next().unwrap_or_default();
+        let partitions = if assignment.is_empty() {
+            Vec::new()
+        } else {
+            assignment
+                .split(',')
+                .map(|partition| {
+                    partition
+                        .parse()
+                        .map_err(|_| ClientError::msg("G-OK group partition is invalid"))
+                })
+                .collect::<Result<Vec<_>>>()?
+        };
+        reject_extra(&mut parts, "G-OK group response")?;
+        Ok(ServerFrame::GroupOk {
+            operation,
+            group: Some(group),
+            generation: Some(generation),
+            partitions,
+        })
+    } else {
+        reject_extra(&mut parts, "G-OK")?;
+        Ok(ServerFrame::GroupOk {
+            operation,
+            group: None,
+            generation: None,
+            partitions: Vec::new(),
+        })
     }
 }
 

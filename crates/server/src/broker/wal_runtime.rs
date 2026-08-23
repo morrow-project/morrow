@@ -1,4 +1,5 @@
 use super::*;
+use crate::wal::GroupStateRecord;
 use std::sync::mpsc::{self, SyncSender};
 
 const WAL_QUEUE_CAPACITY: usize = 128;
@@ -35,6 +36,11 @@ enum WalCommand {
     DeadLetter(DeadLetterRecord, mpsc::Sender<Result<()>>),
     DeadLetterPurge(u64, mpsc::Sender<Result<()>>),
     ProducerSequence(ProducerSequenceRecord, mpsc::Sender<Result<()>>),
+    GroupState(
+        String,
+        crate::consumer_group::GroupRecord,
+        mpsc::Sender<Result<()>>,
+    ),
     FlushDue(mpsc::Sender<Result<()>>),
     Flush(mpsc::Sender<Result<()>>),
     Checkpoint {
@@ -42,6 +48,7 @@ enum WalCommand {
         consumers: Vec<ReplayedConsumer>,
         dead_letters: Vec<DeadLetterRecord>,
         producer_sequences: Vec<ProducerSequenceRecord>,
+        groups: Vec<GroupStateRecord>,
         response: mpsc::Sender<Result<()>>,
     },
     Status {
@@ -141,6 +148,14 @@ impl WalRuntime {
         self.request(|response| WalCommand::ProducerSequence(record.clone(), response))
     }
 
+    pub(super) fn append_group_state(
+        &self,
+        group: &str,
+        record: &crate::consumer_group::GroupRecord,
+    ) -> Result<()> {
+        self.request(|response| WalCommand::GroupState(group.to_string(), record.clone(), response))
+    }
+
     pub(super) async fn flush_due(&self) -> Result<()> {
         let runtime = self.clone();
         tokio::task::spawn_blocking(move || runtime.request(WalCommand::FlushDue))
@@ -161,6 +176,7 @@ impl WalRuntime {
         consumers: Vec<ReplayedConsumer>,
         dead_letters: Vec<DeadLetterRecord>,
         producer_sequences: Vec<ProducerSequenceRecord>,
+        groups: Vec<GroupStateRecord>,
     ) -> Result<()> {
         let runtime = self.clone();
         tokio::task::spawn_blocking(move || {
@@ -169,6 +185,7 @@ impl WalRuntime {
                 consumers,
                 dead_letters,
                 producer_sequences,
+                groups,
                 response,
             })
         })
@@ -262,6 +279,9 @@ fn wal_worker(mut wal: Wal, receiver: mpsc::Receiver<WalCommand>) {
             WalCommand::ProducerSequence(record, response) => {
                 let _ = response.send(wal.append_producer_sequence(&record));
             }
+            WalCommand::GroupState(group, record, response) => {
+                let _ = response.send(wal.append_group_state(&group, &record));
+            }
             WalCommand::FlushDue(response) => {
                 let _ = response.send(wal.flush_due());
             }
@@ -273,6 +293,7 @@ fn wal_worker(mut wal: Wal, receiver: mpsc::Receiver<WalCommand>) {
                 consumers,
                 dead_letters,
                 producer_sequences,
+                groups,
                 response,
             } => {
                 let _ = response.send(wal.checkpoint(
@@ -280,6 +301,7 @@ fn wal_worker(mut wal: Wal, receiver: mpsc::Receiver<WalCommand>) {
                     consumers,
                     dead_letters,
                     producer_sequences,
+                    groups,
                 ));
             }
             WalCommand::Status {

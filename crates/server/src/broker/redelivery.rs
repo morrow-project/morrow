@@ -29,6 +29,9 @@ impl Morrow {
 
     pub(super) async fn expire_and_redeliver(&self) -> Result<()> {
         let now = self.hooks.clock.now_ms();
+        self.groups.lock().await.values_mut().for_each(|group| {
+            group.expire(now);
+        });
         if let Some(cluster) = self.cluster_runtime().await {
             cluster.enforce_retention(now)?;
             self.sync_cluster_deltas(&cluster).await?;

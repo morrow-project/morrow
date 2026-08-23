@@ -59,10 +59,22 @@ impl Morrow {
         command: BrokerCommand,
         response: &BrokerResponse,
     ) -> Result<()> {
+        let group = match &command {
+            BrokerCommand::GroupUpsert { group, record } => Some((group.clone(), record.clone())),
+            _ => None,
+        };
         self.inner
             .lock()
             .await
-            .apply_cluster_command(command, response, &self.config.streams)
+            .apply_cluster_command(command, response, &self.config.streams)?;
+        if let Some((group, record)) = group {
+            self.groups.lock().await.insert(
+                group,
+                crate::consumer_group::GroupCoordinator::from_replicated_record(record)
+                    .with_context(|| "applying replicated consumer-group state".to_string())?,
+            );
+        }
+        Ok(())
     }
 
     pub(super) fn cluster_applied_log_index(&self) -> Option<u64> {

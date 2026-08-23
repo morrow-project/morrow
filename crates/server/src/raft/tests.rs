@@ -300,3 +300,24 @@ fn consumer_metadata_upsert_and_delete_are_consensus_managed() {
     );
     assert!(state.consumers.is_empty());
 }
+
+#[test]
+fn consumer_group_metadata_and_offsets_are_consensus_managed() {
+    let mut coordinator =
+        crate::consumer_group::GroupCoordinator::new(3, Default::default()).unwrap();
+    coordinator.join("member-a", None, 0).unwrap();
+    let record = coordinator.record();
+    let mut state = DurableState::new(nodes());
+    assert_eq!(
+        state.apply_command(BrokerCommand::GroupUpsert {
+            group: "orders".into(),
+            record: record.clone(),
+        }),
+        BrokerResponse::GroupUpsert
+    );
+    assert_eq!(state.groups["orders"], record);
+    assert_eq!(
+        state.groups["orders"].snapshot.committed_offsets,
+        record.snapshot.committed_offsets
+    );
+}

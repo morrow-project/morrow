@@ -163,6 +163,15 @@ impl Morrow {
                 )
             })
             .collect();
+        let groups = replay
+            .groups
+            .into_iter()
+            .map(|(group, record)| {
+                crate::consumer_group::GroupCoordinator::from_record(record)
+                    .map(|coordinator| (group, coordinator))
+                    .with_context(|| "replaying consumer-group state".to_string())
+            })
+            .collect::<Result<HashMap<_, _>>>()?;
         let cluster = {
             #[cfg(test)]
             {
@@ -205,6 +214,8 @@ impl Morrow {
                 interest_index: subject::SubjectTrie::default(),
                 route_interest_counts: BTreeMap::new(),
             })),
+            groups: Arc::new(Mutex::new(groups)),
+            group_sessions: Arc::new(Mutex::new(HashMap::new())),
             next_connection_id: Arc::new(AtomicU64::new(1)),
             config,
             tls_acceptor,
@@ -308,8 +319,22 @@ impl Morrow {
                 },
             )
             .collect::<Vec<_>>();
+        drop(inner);
+        let groups = self
+            .groups
+            .lock()
+            .await
+            .iter()
+            .map(|(group, coordinator)| (group.clone(), coordinator.record()))
+            .collect::<Vec<_>>();
         self.wal
-            .checkpoint(messages, consumers, dead_letters, producer_sequences)
+            .checkpoint(
+                messages,
+                consumers,
+                dead_letters,
+                producer_sequences,
+                groups,
+            )
             .await?;
         self.wal.flush().await?;
         Ok(())
@@ -357,6 +382,18 @@ impl Morrow {
     pub(super) async fn metrics_response(&self) -> String {
         let connections = self.connections.lock().await.clients.len();
         let transient_subscriptions = self.transient.lock().await.subscriptions.len();
+        let groups = self.groups.lock().await;
+        let group_count = groups.len();
+        let group_members = groups
+            .values()
+            .map(|group| group.snapshot().members.len())
+            .sum::<usize>();
+        let group_moved_partitions = groups
+            .values()
+            .filter_map(|group| group.snapshot().rebalance)
+            .map(|rebalance| rebalance.moved_partitions.len())
+            .sum::<usize>();
+        drop(groups);
         let inner = self.inner.lock().await;
         let wal = inner
             .wal
@@ -423,6 +460,17 @@ impl Morrow {
         metrics.push_str("# TYPE morrow_transient_subscriptions gauge\n");
         metrics.push_str(&format!(
             "morrow_transient_subscriptions {transient_subscriptions}\n"
+        ));
+        metrics.push_str("# HELP morrow_consumer_groups Current consumer groups.\n");
+        metrics.push_str("# TYPE morrow_consumer_groups gauge\n");
+        metrics.push_str(&format!("morrow_consumer_groups {group_count}\n"));
+        metrics.push_str("# HELP morrow_consumer_group_members Current active group members.\n");
+        metrics.push_str("# TYPE morrow_consumer_group_members gauge\n");
+        metrics.push_str(&format!("morrow_consumer_group_members {group_members}\n"));
+        metrics.push_str("# HELP morrow_consumer_group_moved_partitions Partitions awaiting cooperative rebalance completion.\n");
+        metrics.push_str("# TYPE morrow_consumer_group_moved_partitions gauge\n");
+        metrics.push_str(&format!(
+            "morrow_consumer_group_moved_partitions {group_moved_partitions}\n"
         ));
         metrics.push_str("# HELP morrow_durable_consumers Current durable consumers.\n");
         metrics.push_str("# TYPE morrow_durable_consumers gauge\n");

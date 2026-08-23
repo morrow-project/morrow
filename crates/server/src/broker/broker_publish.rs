@@ -693,6 +693,7 @@ impl Morrow {
 
     pub(super) async fn remove_client(&self, connection_id: u64) -> Result<()> {
         self.pull_waiters.cancel_connection(connection_id);
+        self.group_sessions.lock().await.remove(&connection_id);
         self.connections.lock().await.clients.remove(&connection_id);
         let route_interest_changes = self
             .transient

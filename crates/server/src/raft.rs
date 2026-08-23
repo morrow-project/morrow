@@ -84,6 +84,10 @@ pub enum BrokerCommand {
     ConsumerDelete {
         consumer_id: String,
     },
+    GroupUpsert {
+        group: String,
+        record: crate::consumer_group::GroupRecord,
+    },
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BrokerResponse {
@@ -98,6 +102,7 @@ pub enum BrokerResponse {
     },
     ConsumerUpsert,
     ConsumerDelete,
+    GroupUpsert,
     Noop,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -118,6 +123,8 @@ pub struct DurableState {
     pub feature_gates: BTreeSet<String>,
     pub messages: HashMap<u64, PublishRecord>,
     pub consumers: HashMap<String, DurableConsumer>,
+    #[serde(default)]
+    pub groups: HashMap<String, crate::consumer_group::GroupRecord>,
     #[serde(default)]
     pub next_partition_offsets: HashMap<String, u64>,
     #[serde(default)]
@@ -151,6 +158,7 @@ impl DurableState {
             feature_gates: BTreeSet::new(),
             messages: HashMap::new(),
             consumers: HashMap::new(),
+            groups: HashMap::new(),
             next_partition_offsets: HashMap::new(),
             partition_commits: HashMap::new(),
             last_applied: None,
@@ -276,6 +284,10 @@ impl DurableState {
             BrokerCommand::ConsumerDelete { consumer_id } => {
                 self.consumers.remove(&consumer_id);
                 BrokerResponse::ConsumerDelete
+            }
+            BrokerCommand::GroupUpsert { group, record } => {
+                self.groups.insert(group, record);
+                BrokerResponse::GroupUpsert
             }
         }
     }

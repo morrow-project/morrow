@@ -1,6 +1,7 @@
 pub mod broker;
 pub mod config;
 pub mod consumer_cursor;
+pub mod consumer_group;
 pub mod error;
 pub mod middleware;
 pub mod partition_log;

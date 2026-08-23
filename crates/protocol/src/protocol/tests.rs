@@ -338,6 +338,26 @@ async fn parses_pull_consumer_commands() {
                 bytes: 8192,
             },
         ),
+        (
+            "GROUP JOIN orders worker-a 8 sticky instance-a\r\n",
+            Command::GroupJoin {
+                group: "orders".into(),
+                member: "worker-a".into(),
+                partitions: 8,
+                strategy: GroupAssignmentStrategy::Sticky,
+                instance_id: Some("instance-a".into()),
+            },
+        ),
+        (
+            "GROUP COMMIT orders worker-a 3 2 100\r\n",
+            Command::GroupCommit {
+                group: "orders".into(),
+                member: "worker-a".into(),
+                generation: 3,
+                partition: 2,
+                offset: 100,
+            },
+        ),
     ];
     for (wire, expected) in cases {
         let mut reader = BufReader::new(wire.as_bytes());

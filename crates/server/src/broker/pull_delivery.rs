@@ -7,9 +7,10 @@ impl DurableBrokerState {
         consumer_id: &str,
         partition_logs: &PartitionLogSet,
         now: u64,
+        allowed_partitions: Option<&BTreeSet<u32>>,
     ) -> Option<(u64, u32, u64, PublishRecord)> {
         let (seq, attempt, deadline_ms) =
-            self.next_pull_candidate(consumer_id, partition_logs, now)?;
+            self.next_pull_candidate(consumer_id, partition_logs, now, allowed_partitions)?;
         let metadata = self.messages.get(&seq)?.clone();
         if scheduled_at_ms(&metadata).is_some_and(|scheduled_at_ms| scheduled_at_ms > now) {
             return None;
@@ -97,12 +98,21 @@ impl DurableBrokerState {
         consumer_id: &str,
         partition_logs: &PartitionLogSet,
         now: u64,
+        allowed_partitions: Option<&BTreeSet<u32>>,
     ) -> Option<(u64, u32, u64)> {
         let consumer = self.consumers.get_mut(consumer_id)?;
         let expired = consumer
             .in_flight
             .iter()
-            .filter(|(_, lease)| lease.deadline_ms <= now)
+            .filter(|(seq, lease)| {
+                lease.deadline_ms <= now
+                    && allowed_partitions.is_none_or(|allowed| {
+                        self.messages
+                            .get(*seq)
+                            .and_then(|message| message.partition)
+                            .is_some_and(|partition| allowed.contains(&partition))
+                    })
+            })
             .min_by_key(|(seq, _)| **seq)
             .map(|(seq, lease)| (*seq, lease.attempt.saturating_add(1)));
         let (seq, attempt) = if let Some(expired) = expired {
@@ -120,13 +130,32 @@ impl DurableBrokerState {
                     &self.messages,
                     &self.partition_sequences,
                     partition_logs,
-                    |seq| in_flight.contains_key(&seq) || preparing.contains(&seq),
+                    |seq| {
+                        in_flight.contains_key(&seq)
+                            || preparing.contains(&seq)
+                            || allowed_partitions.is_some_and(|allowed| {
+                                !self
+                                    .messages
+                                    .get(&seq)
+                                    .and_then(|message| message.partition)
+                                    .is_some_and(|partition| allowed.contains(&partition))
+                            })
+                    },
                 )
                 .or_else(|| {
                     consumer
                         .pending
                         .iter()
-                        .find(|seq| !in_flight.contains_key(seq) && !preparing.contains(seq))
+                        .find(|seq| {
+                            !in_flight.contains_key(seq)
+                                && !preparing.contains(seq)
+                                && allowed_partitions.is_none_or(|allowed| {
+                                    self.messages
+                                        .get(seq)
+                                        .and_then(|message| message.partition)
+                                        .is_some_and(|partition| allowed.contains(&partition))
+                                })
+                        })
                         .copied()
                 })?;
             if self

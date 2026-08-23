@@ -88,6 +88,7 @@ Read the complete wire reference in
 - [Building and testing](docs/building.md)
 - [Contributing](docs/contributing.md)
 - [Operations and deployment](docs/operations.md)
+- [Dynamic consumer groups](docs/consumer-groups.md)
 - [Server architecture](crates/server/ARCHITECTURE.md)
 - [Protocol crate](crates/protocol/README.md)
 - [Client crate](crates/client/README.md)

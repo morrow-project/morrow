@@ -105,10 +105,20 @@ impl Morrow {
     pub(super) async fn sync_from_cluster(&self, cluster: &ClusterRuntime) -> Result<()> {
         let _storage_operation = self.storage_gate.read().await;
         let state = cluster.durable_state();
+        let group_records = state.groups.clone();
         let last_applied = state.last_applied.map(|log_id| log_id.index);
         let mut inner = self.inner.lock().await;
         inner.sync_durable_state(&self.partition_logs, state, &self.config.streams)?;
         drop(inner);
+        let coordinators = group_records
+            .into_iter()
+            .map(|(group, record)| {
+                crate::consumer_group::GroupCoordinator::from_record(record)
+                    .map(|coordinator| (group, coordinator))
+                    .with_context(|| "replaying replicated consumer-group state".to_string())
+            })
+            .collect::<Result<HashMap<_, _>>>()?;
+        *self.groups.lock().await = coordinators;
         self.set_cluster_applied_log_index(last_applied);
         self.cluster_application_metrics
             .full_reconciliations
