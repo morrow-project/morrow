@@ -6,7 +6,8 @@
 
 use std::{
     collections::BTreeMap,
-    fmt,
+    fmt, fs,
+    path::PathBuf,
     sync::{Arc, RwLock},
 };
 
@@ -82,6 +83,40 @@ impl KeyProvider for MemoryKeyProvider {
             .get(&version)
             .copied()
             .ok_or_else(|| BrokerError::msg("encryption key version unavailable"))
+    }
+}
+
+/// File-backed KMS adapter. The directory contains one exact 32-byte file per
+/// version (`key-<version>.bin`); the path and failures are safe to include in
+/// diagnostics, but key bytes are never returned in an error.
+pub struct FileKeyProvider {
+    directory: PathBuf,
+}
+
+impl FileKeyProvider {
+    pub fn new(directory: impl Into<PathBuf>) -> Self {
+        Self {
+            directory: directory.into(),
+        }
+    }
+}
+
+impl fmt::Debug for FileKeyProvider {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FileKeyProvider")
+            .field("directory", &self.directory)
+            .finish()
+    }
+}
+
+impl KeyProvider for FileKeyProvider {
+    fn load_key(&self, version: KeyVersion) -> Result<[u8; KEY_LEN]> {
+        let path = self.directory.join(format!("key-{}.bin", version.get()));
+        let bytes = fs::read(&path).map_err(|_| BrokerError::msg("encryption key unavailable"))?;
+        let key: [u8; KEY_LEN] = bytes
+            .try_into()
+            .map_err(|_| BrokerError::msg("encryption key has invalid length"))?;
+        Ok(key)
     }
 }
 
@@ -161,6 +196,7 @@ impl KeyRing {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     fn provider() -> Arc<MemoryKeyProvider> {
         let provider = Arc::new(MemoryKeyProvider::default());
@@ -213,5 +249,19 @@ mod tests {
         provider.revoke(KeyVersion::new(1));
         assert!(ring.decrypt(&blob, b"object-key").is_err());
         assert!(ring.rotate(KeyVersion::new(1)).is_err());
+    }
+
+    #[test]
+    fn file_key_provider_has_exact_length_and_versioned_key_files() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("key-7.bin"), [7u8; KEY_LEN]).unwrap();
+        let provider = FileKeyProvider::new(dir.path());
+        assert_eq!(
+            provider.load_key(KeyVersion::new(7)).unwrap(),
+            [7u8; KEY_LEN]
+        );
+        fs::write(dir.path().join("key-8.bin"), [8u8; KEY_LEN - 1]).unwrap();
+        assert!(provider.load_key(KeyVersion::new(8)).is_err());
+        assert!(provider.load_key(KeyVersion::new(9)).is_err());
     }
 }
