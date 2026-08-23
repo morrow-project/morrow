@@ -11,6 +11,9 @@ keys are immutable: a retry is accepted only when the existing bytes match the
 requested checksum. The manifest is published after all data objects, so a partial
 upload cannot authorize eviction. Credentials, endpoints, and encryption settings
 belong to the object-store implementation and are not represented in manifests.
+If an upload fails after some objects are written, `cleanup_orphans` removes only
+unreferenced objects below that backup's prefix and preserves both the published
+manifest and objects referenced by it.
 
 Restore validates the manifest, downloads and verifies every object into a staging
 directory, and publishes the directory only after all files pass size and checksum

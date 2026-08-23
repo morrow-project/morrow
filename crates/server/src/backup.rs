@@ -56,6 +56,7 @@ pub trait ObjectStore: Send + Sync {
     fn put_immutable(&self, key: &str, bytes: &[u8], sha256: &str) -> Result<()>;
     fn get(&self, key: &str) -> Result<Vec<u8>>;
     fn delete(&self, key: &str) -> Result<()>;
+    fn list(&self, prefix: &str) -> Result<Vec<String>>;
 }
 
 #[derive(Debug, Default)]
@@ -66,6 +67,7 @@ pub struct MemoryObjectStore {
 impl ObjectStore for MemoryObjectStore {
     fn put_immutable(&self, key: &str, bytes: &[u8], sha256: &str) -> Result<()> {
         verify_checksum(bytes, sha256)?;
+        validate_object_key(key)?;
         let mut objects = self.objects.lock().expect("object store lock poisoned");
         if let Some(existing) = objects.get(key) {
             crate::broker_ensure!(
@@ -94,6 +96,17 @@ impl ObjectStore for MemoryObjectStore {
             .remove(key);
         Ok(())
     }
+
+    fn list(&self, prefix: &str) -> Result<Vec<String>> {
+        Ok(self
+            .objects
+            .lock()
+            .expect("object store lock poisoned")
+            .keys()
+            .filter(|key| key.starts_with(prefix))
+            .cloned()
+            .collect())
+    }
 }
 
 #[derive(Debug)]
@@ -109,6 +122,7 @@ impl FileObjectStore {
         Ok(Self { root })
     }
     fn path(&self, key: &str) -> Result<PathBuf> {
+        validate_object_key(key)?;
         let path = self.root.join(key);
         crate::broker_ensure!(
             path.starts_with(&self.root),
@@ -121,6 +135,7 @@ impl FileObjectStore {
 impl ObjectStore for FileObjectStore {
     fn put_immutable(&self, key: &str, bytes: &[u8], sha256: &str) -> Result<()> {
         verify_checksum(bytes, sha256)?;
+        validate_object_key(key)?;
         let path = self.path(key)?;
         if path.exists() {
             let existing = fs::read(&path)?;
@@ -145,6 +160,16 @@ impl ObjectStore for FileObjectStore {
         let _ = fs::remove_file(self.path(key)?);
         Ok(())
     }
+
+    fn list(&self, prefix: &str) -> Result<Vec<String>> {
+        validate_object_key(prefix)?;
+        let root = self.root.join(prefix);
+        let mut paths = Vec::new();
+        if root.exists() {
+            collect_store_files(&self.root, &root, &mut paths)?;
+        }
+        Ok(paths)
+    }
 }
 
 pub fn sha256(bytes: &[u8]) -> String {
@@ -159,6 +184,19 @@ pub fn sha256(bytes: &[u8]) -> String {
 
 fn verify_checksum(bytes: &[u8], expected: &str) -> Result<()> {
     crate::broker_ensure!(sha256(bytes) == expected, "object checksum mismatch");
+    Ok(())
+}
+
+fn validate_object_key(key: &str) -> Result<()> {
+    let path = Path::new(key);
+    crate::broker_ensure!(
+        !key.is_empty()
+            && !path.is_absolute()
+            && path
+                .components()
+                .all(|component| !matches!(component, std::path::Component::ParentDir)),
+        "object key is unsafe"
+    );
     Ok(())
 }
 
@@ -375,6 +413,32 @@ impl<S: ObjectStore + 'static> BackupEngine<S> {
         self.store.put_immutable(&key, &encoded, &sha256(&encoded))
     }
 
+    /// Remove only unpublished objects under one backup prefix. The manifest and
+    /// every object it references are retained, making cleanup safe to retry.
+    pub fn cleanup_orphans(&self, backup_id: &str, manifest: &BackupManifest) -> Result<usize> {
+        validate_manifest(manifest)?;
+        crate::broker_ensure!(
+            manifest.backup_id == backup_id,
+            "orphan cleanup backup identity mismatch"
+        );
+        let prefix = format!("backups/{backup_id}/");
+        validate_object_key(&prefix)?;
+        let mut keep = manifest
+            .objects
+            .iter()
+            .map(|object| object.key.clone())
+            .collect::<std::collections::HashSet<_>>();
+        keep.insert(format!("{prefix}manifest.json"));
+        let mut removed = 0;
+        for key in self.store.list(&prefix)? {
+            if !keep.contains(&key) {
+                self.store.delete(&key)?;
+                removed += 1;
+            }
+        }
+        Ok(removed)
+    }
+
     /// Evict only sealed stream files whose immutable remote copies are still
     /// present and checksum-valid.  A manifest is the publication fence: callers
     /// cannot accidentally evict a file merely because an upload returned.
@@ -486,6 +550,23 @@ fn collect_files(root: &Path, current: &Path, files: &mut Vec<PathBuf>) -> Resul
             collect_files(root, &path, files)?;
         } else if path.extension().is_some_and(|extension| extension != "tmp") {
             files.push(path.strip_prefix(root).expect("root prefix").to_path_buf());
+        }
+    }
+    Ok(())
+}
+
+fn collect_store_files(root: &Path, current: &Path, files: &mut Vec<String>) -> Result<()> {
+    for entry in fs::read_dir(current)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            collect_store_files(root, &path, files)?;
+        } else {
+            files.push(
+                path.strip_prefix(root)
+                    .expect("object-store root prefix")
+                    .to_string_lossy()
+                    .into_owned(),
+            );
         }
     }
     Ok(())
@@ -749,6 +830,31 @@ mod tests {
             fs::read(destination.join("streams/orders/partition-00000/00000000000000000002.plog"))
                 .unwrap(),
             b"added"
+        );
+    }
+
+    #[test]
+    fn orphan_cleanup_is_scoped_and_object_keys_cannot_escape_store() {
+        let source = tempdir().unwrap();
+        fs::write(source.path().join("metadata"), b"state").unwrap();
+        let store = Arc::new(MemoryObjectStore::default());
+        let engine = BackupEngine::new(store.clone());
+        let manifest = engine
+            .create_full(source.path(), Vec::new(), "cluster-a", "cleanup", 1)
+            .unwrap();
+        store
+            .put_immutable("backups/cleanup/orphan", b"orphan", &sha256(b"orphan"))
+            .unwrap();
+        store
+            .put_immutable("backups/other/orphan", b"keep", &sha256(b"keep"))
+            .unwrap();
+        assert_eq!(engine.cleanup_orphans("cleanup", &manifest).unwrap(), 1);
+        assert!(store.get("backups/cleanup/orphan").is_err());
+        assert_eq!(store.get("backups/other/orphan").unwrap(), b"keep");
+        assert!(
+            store
+                .put_immutable("../outside", b"bad", &sha256(b"bad"))
+                .is_err()
         );
     }
 }
