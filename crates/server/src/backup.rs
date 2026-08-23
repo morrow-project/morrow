@@ -33,6 +33,8 @@ pub struct BackupObject {
     pub sha256: String,
     #[serde(default)]
     pub sealed: bool,
+    #[serde(default)]
+    pub key_version: Option<crate::encryption::KeyVersion>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -70,6 +72,9 @@ pub trait ObjectStore: Send + Sync {
     fn get(&self, key: &str) -> Result<Vec<u8>>;
     fn delete(&self, key: &str) -> Result<()>;
     fn list(&self, prefix: &str) -> Result<Vec<String>>;
+    fn encryption_key_version(&self) -> Option<crate::encryption::KeyVersion> {
+        None
+    }
 }
 
 impl<S> ObjectStore for Arc<S>
@@ -87,6 +92,9 @@ where
     }
     fn list(&self, prefix: &str) -> Result<Vec<String>> {
         self.as_ref().list(prefix)
+    }
+    fn encryption_key_version(&self) -> Option<crate::encryption::KeyVersion> {
+        self.as_ref().encryption_key_version()
     }
 }
 
@@ -137,6 +145,9 @@ where
     }
     fn list(&self, prefix: &str) -> Result<Vec<String>> {
         self.inner.list(prefix)
+    }
+    fn encryption_key_version(&self) -> Option<crate::encryption::KeyVersion> {
+        Some(self.keys.active_version())
     }
 }
 
@@ -292,6 +303,10 @@ impl<S: ObjectStore> ObjectStore for RetryingObjectStore<S> {
     fn list(&self, prefix: &str) -> Result<Vec<String>> {
         self.retry(|store| store.list(prefix))
     }
+
+    fn encryption_key_version(&self) -> Option<crate::encryption::KeyVersion> {
+        self.inner.encryption_key_version()
+    }
 }
 
 pub fn sha256(bytes: &[u8]) -> String {
@@ -372,6 +387,7 @@ impl<S: ObjectStore + 'static> BackupEngine<S> {
                 bytes: bytes.len() as u64,
                 sha256: digest,
                 sealed,
+                key_version: self.store.encryption_key_version(),
             });
         }
         let manifest = BackupManifest {
@@ -428,6 +444,7 @@ impl<S: ObjectStore + 'static> BackupEngine<S> {
                 bytes: bytes.len() as u64,
                 sha256: digest,
                 sealed,
+                key_version: self.store.encryption_key_version(),
             });
         }
         let manifest = BackupManifest {
