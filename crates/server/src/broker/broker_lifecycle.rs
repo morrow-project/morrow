@@ -316,6 +316,22 @@ impl Morrow {
 
         let quotas = self.quotas.snapshot();
         let cluster = self.cluster_response().await;
+        let streams = self.streams_response().await;
+        let retained_messages = streams
+            .streams
+            .iter()
+            .map(|stream| stream.retained_messages)
+            .sum::<usize>();
+        let retained_bytes = streams
+            .streams
+            .iter()
+            .map(|stream| stream.retained_bytes)
+            .sum::<u64>();
+        let partition_count = streams
+            .streams
+            .iter()
+            .map(|stream| stream.partition_status.len())
+            .sum::<usize>();
         let mut metrics = String::new();
         metrics.push_str("# HELP morrow_connections Current client connections.\n");
         metrics.push_str("# TYPE morrow_connections gauge\n");
@@ -396,6 +412,28 @@ impl Morrow {
         metrics.push_str(&format!(
             "morrow_wal_retained_messages {}\n",
             wal.retained_message_count
+        ));
+        metrics.push_str(
+            "# HELP morrow_partition_retained_messages Current retained partition messages.\n",
+        );
+        metrics.push_str("# TYPE morrow_partition_retained_messages gauge\n");
+        metrics.push_str(&format!(
+            "morrow_partition_retained_messages {retained_messages}\n"
+        ));
+        metrics
+            .push_str("# HELP morrow_partition_retained_bytes Current retained partition bytes.\n");
+        metrics.push_str("# TYPE morrow_partition_retained_bytes gauge\n");
+        metrics.push_str(&format!(
+            "morrow_partition_retained_bytes {retained_bytes}\n"
+        ));
+        metrics.push_str("# HELP morrow_configured_partitions Configured partition count.\n");
+        metrics.push_str("# TYPE morrow_configured_partitions gauge\n");
+        metrics.push_str(&format!("morrow_configured_partitions {partition_count}\n"));
+        metrics.push_str("# HELP morrow_recovered_partitions Recovered partition count.\n");
+        metrics.push_str("# TYPE morrow_recovered_partitions gauge\n");
+        metrics.push_str(&format!(
+            "morrow_recovered_partitions {}\n",
+            streams.recovery.completed_partitions
         ));
         metrics.push_str("# HELP morrow_wal_rotations_total WAL segment rotations.\n");
         metrics.push_str("# TYPE morrow_wal_rotations_total counter\n");
