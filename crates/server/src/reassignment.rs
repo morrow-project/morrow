@@ -364,10 +364,24 @@ pub fn plan_moves(
     placements: &[PartitionPlacement],
     brokers: &[BrokerCapacity],
 ) -> Vec<PlacementMove> {
-    let mut by_node = brokers
+    let by_node = brokers
         .iter()
         .map(|broker| (broker.node_id, broker))
         .collect::<BTreeMap<_, _>>();
+    let mut load = brokers
+        .iter()
+        .map(|broker| {
+            (
+                broker.node_id,
+                [
+                    broker.disk_used_bytes,
+                    u64::from(broker.partition_count),
+                    u64::from(broker.leader_count),
+                    broker.throughput_bytes_per_second,
+                ],
+            )
+        })
+        .collect::<HashMap<_, _>>();
     let mut moves = Vec::new();
     let mut ordered = placements.to_vec();
     ordered.sort_by_key(|placement| (placement.stream.clone(), placement.partition.0));
@@ -376,7 +390,10 @@ pub fn plan_moves(
             .replicas
             .iter()
             .filter_map(|node| by_node.get(node))
-            .max_by_key(|broker| broker.score())
+            .max_by_key(|broker| {
+                load.get(&broker.node_id)
+                    .map_or_else(|| broker.score(), |values| load_score(broker, values))
+            })
         else {
             continue;
         };
@@ -395,25 +412,61 @@ pub fn plan_moves(
                     || placement.constraints.min_distinct_regions
                         <= distinct_regions(&placement.replicas, &by_node)
             })
-            .min_by_key(|broker| broker.score())
+            .min_by_key(|broker| {
+                load.get(&broker.node_id)
+                    .map_or_else(|| broker.score(), |values| load_score(broker, values))
+            })
         else {
             continue;
         };
-        if destination.score() < source.score() {
+        let source_score = load
+            .get(&source.node_id)
+            .map_or_else(|| source.score(), |values| load_score(source, values));
+        let destination_score = load.get(&destination.node_id).map_or_else(
+            || destination.score(),
+            |values| load_score(destination, values),
+        );
+        if destination_score < source_score {
             moves.push(PlacementMove {
                 stream: placement.stream,
                 partition: placement.partition,
                 from: source.node_id,
                 to: destination.node_id,
             });
-            if let Some(source) = by_node.get_mut(&source.node_id) {
-                // Model the planned move so subsequent plans converge instead
-                // of repeatedly selecting the same overloaded broker.
-                let _ = source;
+            if let Some(values) = load.get_mut(&source.node_id) {
+                values[1] = values[1].saturating_sub(1);
+                values[2] = values[2].saturating_sub(if placement.leader == source.node_id {
+                    1
+                } else {
+                    0
+                });
+            }
+            if let Some(values) = load.get_mut(&destination.node_id) {
+                values[1] = values[1].saturating_add(1);
+                values[2] = values[2].saturating_add(if placement.leader == destination.node_id {
+                    1
+                } else {
+                    0
+                });
             }
         }
     }
     moves
+}
+
+fn load_score(broker: &BrokerCapacity, values: &[u64; 4]) -> (u128, u32, u32, u64, u64) {
+    let disk = if broker.disk_capacity_bytes == 0 {
+        u128::MAX
+    } else {
+        u128::from(values[0]) * 1_000_000 / u128::from(broker.disk_capacity_bytes)
+    };
+    (
+        disk,
+        values[1].min(u64::from(u32::MAX)) as u32,
+        values[2].min(u64::from(u32::MAX)) as u32,
+        values[3],
+        broker.node_id,
+    )
 }
 
 fn distinct_regions(replicas: &BTreeSet<u64>, brokers: &BTreeMap<u64, &BrokerCapacity>) -> usize {
