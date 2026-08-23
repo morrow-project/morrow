@@ -264,6 +264,93 @@ impl Morrow {
         self.cluster_runtime().await?.current_leader().await
     }
 
+    pub(super) async fn health_response(&self) -> HealthResponse {
+        let cluster = self.cluster_response().await;
+        let status = if matches!(cluster.cluster_status, "standalone" | "ready") {
+            "ready"
+        } else {
+            "forming"
+        };
+        HealthResponse {
+            status,
+            cluster_status: cluster.cluster_status,
+            role: cluster.role,
+        }
+    }
+
+    pub(super) async fn metrics_response(&self) -> String {
+        let connections = self.connections.lock().await.clients.len();
+        let transient_subscriptions = self.transient.lock().await.subscriptions.len();
+        let inner = self.inner.lock().await;
+        let wal = inner
+            .wal
+            .status(inner.messages.len(), inner.consumers.len());
+        let consumers = inner.consumers.len();
+        drop(inner);
+
+        let quotas = self.quotas.snapshot();
+        let cluster = self.cluster_response().await;
+        let mut metrics = String::new();
+        metrics.push_str("# HELP morrow_connections Current client connections.\n");
+        metrics.push_str("# TYPE morrow_connections gauge\n");
+        metrics.push_str(&format!("morrow_connections {connections}\n"));
+        metrics
+            .push_str("# HELP morrow_transient_subscriptions Current transient subscriptions.\n");
+        metrics.push_str("# TYPE morrow_transient_subscriptions gauge\n");
+        metrics.push_str(&format!(
+            "morrow_transient_subscriptions {transient_subscriptions}\n"
+        ));
+        metrics.push_str("# HELP morrow_durable_consumers Current durable consumers.\n");
+        metrics.push_str("# TYPE morrow_durable_consumers gauge\n");
+        metrics.push_str(&format!("morrow_durable_consumers {consumers}\n"));
+        metrics.push_str("# HELP morrow_wal_bytes Total WAL bytes.\n");
+        metrics.push_str("# TYPE morrow_wal_bytes gauge\n");
+        metrics.push_str(&format!("morrow_wal_bytes {}\n", wal.total_wal_bytes));
+        metrics.push_str("# HELP morrow_wal_retained_messages Retained WAL messages.\n");
+        metrics.push_str("# TYPE morrow_wal_retained_messages gauge\n");
+        metrics.push_str(&format!(
+            "morrow_wal_retained_messages {}\n",
+            wal.retained_message_count
+        ));
+        metrics.push_str(
+            "# HELP morrow_cluster_ready Whether the broker is ready to serve traffic.\n",
+        );
+        metrics.push_str("# TYPE morrow_cluster_ready gauge\n");
+        metrics.push_str(&format!(
+            "morrow_cluster_ready {}\n",
+            (cluster.cluster_status == "standalone" || cluster.cluster_status == "ready") as u8
+        ));
+        metrics.push_str(
+            "# HELP morrow_quota_rejections_total Rejected operations caused by resource quotas.\n",
+        );
+        metrics.push_str("# TYPE morrow_quota_rejections_total counter\n");
+        metrics.push_str(&format!(
+            "morrow_quota_rejections_total{{resource=\"connections\"}} {}\n",
+            quotas.connections.rejections
+        ));
+        metrics.push_str(&format!(
+            "morrow_quota_rejections_total{{resource=\"http_connections\"}} {}\n",
+            quotas.http_connections.rejections
+        ));
+        metrics.push_str(&format!(
+            "morrow_quota_rejections_total{{resource=\"raft_connections\"}} {}\n",
+            quotas.raft_connections.rejections
+        ));
+        metrics.push_str(&format!(
+            "morrow_quota_rejections_total{{resource=\"route_connections\"}} {}\n",
+            quotas.route_connections.rejections
+        ));
+        metrics.push_str(&format!(
+            "morrow_quota_rejections_total{{resource=\"state\"}} {}\n",
+            quotas.state_rejections
+        ));
+        metrics.push_str(&format!(
+            "morrow_quota_rejections_total{{resource=\"outbound\"}} {}\n",
+            quotas.outbound_rejections
+        ));
+        metrics
+    }
+
     pub(super) async fn cluster_response(&self) -> ClusterResponse {
         let cluster_config = self.config.cluster.as_ref();
         let cluster = self.cluster_runtime().await;

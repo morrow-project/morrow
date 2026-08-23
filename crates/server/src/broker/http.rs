@@ -78,3 +78,14 @@ where
     writer.write_all(body).await?;
     Ok(())
 }
+
+pub(super) async fn write_http_text_response<W>(
+    writer: &mut W,
+    status: &str,
+    body: &str,
+) -> Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    write_http_response(writer, status, "text/plain; version=0.0.4", body.as_bytes()).await
+}

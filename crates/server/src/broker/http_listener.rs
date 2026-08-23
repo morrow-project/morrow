@@ -104,6 +104,28 @@ impl Morrow {
         let Some(path) = http_request_path(request_line) else {
             return write_http_not_found(&mut stream).await;
         };
+
+        if path == "/health/live" {
+            return write_http_response(
+                &mut stream,
+                "200 OK",
+                "application/json",
+                br#"{"status":"alive"}"#,
+            )
+            .await;
+        }
+
+        if path == "/health/ready" {
+            let health = self.health_response().await;
+            let status = if health.status == "ready" {
+                "200 OK"
+            } else {
+                "503 Service Unavailable"
+            };
+            let body = serde_json::to_vec(&health).context("serializing HTTP health response")?;
+            return write_http_response(&mut stream, status, "application/json", &body).await;
+        }
+
         let Some(admin_token) = self.config.admin_token.as_deref() else {
             return write_http_unauthorized(&mut stream).await;
         };
@@ -117,6 +139,7 @@ impl Morrow {
             "/subscriptions" => self.write_subscriptions_response(&mut stream).await,
             "/streams" => self.write_streams_response(&mut stream).await,
             "/wal" => self.write_wal_response(&mut stream).await,
+            "/metrics" => self.write_metrics_response(&mut stream).await,
             _ => write_http_not_found(&mut stream).await,
         }
     }
@@ -161,5 +184,10 @@ impl Morrow {
         let body = serde_json::to_vec(&self.wal_status_response().await)
             .context("serializing HTTP WAL response")?;
         write_http_response(stream, "200 OK", "application/json", &body).await
+    }
+
+    async fn write_metrics_response<W: AsyncWrite + Unpin>(&self, stream: &mut W) -> Result<()> {
+        let body = self.metrics_response().await;
+        write_http_text_response(stream, "200 OK", &body).await
     }
 }

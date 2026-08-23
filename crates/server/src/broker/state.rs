@@ -161,6 +161,13 @@ pub(super) struct ClusterResponse {
     pub(super) state_application: ClusterStateApplicationResponse,
 }
 
+#[derive(Debug, serde::Serialize)]
+pub(super) struct HealthResponse {
+    pub(super) status: &'static str,
+    pub(super) cluster_status: &'static str,
+    pub(super) role: &'static str,
+}
+
 #[derive(Debug, Default)]
 pub(super) struct ClusterApplicationMetrics {
     pub(super) delta_applications: AtomicU64,
