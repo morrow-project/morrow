@@ -31,6 +31,12 @@ impl KeyVersion {
     }
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct KeyMetadata {
+    pub active_version: KeyVersion,
+    pub retained_versions: Vec<KeyVersion>,
+}
+
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 pub struct EncryptedBlob {
     pub key_version: KeyVersion,
@@ -122,6 +128,7 @@ impl KeyProvider for FileKeyProvider {
 
 struct KeyRingState {
     active: KeyVersion,
+    retained: std::collections::BTreeSet<KeyVersion>,
 }
 
 /// Envelope encryption with online key rotation.
@@ -146,7 +153,10 @@ impl KeyRing {
         provider.load_key(active)?;
         Ok(Self {
             provider,
-            state: RwLock::new(KeyRingState { active }),
+            state: RwLock::new(KeyRingState {
+                active,
+                retained: [active].into_iter().collect(),
+            }),
         })
     }
 
@@ -154,9 +164,25 @@ impl KeyRing {
         self.state.read().expect("key ring lock poisoned").active
     }
 
+    pub fn metadata(&self) -> KeyMetadata {
+        let state = self.state.read().expect("key ring lock poisoned");
+        KeyMetadata {
+            active_version: state.active,
+            retained_versions: state.retained.iter().copied().collect(),
+        }
+    }
+
+    pub fn restore_active(&self, metadata: &KeyMetadata) -> Result<()> {
+        self.rotate(metadata.active_version)
+    }
+
     pub fn rotate(&self, version: KeyVersion) -> Result<()> {
         self.provider.load_key(version)?;
-        self.state.write().expect("key ring lock poisoned").active = version;
+        let mut state = self.state.write().expect("key ring lock poisoned");
+        let previous = state.active;
+        state.retained.insert(previous);
+        state.retained.insert(version);
+        state.active = version;
         Ok(())
     }
 
@@ -235,6 +261,14 @@ mod tests {
         assert_eq!(new.key_version, KeyVersion::new(2));
         assert_eq!(ring.decrypt(&old, b"checkpoint").unwrap(), b"old");
         assert_eq!(ring.decrypt(&new, b"checkpoint").unwrap(), b"new");
+        let metadata = ring.metadata();
+        assert_eq!(metadata.active_version, KeyVersion::new(2));
+        ring.restore_active(&KeyMetadata {
+            active_version: KeyVersion::new(1),
+            retained_versions: vec![KeyVersion::new(2)],
+        })
+        .unwrap();
+        assert_eq!(ring.active_version(), KeyVersion::new(1));
     }
 
     #[test]
