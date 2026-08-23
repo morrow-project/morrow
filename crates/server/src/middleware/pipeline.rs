@@ -200,6 +200,12 @@ impl MiddlewareRuntime {
                     "middleware recursion budget exceeded",
                 );
             }
+            let span = tracing::info_span!(
+                "morrow.middleware",
+                generation = generation.id,
+                stage = stage.code(),
+            );
+            let _entered = span.enter();
             match self.execute(middleware, stage, message, InstantiationPath::Prepared) {
                 Ok((decision, updated, mut secondary)) => {
                     self.metrics

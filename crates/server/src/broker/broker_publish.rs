@@ -8,6 +8,9 @@ impl Morrow {
         if metadata.stream.is_none() {
             return Ok(metadata);
         }
+        self.metrics
+            .partition_reads_total
+            .fetch_add(1, Ordering::Relaxed);
         let partition_logs = self.partition_logs.clone();
         let permit = self
             .storage_permits
@@ -330,6 +333,9 @@ impl Morrow {
             })
             .await
             .map_err(|err| BrokerError::with_source("partition append worker failed", err))??;
+            self.metrics
+                .partition_writes_total
+                .fetch_add(1, Ordering::Relaxed);
             let reference = PartitionAppendRecord::from(&envelope);
             let mut inner = self.inner.lock().await;
             inner.wal.append_partition_append(&reference)?;

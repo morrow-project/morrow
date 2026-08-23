@@ -184,6 +184,8 @@ pub(super) struct ClusterApplicationMetrics {
 pub(super) struct BrokerMetrics {
     pub(super) publishes_total: AtomicU64,
     pub(super) published_bytes_total: AtomicU64,
+    pub(super) partition_reads_total: AtomicU64,
+    pub(super) partition_writes_total: AtomicU64,
     pub(super) delivery_attempts_total: AtomicU64,
     pub(super) acknowledgements_total: AtomicU64,
     pub(super) nacks_total: AtomicU64,

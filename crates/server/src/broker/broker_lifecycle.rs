@@ -368,6 +368,18 @@ impl Morrow {
             "morrow_published_bytes_total {}\n",
             self.metrics.published_bytes_total.load(Ordering::Relaxed)
         ));
+        metrics.push_str("# HELP morrow_partition_reads_total Partition-log records loaded.\n");
+        metrics.push_str("# TYPE morrow_partition_reads_total counter\n");
+        metrics.push_str(&format!(
+            "morrow_partition_reads_total {}\n",
+            self.metrics.partition_reads_total.load(Ordering::Relaxed)
+        ));
+        metrics.push_str("# HELP morrow_partition_writes_total Partition-log records appended.\n");
+        metrics.push_str("# TYPE morrow_partition_writes_total counter\n");
+        metrics.push_str(&format!(
+            "morrow_partition_writes_total {}\n",
+            self.metrics.partition_writes_total.load(Ordering::Relaxed)
+        ));
         metrics.push_str(
             "# HELP morrow_delivery_attempts_total Delivery attempts sent to consumers.\n",
         );
