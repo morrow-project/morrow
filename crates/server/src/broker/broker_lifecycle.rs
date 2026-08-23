@@ -404,12 +404,20 @@ impl Morrow {
         metrics.push_str("# HELP morrow_retry_exhausted_total Dead-letter terminal records recovered by the broker.\n");
         metrics.push_str("# TYPE morrow_retry_exhausted_total gauge\n");
         metrics.push_str(&format!("morrow_retry_exhausted_total {dead_letter_records}\n"));
-        metrics.push_str("# HELP morrow_dead_letter_writes_total Durable dead-letter records.\n");
-        metrics.push_str("# TYPE morrow_dead_letter_writes_total gauge\n");
-        metrics.push_str(&format!("morrow_dead_letter_writes_total {dead_letter_records}\n"));
+        metrics.push_str("# HELP morrow_dead_letter_writes_total Durable dead-letter writes.\n");
+        metrics.push_str("# TYPE morrow_dead_letter_writes_total counter\n");
+        metrics.push_str(&format!(
+            "morrow_dead_letter_writes_total {}\n",
+            self.metrics.dead_letter_writes_total.load(Ordering::Relaxed)
+        ));
         metrics.push_str("# HELP morrow_dead_letter_replay_outcomes_total Dead-letter replay outcomes.\n");
         metrics.push_str("# TYPE morrow_dead_letter_replay_outcomes_total counter\n");
-        metrics.push_str("morrow_dead_letter_replay_outcomes_total 0\n");
+        metrics.push_str(&format!(
+            "morrow_dead_letter_replay_outcomes_total {}\n",
+            self.metrics
+                .dead_letter_replay_outcomes_total
+                .load(Ordering::Relaxed)
+        ));
         metrics.push_str("# HELP morrow_publishes_total Publish commands received.\n");
         metrics.push_str("# TYPE morrow_publishes_total counter\n");
         metrics.push_str(&format!(

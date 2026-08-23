@@ -355,6 +355,9 @@ impl Morrow {
         let replayed = inner.replay_dead_letter(id)?;
         drop(inner);
         if replayed {
+            self.metrics
+                .dead_letter_replay_outcomes_total
+                .fetch_add(1, Ordering::Relaxed);
             self.wal.flush_due().await?;
             self.pull_waiters.notify_all();
             self.deliver_pending().await?;

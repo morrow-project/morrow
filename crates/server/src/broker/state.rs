@@ -238,6 +238,8 @@ pub(super) struct BrokerMetrics {
     pub(super) acknowledgements_total: AtomicU64,
     pub(super) nacks_total: AtomicU64,
     pub(super) redeliveries_total: AtomicU64,
+    pub(super) dead_letter_writes_total: AtomicU64,
+    pub(super) dead_letter_replay_outcomes_total: AtomicU64,
     pub(super) publish_latency_us: LatencyHistogram,
     pub(super) delivery_latency_us: LatencyHistogram,
 }

@@ -75,6 +75,48 @@ The same administrative resources are available under the versioned
 intentionally a bounded summary; middleware payloads and credentials are not
 included.
 
+### Retry, scheduling, and dead letters
+
+Pull consumers may specify a retry policy as the optional final argument to
+`CONSUMER CREATE`:
+
+```text
+CONSUMER CREATE worker orders/* @earliest retry=4:exponential:100:10000:0:dead_letter
+```
+
+The fields are maximum attempts, `fixed` or `exponential` backoff, initial
+delay in milliseconds, maximum delay, jitter percentage, and terminal action
+(`dead_letter`, `discard`, `pause`, or `retain`). Retry policy metadata and
+delivery deadlines are stored in the WAL. A zero-delay `NACK` uses the next
+policy delay; an explicit delay remains authoritative.
+
+Publish-time scheduling is available with the durable `Morrow-Scheduled-At`
+header, whose value is a broker-clock millisecond timestamp:
+
+```text
+Morrow-Scheduled-At: 2000
+```
+
+Scheduled records are held in a bounded broker time index and are not visible
+to push or pull consumers before their committed timestamp. The index is
+rebuilt from durable records on restart and uses broker monotonic scheduling
+decisions rather than wall-clock changes.
+
+Authenticated dead-letter administration is available under
+`/api/v1/dead-letters` (and the unversioned equivalent):
+
+* `GET /api/v1/dead-letters?limit=100&offset=0` lists records.
+* `GET /api/v1/dead-letters/{id}` inspects one record.
+* `POST /api/v1/dead-letters/{id}/replay` requests replay when the source
+  record is still retained.
+* `DELETE /api/v1/dead-letters/{id}` purges a record and writes the purge to
+  the WAL.
+
+Dead-letter writes and purges are durable; terminal source completion is
+written after the dead-letter record, so recovery cannot redeliver an already
+completed exhausted delivery. Scheduled depth and due lag, retry exhaustion,
+dead-letter records, and replay outcomes are exposed by `/api/v1/metrics`.
+
 `/api/v1/routes` exposes route topology independently of the cluster response.
 `/api/v1/connectors` lists only currently connected clients whose durable IDs
 use the `connector-` namespace; it excludes connector secrets and configuration
