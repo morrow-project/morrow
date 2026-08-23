@@ -6,6 +6,11 @@ backup copies stream segments, sparse/subject indexes, and WAL files with a stab
 read check and records a SHA-256 digest for every object. Active files are copied
 for recovery but are never eligible for local eviction.
 
+`BackupCheckpoint` carries the recovery point, consumer cursor positions, cluster
+metadata, and connector checkpoints alongside the file catalog. The checkpoint is
+serialized as part of the versioned manifest, so it is covered by the manifest's
+immutable publication and restore-chain validation.
+
 `ObjectStore` is the storage boundary for an S3-compatible implementation. Object
 keys are immutable: a retry is accepted only when the existing bytes match the
 requested checksum. The manifest is published after all data objects, so a partial

@@ -44,6 +44,16 @@ pub struct BackupManifest {
     pub source_cluster_id: String,
     pub streams: Vec<StreamDefinition>,
     pub objects: Vec<BackupObject>,
+    #[serde(default)]
+    pub checkpoint: Option<BackupCheckpoint>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct BackupCheckpoint {
+    pub recovery_point: u64,
+    pub consumer_cursors: BTreeMap<String, BTreeMap<String, u64>>,
+    pub cluster_metadata: BTreeMap<String, String>,
+    pub connector_checkpoints: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -217,6 +227,25 @@ impl<S: ObjectStore + 'static> BackupEngine<S> {
         backup_id: &str,
         created_at_ms: u64,
     ) -> Result<BackupManifest> {
+        self.create_full_with_checkpoint(
+            source,
+            streams,
+            cluster_id,
+            backup_id,
+            created_at_ms,
+            None,
+        )
+    }
+
+    pub fn create_full_with_checkpoint(
+        &self,
+        source: &Path,
+        streams: Vec<StreamDefinition>,
+        cluster_id: &str,
+        backup_id: &str,
+        created_at_ms: u64,
+        checkpoint: Option<BackupCheckpoint>,
+    ) -> Result<BackupManifest> {
         let files = snapshot_files(source)?;
         let mut objects = Vec::with_capacity(files.len());
         for (relative, sealed) in files {
@@ -242,6 +271,7 @@ impl<S: ObjectStore + 'static> BackupEngine<S> {
             source_cluster_id: cluster_id.to_string(),
             streams,
             objects,
+            checkpoint,
         };
         self.publish_manifest(&manifest)?;
         Ok(manifest)
@@ -297,6 +327,7 @@ impl<S: ObjectStore + 'static> BackupEngine<S> {
             source_cluster_id: cluster_id.to_string(),
             streams,
             objects,
+            checkpoint: parent.checkpoint.clone(),
         };
         self.publish_manifest(&manifest)?;
         Ok(manifest)
@@ -357,6 +388,7 @@ impl<S: ObjectStore + 'static> BackupEngine<S> {
             source_cluster_id: first.source_cluster_id.clone(),
             streams: last.streams.clone(),
             objects: objects.into_values().collect(),
+            checkpoint: last.checkpoint.clone(),
         };
         self.restore_materialized(&materialized, destination, new_cluster_id)
     }
@@ -856,5 +888,41 @@ mod tests {
                 .put_immutable("../outside", b"bad", &sha256(b"bad"))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn checkpoint_covers_cursors_cluster_metadata_and_connector_state() {
+        let source = tempdir().unwrap();
+        fs::write(source.path().join("metadata"), b"state").unwrap();
+        let store = Arc::new(MemoryObjectStore::default());
+        let engine = BackupEngine::new(store);
+        let mut checkpoint = BackupCheckpoint {
+            recovery_point: 42,
+            cluster_metadata: [("epoch".to_string(), "7".to_string())]
+                .into_iter()
+                .collect(),
+            connector_checkpoints: [("sink/orders".to_string(), "offset=9".to_string())]
+                .into_iter()
+                .collect(),
+            ..BackupCheckpoint::default()
+        };
+        checkpoint.consumer_cursors.insert(
+            "consumer-a".to_string(),
+            [("orders/0".to_string(), 41)].into_iter().collect(),
+        );
+        let manifest = engine
+            .create_full_with_checkpoint(
+                source.path(),
+                Vec::new(),
+                "cluster-a",
+                "checkpointed",
+                42,
+                Some(checkpoint.clone()),
+            )
+            .unwrap();
+        assert_eq!(manifest.checkpoint, Some(checkpoint));
+        let serialized = serde_json::to_vec(&manifest).unwrap();
+        let decoded: BackupManifest = serde_json::from_slice(&serialized).unwrap();
+        assert_eq!(decoded.checkpoint, manifest.checkpoint);
     }
 }
