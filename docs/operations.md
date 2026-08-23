@@ -48,8 +48,8 @@ endpoints that do not require the admin bearer token:
 * `GET /health/live` returns `200` once the process can accept HTTP requests.
 * `GET /health/ready` returns `200` for a standalone broker or a cluster with
   a known leader, and `503` while a cluster is still forming or degraded.
-  The JSON `reason` identifies `leader_election`, `route_degraded`, or
-  `storage_failure` when applicable.
+  The JSON `reason` identifies `leader_election`, `quorum_loss`,
+  `route_degraded`, or `storage_failure` when applicable.
 
 The authenticated `GET /metrics` endpoint exposes bounded-cardinality
 Prometheus text-format metrics for connections, subscriptions, consumers, WAL

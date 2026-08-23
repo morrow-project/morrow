@@ -272,10 +272,20 @@ impl Morrow {
             .routes
             .as_ref()
             .is_some_and(|routes| !routes.seeds.is_empty() && routes.connected.is_empty());
+        let quorum_lost = if cluster.cluster_status == "ready" {
+            match self.cluster_runtime().await {
+                Some(cluster) => !cluster.quorum_available().await,
+                None => false,
+            }
+        } else {
+            false
+        };
         let (status, reason) = if self.storage_failure.load(Ordering::Relaxed) {
             ("degraded", Some("storage_failure"))
         } else if route_degraded {
             ("degraded", Some("route_degraded"))
+        } else if quorum_lost {
+            ("degraded", Some("quorum_loss"))
         } else if cluster.cluster_status == "standalone" {
             ("ready", None)
         } else if cluster.cluster_status == "ready" {

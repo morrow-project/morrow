@@ -188,6 +188,20 @@ async fn http_readiness_reports_and_recovers_from_storage_failure() {
 }
 
 #[tokio::test]
+async fn http_readiness_reports_quorum_loss_separately_from_election() {
+    let scenario = Scenario::new_fake_cluster_local_node(3, 1, Some(1));
+    scenario.partition_available([1]);
+    let degraded = http_request(scenario.broker(), "/health/ready").await;
+    assert!(degraded.starts_with("HTTP/1.1 503 Service Unavailable\r\n"));
+    assert!(degraded.contains(r#""status":"degraded""#));
+    assert!(degraded.contains(r#""reason":"quorum_loss""#));
+
+    scenario.restore_all_nodes();
+    let ready = http_request(scenario.broker(), "/health/ready").await;
+    assert!(ready.starts_with("HTTP/1.1 200 OK\r\n"));
+}
+
+#[tokio::test]
 async fn http_metrics_endpoint_is_authenticated_and_bounded() {
     let scenario = Scenario::new();
 

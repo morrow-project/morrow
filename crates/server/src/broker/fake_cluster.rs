@@ -266,6 +266,12 @@ impl FakeClusterRuntime {
         inner.available_nodes = inner.nodes.keys().copied().collect();
     }
 
+    pub(super) fn quorum_available(&self) -> bool {
+        let inner = self.inner.lock().unwrap();
+        inner.available_nodes.contains(&inner.local_node_id)
+            && inner.available_nodes.len() >= inner.quorum_size()
+    }
+
     pub(super) fn set_delay_writes(&self, delay_writes: bool) {
         self.inner.lock().unwrap().delay_writes = delay_writes;
     }
