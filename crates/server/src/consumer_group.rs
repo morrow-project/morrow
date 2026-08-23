@@ -335,13 +335,14 @@ impl GroupCoordinator {
         for member in &record.snapshot.members {
             assignments.entry(member.id.clone()).or_default();
         }
-        if record.config.heartbeat_timeout_ms == 0
-            || record.config.rebalance_timeout_ms == 0
-            || record.config.max_members == 0
+        if record.config.heartbeat_timeout_ms == 0 || record.config.rebalance_timeout_ms == 0 {
+            return Err(GroupError::InvalidTimeout);
+        }
+        if record.config.max_members == 0
             || record.partitions == 0
             || record.partitions > record.config.max_partitions
         {
-            return Err(GroupError::InvalidTimeout);
+            return Err(GroupError::QuotaExceeded);
         }
         let members = record
             .snapshot
