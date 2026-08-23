@@ -1,6 +1,27 @@
 use super::*;
 
 #[tokio::test]
+async fn backup_checkpoint_captures_durable_cursor_and_non_secret_cluster_metadata() {
+    let scenario = Scenario::new();
+    let mut client = scenario.connect_durable("client1", 25).await;
+    client.subscribe("orders/*", "sid1").await;
+    client.ping_roundtrip().await;
+
+    let checkpoint = scenario.broker().backup_checkpoint().await;
+
+    assert!(
+        checkpoint
+            .consumer_cursors
+            .contains_key("durable-client1-sid1")
+    );
+    assert_eq!(
+        checkpoint.cluster_metadata.get("mode"),
+        Some(&"standalone".to_string())
+    );
+    assert!(checkpoint.connector_checkpoints.is_empty());
+}
+
+#[tokio::test]
 async fn http_connections_endpoint_reports_live_client_metadata() {
     let scenario = Scenario::new();
     let mut client = scenario.connect_durable("client1", 25).await;

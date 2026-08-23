@@ -52,6 +52,8 @@ pub struct BackupManifest {
 pub struct BackupCheckpoint {
     pub recovery_point: u64,
     pub consumer_cursors: BTreeMap<String, BTreeMap<String, u64>>,
+    #[serde(default)]
+    pub consumer_groups: BTreeMap<String, crate::consumer_group::GroupRecord>,
     pub cluster_metadata: BTreeMap<String, String>,
     pub connector_checkpoints: BTreeMap<String, String>,
 }
