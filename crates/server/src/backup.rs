@@ -30,6 +30,7 @@ pub struct BackupObject {
     pub relative_path: String,
     pub bytes: u64,
     pub sha256: String,
+    pub sealed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -179,8 +180,8 @@ impl<S: ObjectStore + 'static> BackupEngine<S> {
     ) -> Result<BackupManifest> {
         let files = snapshot_files(source)?;
         let mut objects = Vec::with_capacity(files.len());
-        for relative in files {
-            let bytes = fs::read(source.join(&relative))
+        for (relative, sealed) in files {
+            let bytes = read_stable_file(&source.join(&relative))
                 .with_context(|| format!("reading backup file {}", relative.display()))?;
             let digest = sha256(&bytes);
             let key = format!("backups/{backup_id}/{}", relative.to_string_lossy());
@@ -190,6 +191,7 @@ impl<S: ObjectStore + 'static> BackupEngine<S> {
                 relative_path: relative.to_string_lossy().into_owned(),
                 bytes: bytes.len() as u64,
                 sha256: digest,
+                sealed,
             });
         }
         let manifest = BackupManifest {
@@ -265,7 +267,8 @@ impl<S: ObjectStore + 'static> BackupEngine<S> {
             evicted_bytes: 0,
         };
         for object in &manifest.objects {
-            if !object.relative_path.starts_with("streams/")
+            if !object.sealed
+                || !object.relative_path.starts_with("streams/")
                 || !matches!(
                     Path::new(&object.relative_path)
                         .extension()
@@ -329,14 +332,32 @@ fn validate_existing_restore(manifest: &BackupManifest, destination: &Path) -> R
     Ok(())
 }
 
-fn snapshot_files(root: &Path) -> Result<Vec<PathBuf>> {
+fn snapshot_files(root: &Path) -> Result<Vec<(PathBuf, bool)>> {
     let mut files = Vec::new();
     collect_files(root, root, &mut files)?;
     files.sort();
     Ok(files
         .into_iter()
-        .filter(|path| !is_active_segment(&root.join(path)))
+        .map(|path| {
+            let sealed = !is_active_segment(&root.join(&path));
+            (path, sealed)
+        })
         .collect())
+}
+
+fn read_stable_file(path: &Path) -> Result<Vec<u8>> {
+    for _ in 0..3 {
+        let before = fs::metadata(path)?.len();
+        let bytes = fs::read(path)?;
+        let after = fs::metadata(path)?.len();
+        if before == after && after == bytes.len() as u64 {
+            return Ok(bytes);
+        }
+    }
+    Err(BrokerError::msg(format!(
+        "file changed while creating backup: {}",
+        path.display()
+    )))
 }
 
 fn collect_files(root: &Path, current: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
@@ -507,12 +528,11 @@ mod tests {
         let manifest = engine
             .create_full(source.path(), Vec::new(), "old", "b1", 1)
             .unwrap();
-        assert_eq!(manifest.objects.len(), 2);
+        assert_eq!(manifest.objects.len(), 3);
         assert!(
-            !manifest
-                .objects
-                .iter()
-                .any(|object| object.relative_path.ends_with("segment-2.plog"))
+            manifest.objects.iter().any(|object| {
+                object.relative_path.ends_with("segment-2.plog") && !object.sealed
+            })
         );
         let destination = tempdir().unwrap().path().join("restore");
         engine.restore(&manifest, &destination, "new").unwrap();
