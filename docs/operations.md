@@ -55,6 +55,12 @@ usage, readiness, and resource-quota rejections. It deliberately does not
 include subjects, client IDs, message IDs, payloads, credentials, or other
 unbounded user values.
 
+The same administrative resources are available under the versioned
+`/api/v1/` namespace: `/api/v1/cluster`, `/api/v1/connections`,
+`/api/v1/quotas`, `/api/v1/subscriptions`, `/api/v1/streams`,
+`/api/v1/storage`, and `/api/v1/metrics`. The health endpoints are available
+as `/api/v1/health/live` and `/api/v1/health/ready`.
+
 When `http_listen` is configured, set an admin token and protect the listener.
 The JSON endpoints include `/cluster`, `/connections`, `/subscriptions`,
 `/streams`, `/wal`, and `/quotas`.

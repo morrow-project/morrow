@@ -102,12 +102,15 @@ async fn http_health_endpoints_report_liveness_and_readiness() {
 
     let live = http_request_with_auth(scenario.broker(), "/health/live", None).await;
     let ready = http_request_with_auth(scenario.broker(), "/health/ready", None).await;
+    let versioned_live =
+        http_request_with_auth(scenario.broker(), "/api/v1/health/live", None).await;
 
     assert!(live.starts_with("HTTP/1.1 200 OK\r\n"));
     assert!(live.ends_with(r#"{"status":"alive"}"#));
     assert!(ready.starts_with("HTTP/1.1 200 OK\r\n"));
     assert!(ready.contains(r#""status":"ready""#));
     assert!(ready.contains(r#""cluster_status":"standalone""#));
+    assert!(versioned_live.starts_with("HTTP/1.1 200 OK\r\n"));
 }
 
 #[tokio::test]
@@ -127,10 +130,12 @@ async fn http_metrics_endpoint_is_authenticated_and_bounded() {
 
     let unauthorized = http_request_with_auth(scenario.broker(), "/metrics", None).await;
     let response = http_request(scenario.broker(), "/metrics").await;
+    let versioned = http_request(scenario.broker(), "/api/v1/metrics").await;
 
     assert!(unauthorized.starts_with("HTTP/1.1 401 Unauthorized\r\n"));
     assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
     assert!(response.contains("content-type: text/plain; version=0.0.4"));
+    assert!(versioned.starts_with("HTTP/1.1 200 OK\r\n"));
     assert!(response.contains("morrow_connections 0\n"));
     assert!(response.contains("morrow_publishes_total 0\n"));
     assert!(response.contains("morrow_delivery_attempts_total 0\n"));

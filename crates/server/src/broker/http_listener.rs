@@ -105,7 +105,7 @@ impl Morrow {
             return write_http_not_found(&mut stream).await;
         };
 
-        if path == "/health/live" {
+        if matches!(path, "/health/live" | "/api/v1/health/live") {
             return write_http_response(
                 &mut stream,
                 "200 OK",
@@ -115,7 +115,7 @@ impl Morrow {
             .await;
         }
 
-        if path == "/health/ready" {
+        if matches!(path, "/health/ready" | "/api/v1/health/ready") {
             let health = self.health_response().await;
             let status = if health.status == "ready" {
                 "200 OK"
@@ -133,13 +133,17 @@ impl Morrow {
             return write_http_unauthorized(&mut stream).await;
         }
         match path {
-            "/cluster" => self.write_cluster_response(&mut stream).await,
-            "/connections" => self.write_connections_response(&mut stream).await,
-            "/quotas" => self.write_quotas_response(&mut stream).await,
-            "/subscriptions" => self.write_subscriptions_response(&mut stream).await,
-            "/streams" => self.write_streams_response(&mut stream).await,
-            "/wal" => self.write_wal_response(&mut stream).await,
-            "/metrics" => self.write_metrics_response(&mut stream).await,
+            "/cluster" | "/api/v1/cluster" => self.write_cluster_response(&mut stream).await,
+            "/connections" | "/api/v1/connections" => {
+                self.write_connections_response(&mut stream).await
+            }
+            "/quotas" | "/api/v1/quotas" => self.write_quotas_response(&mut stream).await,
+            "/subscriptions" | "/api/v1/subscriptions" => {
+                self.write_subscriptions_response(&mut stream).await
+            }
+            "/streams" | "/api/v1/streams" => self.write_streams_response(&mut stream).await,
+            "/wal" | "/api/v1/storage" => self.write_wal_response(&mut stream).await,
+            "/metrics" | "/api/v1/metrics" => self.write_metrics_response(&mut stream).await,
             _ => write_http_not_found(&mut stream).await,
         }
     }
