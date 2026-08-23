@@ -76,6 +76,40 @@ async fn nack_delay_uses_the_durable_lease_deadline() {
 }
 
 #[tokio::test]
+async fn exhausted_pull_delivery_is_written_once_to_dead_letters() {
+    let scenario = Scenario::new();
+    let mut consumer = TestClient::connect_pull(scenario.broker(), "puller", 25).await;
+    consumer
+        .write_line(
+            "CONSUMER CREATE worker orders/* @earliest retry=1:fixed:0:1000:0:dead_letter",
+        )
+        .await;
+    assert_eq!(consumer.read_frame().await, "C-OK CREATE worker\r\n");
+    let mut publisher = scenario.connect_durable("publisher", 25).await;
+    publisher.publish("orders/created", b"poison").await;
+    publisher.ping_roundtrip().await;
+
+    consumer.write_line("FETCH worker 1 16 0").await;
+    assert_eq!(consumer.read_frame().await, "BATCH worker 1 6\r\n");
+    let first = consumer.read_frame().await;
+    assert!(first.contains("poison"));
+    scenario.advance_ms(25);
+    scenario.tick_redelivery().await;
+    consumer.write_line("FETCH worker 1 16 0").await;
+    assert_eq!(consumer.read_frame().await, "BATCH worker 0 0\r\n");
+
+    let inner = scenario.broker().inner.lock().await;
+    assert_eq!(inner.dead_letters.len(), 1);
+    let dead_letter = inner.dead_letters.values().next().unwrap();
+    assert_eq!(dead_letter.source_seq, 1);
+    assert!(dead_letter.consumer_id.starts_with("pull-"));
+    assert_eq!(dead_letter.attempt_count, 1);
+    assert!(dead_letter.payload.is_empty());
+    let consumer = inner.consumers.get(&dead_letter.consumer_id).unwrap();
+    assert_eq!(consumer.cursors.committed_offset("orders", 0), Some(1));
+}
+
+#[tokio::test]
 async fn pull_lease_attempt_survives_restart() {
     let mut scenario = Scenario::new();
     let mut consumer = TestClient::connect_pull(scenario.broker(), "puller", 25).await;

@@ -38,8 +38,8 @@ use crate::{
         proxy_stream_to_leader,
     },
     wal::{
-        ConsumerCursorRecord, ConsumerRecord, DeliveryAttemptRecord, PartitionAppendRecord,
-        PublishRecord, ReplayedConsumer, Wal, WalStatus,
+        ConsumerCursorRecord, ConsumerRecord, DeadLetterRecord, DeliveryAttemptRecord,
+        PartitionAppendRecord, PublishRecord, ReplayedConsumer, Wal, WalStatus,
     },
 };
 

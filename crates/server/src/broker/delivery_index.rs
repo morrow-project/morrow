@@ -84,7 +84,7 @@ impl DurableBrokerState {
         }
     }
 
-    pub(super) fn expire_due_leases(&mut self, now: u64, limit: usize) -> usize {
+    pub(super) fn expire_due_leases(&mut self, now: u64, limit: usize) -> Result<usize> {
         let mut expired = 0;
         while expired < limit {
             self.discard_stale_deadlines();
@@ -106,6 +106,80 @@ impl DurableBrokerState {
             else {
                 continue;
             };
+            let terminal = self
+                .consumers
+                .get(&deadline.consumer_id)
+                .is_some_and(|consumer| lease.attempt >= consumer.record.retry_policy.max_attempts);
+            if terminal {
+                let message = self.messages.get(&deadline.seq).cloned();
+                let action = self
+                    .consumers
+                    .get(&deadline.consumer_id)
+                    .map(|consumer| consumer.record.retry_policy.terminal_action)
+                    .unwrap_or(protocol::RetryTerminalAction::Retain);
+                match action {
+                    protocol::RetryTerminalAction::DeadLetter => {
+                        if let Some(ref message) = message {
+                            let record = DeadLetterRecord {
+                                id: deadline.seq,
+                                source_seq: deadline.seq,
+                                consumer_id: deadline.consumer_id.clone(),
+                                source_stream: message.stream.clone(),
+                                source_partition: message.partition,
+                                source_offset: message.offset,
+                                reason: "delivery_attempts_exhausted".into(),
+                                attempt_count: lease.attempt,
+                                first_delivery_ms: deadline.deadline_ms
+                                    .saturating_sub(self.consumers[&deadline.consumer_id].record.ack_timeout_ms),
+                                last_delivery_ms: deadline.deadline_ms,
+                                payload: message.payload.clone(),
+                            };
+                            self.wal.append_dead_letter(&record)?;
+                            self.dead_letters.insert(record.id, record);
+                        }
+                    }
+                    protocol::RetryTerminalAction::Discard
+                    | protocol::RetryTerminalAction::Retain
+                    | protocol::RetryTerminalAction::Pause => {}
+                }
+                self.wal.append_ack(
+                    deadline.seq,
+                    &deadline.consumer_id,
+                    lease.delivery_id,
+                )?;
+                let acknowledged_cursors = message.as_ref().and_then(|message| {
+                    if message.offset.is_some() {
+                        let consumer = self.consumers.get(&deadline.consumer_id)?;
+                        let mut cursors = consumer.cursors.clone();
+                        cursors
+                            .acknowledge(
+                                message,
+                                &consumer.record.filter_subject,
+                                &self.messages,
+                            )
+                            .ok()?;
+                        Some(cursors)
+                    } else {
+                        None
+                    }
+                });
+                if let Some(consumer) = self.consumers.get_mut(&deadline.consumer_id) {
+                    if let Some(cursors) = acknowledged_cursors.clone() {
+                        consumer.cursors = cursors;
+                    } else {
+                        consumer.acked.insert(deadline.seq);
+                    }
+                    consumer.pending.remove(&deadline.seq);
+                }
+                if let Some(cursors) = acknowledged_cursors {
+                    self.wal.append_consumer_cursor(&ConsumerCursorRecord {
+                        consumer_id: deadline.consumer_id.clone(),
+                        cursors,
+                    })?;
+                }
+                expired += 1;
+                continue;
+            }
             if self
                 .messages
                 .get(&deadline.seq)
@@ -124,7 +198,7 @@ impl DurableBrokerState {
             self.ready_consumers.insert(deadline.consumer_id);
             expired += 1;
         }
-        expired
+        Ok(expired)
     }
 
     fn discard_stale_deadlines(&mut self) {

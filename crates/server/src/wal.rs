@@ -20,6 +20,7 @@ const KIND_ACK: u8 = 4;
 const KIND_PARTITION_APPEND: u8 = 5;
 const KIND_CONSUMER_CURSOR: u8 = 6;
 const KIND_CONSUMER_DELETE: u8 = 7;
+const KIND_DEAD_LETTER: u8 = 8;
 pub const DEFAULT_WAL_SEGMENT_BYTES: u64 = 64 * 1024 * 1024;
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct PublishRecord {
@@ -101,6 +102,20 @@ pub struct AckRecord {
     pub consumer_id: String,
     pub delivery_id: u64,
 }
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct DeadLetterRecord {
+    pub id: u64,
+    pub source_seq: u64,
+    pub consumer_id: String,
+    pub source_stream: Option<String>,
+    pub source_partition: Option<u32>,
+    pub source_offset: Option<u64>,
+    pub reason: String,
+    pub attempt_count: u32,
+    pub first_delivery_ms: u64,
+    pub last_delivery_ms: u64,
+    pub payload: Vec<u8>,
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PartitionAppendRecord {
     pub seq: u64,
@@ -143,6 +158,7 @@ pub struct Replay {
     pub messages: HashMap<u64, PublishRecord>,
     pub partition_appends: HashMap<u64, PartitionAppendRecord>,
     pub consumers: HashMap<String, ReplayedConsumer>,
+    pub dead_letters: HashMap<u64, DeadLetterRecord>,
     pub next_seq: u64,
     pub next_delivery_id: u64,
     pub duration_ms: u64,

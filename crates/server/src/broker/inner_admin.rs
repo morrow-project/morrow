@@ -55,6 +55,39 @@ impl ConnectionState {
 }
 
 impl DurableBrokerState {
+    pub(super) fn dead_letters_response_page(
+        &self,
+        offset: usize,
+        limit: usize,
+    ) -> DeadLettersResponse {
+        let total_count = self.dead_letters.len();
+        let records = self
+            .dead_letters
+            .values()
+            .skip(offset)
+            .take(limit)
+            .map(|record| DeadLetterResponse {
+                id: record.id,
+                source_seq: record.source_seq,
+                consumer_id: record.consumer_id.clone(),
+                source_stream: record.source_stream.clone(),
+                source_partition: record.source_partition,
+                source_offset: record.source_offset,
+                reason: record.reason.clone(),
+                attempt_count: record.attempt_count,
+                first_delivery_ms: record.first_delivery_ms,
+                last_delivery_ms: record.last_delivery_ms,
+                payload_bytes: record.payload.len(),
+            })
+            .collect::<Vec<_>>();
+        DeadLettersResponse {
+            count: records.len(),
+            total_count,
+            next_offset: (offset + records.len() < total_count).then_some(offset + records.len()),
+            records,
+        }
+    }
+
     pub(super) fn subscriptions_response(&self) -> SubscriptionsResponse {
         let mut durable_consumers = self
             .consumers
@@ -258,6 +291,17 @@ impl TransientState {
 }
 
 impl Morrow {
+    pub(super) async fn dead_letters_response_page(
+        &self,
+        offset: usize,
+        limit: usize,
+    ) -> DeadLettersResponse {
+        self.inner
+            .lock()
+            .await
+            .dead_letters_response_page(offset, limit)
+    }
+
     pub(super) async fn connections_response(&self) -> ConnectionsResponse {
         self.connections_response_page(None).await
     }

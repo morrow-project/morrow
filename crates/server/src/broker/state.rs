@@ -9,6 +9,7 @@ pub(super) struct DurableBrokerState {
     pub(super) ready_consumers: BTreeSet<String>,
     pub(super) lease_deadlines: BinaryHeap<Reverse<LeaseDeadline>>,
     pub(super) scheduled_deliveries: BinaryHeap<Reverse<ScheduledDelivery>>,
+    pub(super) dead_letters: BTreeMap<u64, DeadLetterRecord>,
     pub(super) compaction_latest: HashMap<CompactionKey, (u64, u64)>,
     pub(super) superseded_since_compaction: usize,
 }
@@ -195,6 +196,29 @@ pub(super) struct ConnectorResponse {
     pub(super) authenticated: bool,
     pub(super) connected_at_ms: u64,
     pub(super) protocol_version: u32,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub(super) struct DeadLettersResponse {
+    pub(super) count: usize,
+    pub(super) total_count: usize,
+    pub(super) next_offset: Option<usize>,
+    pub(super) records: Vec<DeadLetterResponse>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub(super) struct DeadLetterResponse {
+    pub(super) id: u64,
+    pub(super) source_seq: u64,
+    pub(super) consumer_id: String,
+    pub(super) source_stream: Option<String>,
+    pub(super) source_partition: Option<u32>,
+    pub(super) source_offset: Option<u64>,
+    pub(super) reason: String,
+    pub(super) attempt_count: u32,
+    pub(super) first_delivery_ms: u64,
+    pub(super) last_delivery_ms: u64,
+    pub(super) payload_bytes: usize,
 }
 
 #[derive(Debug, Default)]

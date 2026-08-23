@@ -176,6 +176,10 @@ impl Wal {
         Ok(record)
     }
 
+    pub fn append_dead_letter(&mut self, record: &DeadLetterRecord) -> Result<()> {
+        self.append_record(KIND_DEAD_LETTER, &dead_letter_body(record)?)
+    }
+
     pub fn flush_due(&mut self) -> Result<()> {
         if self.last_sync.elapsed() >= self.fsync_interval {
             self.flush()?;

@@ -144,6 +144,7 @@ impl Morrow {
                 })
             })
             .collect();
+        let dead_letters = replay.dead_letters.into_iter().collect();
         let cluster = {
             #[cfg(test)]
             {
@@ -167,6 +168,7 @@ impl Morrow {
                 ready_consumers,
                 lease_deadlines,
                 scheduled_deliveries,
+                dead_letters,
                 compaction_latest,
                 superseded_since_compaction: 0,
             })),
@@ -344,6 +346,7 @@ impl Morrow {
             .peek()
             .map(|entry| self.hooks.clock.now_ms().saturating_sub(entry.0.scheduled_at_ms))
             .unwrap_or_default();
+        let dead_letter_records = inner.dead_letters.len();
         let compaction_candidates = inner.superseded_since_compaction;
         let compaction_keys = inner.compaction_latest.len();
         drop(inner);
@@ -397,6 +400,15 @@ impl Morrow {
         metrics.push_str("# HELP morrow_scheduled_delivery_due_lag_ms Age of the oldest due scheduled message.\n");
         metrics.push_str("# TYPE morrow_scheduled_delivery_due_lag_ms gauge\n");
         metrics.push_str(&format!("morrow_scheduled_delivery_due_lag_ms {scheduled_due_lag_ms}\n"));
+        metrics.push_str("# HELP morrow_retry_exhausted_total Dead-letter terminal records recovered by the broker.\n");
+        metrics.push_str("# TYPE morrow_retry_exhausted_total gauge\n");
+        metrics.push_str(&format!("morrow_retry_exhausted_total {dead_letter_records}\n"));
+        metrics.push_str("# HELP morrow_dead_letter_writes_total Durable dead-letter records.\n");
+        metrics.push_str("# TYPE morrow_dead_letter_writes_total gauge\n");
+        metrics.push_str(&format!("morrow_dead_letter_writes_total {dead_letter_records}\n"));
+        metrics.push_str("# HELP morrow_dead_letter_replay_outcomes_total Dead-letter replay outcomes.\n");
+        metrics.push_str("# TYPE morrow_dead_letter_replay_outcomes_total counter\n");
+        metrics.push_str("morrow_dead_letter_replay_outcomes_total 0\n");
         metrics.push_str("# HELP morrow_publishes_total Publish commands received.\n");
         metrics.push_str("# TYPE morrow_publishes_total counter\n");
         metrics.push_str(&format!(

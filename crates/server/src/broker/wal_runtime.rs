@@ -32,6 +32,7 @@ enum WalCommand {
         delivery_id: u64,
         response: mpsc::Sender<Result<()>>,
     },
+    DeadLetter(DeadLetterRecord, mpsc::Sender<Result<()>>),
     FlushDue(mpsc::Sender<Result<()>>),
     Flush(mpsc::Sender<Result<()>>),
     Checkpoint {
@@ -122,6 +123,10 @@ impl WalRuntime {
             delivery_id,
             response,
         })
+    }
+
+    pub(super) fn append_dead_letter(&self, record: &DeadLetterRecord) -> Result<()> {
+        self.request(|response| WalCommand::DeadLetter(record.clone(), response))
     }
 
     pub(super) async fn flush_due(&self) -> Result<()> {
@@ -231,6 +236,9 @@ fn wal_worker(mut wal: Wal, receiver: mpsc::Receiver<WalCommand>) {
             } => {
                 let result = wal.append_ack(seq, &consumer_id, delivery_id).map(|_| ());
                 let _ = response.send(result);
+            }
+            WalCommand::DeadLetter(record, response) => {
+                let _ = response.send(wal.append_dead_letter(&record));
             }
             WalCommand::FlushDue(response) => {
                 let _ = response.send(wal.flush_due());

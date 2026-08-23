@@ -153,6 +153,9 @@ impl Morrow {
                     .await
             }
             "/streams" | "/api/v1/streams" => self.write_streams_response(&mut stream).await,
+            "/dead-letters" | "/api/v1/dead-letters" => {
+                self.write_dead_letters_response(&mut stream, parse_page(query)).await
+            }
             "/wal" | "/api/v1/storage" => self.write_wal_response(&mut stream).await,
             "/middleware" | "/api/v1/middleware" => {
                 self.write_middleware_response(&mut stream).await
@@ -214,6 +217,16 @@ impl Morrow {
     async fn write_streams_response<W: AsyncWrite + Unpin>(&self, stream: &mut W) -> Result<()> {
         let body = serde_json::to_vec(&self.streams_response().await)
             .context("serializing HTTP streams response")?;
+        write_http_response(stream, "200 OK", "application/json", &body).await
+    }
+
+    async fn write_dead_letters_response<W: AsyncWrite + Unpin>(
+        &self,
+        stream: &mut W,
+        (offset, limit): (usize, usize),
+    ) -> Result<()> {
+        let body = serde_json::to_vec(&self.dead_letters_response_page(offset, limit).await)
+            .context("serializing HTTP dead-letter response")?;
         write_http_response(stream, "200 OK", "application/json", &body).await
     }
 
