@@ -166,6 +166,7 @@ pub(super) struct HealthResponse {
     pub(super) status: &'static str,
     pub(super) cluster_status: &'static str,
     pub(super) role: &'static str,
+    pub(super) reason: Option<&'static str>,
 }
 
 #[derive(Debug, serde::Serialize)]

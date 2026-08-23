@@ -178,6 +178,7 @@ impl Morrow {
             cluster_delta_gate: Arc::new(Mutex::new(())),
             cluster_application_metrics: Arc::new(ClusterApplicationMetrics::default()),
             metrics: Arc::new(BrokerMetrics::default()),
+            storage_failure: Arc::new(AtomicBool::new(false)),
             redelivery_notify: Arc::new(Notify::new()),
             pull_waiters: PullWaiterRegistry::default(),
             compaction_running: Arc::new(AtomicBool::new(false)),
@@ -267,15 +268,26 @@ impl Morrow {
 
     pub(super) async fn health_response(&self) -> HealthResponse {
         let cluster = self.cluster_response().await;
-        let status = if matches!(cluster.cluster_status, "standalone" | "ready") {
-            "ready"
+        let route_degraded = cluster
+            .routes
+            .as_ref()
+            .is_some_and(|routes| !routes.seeds.is_empty() && routes.connected.is_empty());
+        let (status, reason) = if self.storage_failure.load(Ordering::Relaxed) {
+            ("degraded", Some("storage_failure"))
+        } else if route_degraded {
+            ("degraded", Some("route_degraded"))
+        } else if cluster.cluster_status == "standalone" {
+            ("ready", None)
+        } else if cluster.cluster_status == "ready" {
+            ("ready", None)
         } else {
-            "forming"
+            ("forming", Some("leader_election"))
         };
         HealthResponse {
             status,
             cluster_status: cluster.cluster_status,
             role: cluster.role,
+            reason,
         }
     }
 

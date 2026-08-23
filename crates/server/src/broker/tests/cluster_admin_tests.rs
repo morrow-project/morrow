@@ -129,6 +129,7 @@ async fn http_health_endpoints_report_liveness_and_readiness() {
     assert!(ready.starts_with("HTTP/1.1 200 OK\r\n"));
     assert!(ready.contains(r#""status":"ready""#));
     assert!(ready.contains(r#""cluster_status":"standalone""#));
+    assert!(ready.contains(r#""reason":null"#));
     assert!(versioned_live.starts_with("HTTP/1.1 200 OK\r\n"));
 }
 
@@ -141,6 +142,7 @@ async fn http_readiness_rejects_a_cluster_without_a_leader() {
     assert!(ready.starts_with("HTTP/1.1 503 Service Unavailable\r\n"));
     assert!(ready.contains(r#""status":"forming""#));
     assert!(ready.contains(r#""cluster_status":"forming""#));
+    assert!(ready.contains(r#""reason":"leader_election""#));
 }
 
 #[tokio::test]
