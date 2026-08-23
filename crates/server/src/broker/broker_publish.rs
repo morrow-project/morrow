@@ -34,6 +34,20 @@ fn valid_traceparent(headers: &[(String, String)]) -> Option<&str> {
     .then_some(value)
 }
 
+fn schema_id_from_headers(headers: &[(String, String)]) -> Result<Option<u64>> {
+    let Some(value) = headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("Morrow-Schema-Id"))
+        .map(|(_, value)| value)
+    else {
+        return Ok(None);
+    };
+    value
+        .parse::<u64>()
+        .map(Some)
+        .map_err(|_| BrokerError::msg("Morrow-Schema-Id must be an integer"))
+}
+
 impl Morrow {
     pub(super) async fn load_partition_record(
         &self,
@@ -338,7 +352,7 @@ impl Morrow {
                 headers: stored_headers,
                 timestamp_ms: self.hooks.clock.now_ms(),
                 reply_to,
-                schema_id: None,
+                schema_id: schema_id_from_headers(&headers)?,
                 payload,
                 partitioning_epoch: stream.partitioning.epoch,
                 leader_epoch: 0,
@@ -407,7 +421,7 @@ impl Morrow {
             headers: stored_headers,
             timestamp_ms: self.hooks.clock.now_ms(),
             reply_to,
-            schema_id: None,
+            schema_id: schema_id_from_headers(&headers)?,
             payload,
             partitioning_epoch: stream.partitioning.epoch,
             leader_epoch: 0,

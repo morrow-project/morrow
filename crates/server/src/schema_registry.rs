@@ -180,7 +180,10 @@ impl SchemaRegistry {
             .by_id(schema_id)
             .ok_or_else(|| BrokerError::msg("schema ID is not active"))?;
         crate::broker_ensure!(schema.tenant == tenant, "schema belongs to another tenant");
-        crate::broker_ensure!(schema.subject == subject, "schema subject does not match message");
+        crate::broker_ensure!(
+            schema.subject == subject,
+            "schema subject does not match message"
+        );
         Ok(schema)
     }
 
