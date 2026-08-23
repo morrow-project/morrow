@@ -469,6 +469,15 @@ impl Morrow {
         let pull_waiters = self.pull_waiters.len();
 
         let quotas = self.quotas.snapshot();
+        let tenant_quota_usage = self.tenant_quotas.snapshot();
+        let tenant_connections = tenant_quota_usage
+            .values()
+            .map(|usage| usage.connections)
+            .sum::<usize>();
+        let tenant_memory_bytes = tenant_quota_usage
+            .values()
+            .map(|usage| usage.memory_bytes)
+            .sum::<u64>();
         let cluster = self.cluster_response().await;
         let streams = self.streams_response().await;
         let retained_messages = streams
@@ -811,6 +820,19 @@ impl Morrow {
         metrics.push_str(&format!(
             "morrow_quota_rejections_total{{resource=\"outbound\"}} {}\n",
             quotas.outbound_rejections
+        ));
+        metrics.push_str("# HELP morrow_tenants Current tenants with quota usage.\n");
+        metrics.push_str("# TYPE morrow_tenants gauge\n");
+        metrics.push_str(&format!("morrow_tenants {}\n", tenant_quota_usage.len()));
+        metrics.push_str("# HELP morrow_tenant_connections Current tenant-scoped connections.\n");
+        metrics.push_str("# TYPE morrow_tenant_connections gauge\n");
+        metrics.push_str(&format!("morrow_tenant_connections {tenant_connections}\n"));
+        metrics.push_str(
+            "# HELP morrow_tenant_memory_bytes Current tenant-scoped memory reservations.\n",
+        );
+        metrics.push_str("# TYPE morrow_tenant_memory_bytes gauge\n");
+        metrics.push_str(&format!(
+            "morrow_tenant_memory_bytes {tenant_memory_bytes}\n"
         ));
         metrics
     }
