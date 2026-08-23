@@ -81,6 +81,7 @@ impl DurableBrokerState {
                     delivery_id: lease.delivery_id,
                     deadline_ms: lease.deadline_ms,
                     attempt: lease.attempt,
+                    retry_waiting: false,
                 },
             );
             consumer.delivered += 1;

@@ -39,6 +39,7 @@ pub(super) fn delivery_attempt_body(record: &DeliveryAttemptRecord) -> Result<Ve
     put_u64(&mut body, record.delivery_id);
     put_u64(&mut body, record.deadline_ms);
     put_u32(&mut body, record.attempt);
+    body.push(u8::from(record.retry_waiting));
     Ok(body)
 }
 pub(super) fn ack_body(record: &AckRecord) -> Result<Vec<u8>> {
@@ -237,6 +238,11 @@ pub(super) fn decode_delivery_attempt(body: &[u8]) -> Result<DeliveryAttemptReco
         delivery_id: cursor.u64()?,
         deadline_ms: cursor.u64()?,
         attempt: cursor.u32()?,
+        retry_waiting: if cursor.is_finished() {
+            false
+        } else {
+            cursor.take(1)?[0] != 0
+        },
     };
     cursor.finish()?;
     Ok(record)

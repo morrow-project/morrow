@@ -57,6 +57,7 @@ async fn one_redelivery_tick_expires_at_most_the_work_limit() {
             delivery_id: seq,
             deadline_ms: 1,
             attempt: 1,
+            retry_waiting: false,
         };
         inner
             .consumers
@@ -69,6 +70,7 @@ async fn one_redelivery_tick_expires_at_most_the_work_limit() {
                     delivery_id: seq,
                     deadline_ms: 1,
                     attempt: 1,
+                    retry_waiting: false,
                 },
             );
         inner.schedule_lease(consumer_id, seq, &lease);
@@ -103,6 +105,7 @@ async fn rescheduled_lease_ignores_its_stale_deadline() {
         delivery_id: lease.delivery_id,
         deadline_ms: lease.deadline_ms + 100,
         attempt: lease.attempt,
+        retry_waiting: lease.retry_waiting,
     };
     inner
         .consumers

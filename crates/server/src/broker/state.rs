@@ -79,6 +79,7 @@ pub(super) struct InFlight {
     pub(super) delivery_id: u64,
     pub(super) deadline_ms: u64,
     pub(super) attempt: u32,
+    pub(super) retry_waiting: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -152,6 +152,7 @@ impl Wal {
             delivery_id,
             deadline_ms,
             attempt,
+            retry_waiting: false,
         };
         self.write_delivery_attempt(&record)?;
         Ok(record)
@@ -386,6 +387,7 @@ pub(super) fn write_compact_state(
                 delivery_id: 0,
                 deadline_ms: 0,
                 attempt: 0,
+                retry_waiting: false,
             })?;
             write_record_to(file, KIND_DELIVERY_ATTEMPT, &body)?;
             bytes += record_size(&body)?;
@@ -397,6 +399,7 @@ pub(super) fn write_compact_state(
                 delivery_id: 0,
                 deadline_ms: 0,
                 attempt: next_attempt.saturating_sub(1),
+                retry_waiting: false,
             })?;
             write_record_to(file, KIND_DELIVERY_ATTEMPT, &body)?;
             bytes += record_size(&body)?;

@@ -96,6 +96,8 @@ pub struct DeliveryAttemptRecord {
     pub delivery_id: u64,
     pub deadline_ms: u64,
     pub attempt: u32,
+    #[serde(default)]
+    pub retry_waiting: bool,
 }
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct AckRecord {

@@ -493,6 +493,7 @@ impl Morrow {
             delivery_id,
             deadline_ms,
             attempt: lease.attempt,
+            retry_waiting: lease.retry_waiting,
         };
         inner.wal.append_delivery_lease(&record)?;
         inner

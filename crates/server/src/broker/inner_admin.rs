@@ -189,6 +189,7 @@ impl DurableBrokerState {
                                 delivery_id: in_flight.delivery_id,
                                 deadline_ms: in_flight.deadline_ms,
                                 attempt: in_flight.attempt,
+                                retry_waiting: in_flight.retry_waiting,
                             },
                         )
                     })

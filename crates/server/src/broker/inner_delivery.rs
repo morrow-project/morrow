@@ -113,6 +113,7 @@ impl DurableBrokerState {
                             delivery_id: delivery.delivery_id,
                             deadline_ms: delivery.deadline_ms,
                             attempt: delivery.attempt,
+                            retry_waiting: false,
                         },
                     );
                     consumer.delivered += 1;

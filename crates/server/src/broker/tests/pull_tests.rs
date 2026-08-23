@@ -116,6 +116,36 @@ async fn exhausted_pull_delivery_is_written_once_to_dead_letters() {
 }
 
 #[tokio::test]
+async fn lease_expiry_uses_persisted_retry_deadline() {
+    let scenario = Scenario::new();
+    let mut consumer = TestClient::connect_pull(scenario.broker(), "puller", 25).await;
+    consumer
+        .write_line("CONSUMER CREATE worker orders/* @earliest retry=2:fixed:20:1000:0:retain")
+        .await;
+    assert_eq!(consumer.read_frame().await, "C-OK CREATE worker\r\n");
+    let mut publisher = scenario.connect_durable("publisher", 25).await;
+    publisher.publish("orders/created", b"retry").await;
+    publisher.ping_roundtrip().await;
+
+    consumer.write_line("FETCH worker 1 16 0").await;
+    assert_eq!(consumer.read_frame().await, "BATCH worker 1 5\r\n");
+    consumer.read_frame().await;
+    scenario.advance_ms(25);
+    scenario.tick_redelivery().await;
+    consumer.write_line("FETCH worker 1 16 0").await;
+    assert_eq!(consumer.read_frame().await, "BATCH worker 0 0\r\n");
+    scenario.advance_ms(19);
+    scenario.tick_redelivery().await;
+    consumer.write_line("FETCH worker 1 16 0").await;
+    assert_eq!(consumer.read_frame().await, "BATCH worker 0 0\r\n");
+    scenario.advance_ms(1);
+    scenario.tick_redelivery().await;
+    consumer.write_line("FETCH worker 1 16 0").await;
+    assert_eq!(consumer.read_frame().await, "BATCH worker 1 5\r\n");
+    assert!(consumer.read_frame().await.contains(" 2 "));
+}
+
+#[tokio::test]
 async fn pull_lease_attempt_survives_restart() {
     let mut scenario = Scenario::new();
     let mut consumer = TestClient::connect_pull(scenario.broker(), "puller", 25).await;

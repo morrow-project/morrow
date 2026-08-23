@@ -114,10 +114,13 @@ impl DurableBrokerState {
             else {
                 continue;
             };
-            let terminal = self
-                .consumers
-                .get(&deadline.consumer_id)
-                .is_some_and(|consumer| lease.attempt >= consumer.record.retry_policy.max_attempts);
+            let terminal = !lease.retry_waiting
+                && self
+                    .consumers
+                    .get(&deadline.consumer_id)
+                    .is_some_and(|consumer| {
+                        lease.attempt >= consumer.record.retry_policy.max_attempts
+                    });
             if terminal {
                 let message = self.messages.get(&deadline.seq).cloned();
                 let action = self
@@ -182,21 +185,60 @@ impl DurableBrokerState {
                 expired += 1;
                 continue;
             }
-            if self
-                .messages
-                .get(&deadline.seq)
-                .is_some_and(|message| message.offset.is_none())
-            {
-                self.consumers
-                    .get_mut(&deadline.consumer_id)
-                    .unwrap()
-                    .pending
-                    .insert(deadline.seq);
+            if !lease.retry_waiting {
+                let retry_delay = self
+                    .consumers
+                    .get(&deadline.consumer_id)
+                    .map(|consumer| {
+                        consumer
+                            .record
+                            .retry_policy
+                            .delay_ms(lease.attempt.saturating_add(1))
+                    })
+                    .unwrap_or_default();
+                if retry_delay > 0 {
+                    let retry_deadline = now
+                        .checked_add(retry_delay)
+                        .ok_or_else(|| BrokerError::msg("retry deadline overflow"))?;
+                    let record = DeliveryAttemptRecord {
+                        seq: deadline.seq,
+                        consumer_id: deadline.consumer_id.clone(),
+                        delivery_id: lease.delivery_id,
+                        deadline_ms: retry_deadline,
+                        attempt: lease.attempt.saturating_add(1),
+                        retry_waiting: true,
+                    };
+                    self.wal.append_delivery_lease(&record)?;
+                    if let Some(consumer) = self.consumers.get_mut(&deadline.consumer_id) {
+                        consumer.in_flight.insert(
+                            deadline.seq,
+                            InFlight {
+                                delivery_id: record.delivery_id,
+                                deadline_ms: record.deadline_ms,
+                                attempt: record.attempt,
+                                retry_waiting: true,
+                            },
+                        );
+                    }
+                    self.schedule_lease(&deadline.consumer_id, deadline.seq, &record);
+                    expired += 1;
+                    continue;
+                }
             }
+            self.consumers
+                .get_mut(&deadline.consumer_id)
+                .unwrap()
+                .pending
+                .insert(deadline.seq);
             let consumer = self.consumers.get_mut(&deadline.consumer_id).unwrap();
-            consumer
-                .pending_attempts
-                .insert(deadline.seq, lease.attempt.saturating_add(1));
+            consumer.pending_attempts.insert(
+                deadline.seq,
+                if lease.retry_waiting {
+                    lease.attempt
+                } else {
+                    lease.attempt.saturating_add(1)
+                },
+            );
             self.ready_consumers.insert(deadline.consumer_id);
             expired += 1;
         }
