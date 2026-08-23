@@ -29,6 +29,14 @@ impl Morrow {
             .authorize(&subject, &scope, permission, self.hooks.clock.now_ms())
     }
 
+    pub(super) fn record_audit_event(&self, event: crate::tenancy::AuditEvent) {
+        let _ = self
+            .audit
+            .lock()
+            .expect("audit log lock poisoned")
+            .append(event);
+    }
+
     pub(super) fn record_authorization_denial(
         &self,
         connection_id: u64,
@@ -49,11 +57,7 @@ impl Morrow {
             outcome: "denied".to_string(),
             details,
         };
-        let _ = self
-            .audit
-            .lock()
-            .expect("audit log lock poisoned")
-            .append(event);
+        self.record_audit_event(event);
     }
 
     pub(super) async fn authorize_publish(

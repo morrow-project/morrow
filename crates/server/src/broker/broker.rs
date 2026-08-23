@@ -50,4 +50,26 @@ impl Morrow {
     pub fn verify_audit_log(&self) -> Result<()> {
         self.audit.lock().expect("audit log lock poisoned").verify()
     }
+
+    pub fn policy_snapshot(&self) -> crate::tenancy::PolicySnapshot {
+        self.policy.snapshot()
+    }
+
+    pub fn replace_policy_snapshot(&self, snapshot: crate::tenancy::PolicySnapshot) -> Result<()> {
+        let generation = snapshot.generation;
+        self.policy.replace(snapshot)?;
+        self.record_audit_event(crate::tenancy::AuditEvent {
+            sequence: 0,
+            timestamp_ms: self.hooks.clock.now_ms(),
+            actor: "system".to_string(),
+            tenant: None,
+            action: "policy.replace".to_string(),
+            resource: "cluster/policy".to_string(),
+            outcome: "success".to_string(),
+            details: [("generation".to_string(), generation.to_string())]
+                .into_iter()
+                .collect(),
+        });
+        Ok(())
+    }
 }
