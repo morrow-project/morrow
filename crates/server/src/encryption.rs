@@ -222,7 +222,24 @@ impl KeyRing {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::tempdir;
+
+    struct FlakyProvider {
+        key: [u8; KEY_LEN],
+        failures: AtomicUsize,
+    }
+
+    impl KeyProvider for FlakyProvider {
+        fn load_key(&self, _version: KeyVersion) -> Result<[u8; KEY_LEN]> {
+            let remaining = self.failures.load(Ordering::Relaxed);
+            if remaining > 0 {
+                self.failures.fetch_sub(1, Ordering::Relaxed);
+                return Err(BrokerError::msg("KMS temporarily unavailable"));
+            }
+            Ok(self.key)
+        }
+    }
 
     fn provider() -> Arc<MemoryKeyProvider> {
         let provider = Arc::new(MemoryKeyProvider::default());
@@ -297,5 +314,23 @@ mod tests {
         fs::write(dir.path().join("key-8.bin"), [8u8; KEY_LEN - 1]).unwrap();
         assert!(provider.load_key(KeyVersion::new(8)).is_err());
         assert!(provider.load_key(KeyVersion::new(9)).is_err());
+    }
+
+    #[test]
+    fn kms_outage_and_throttling_fail_closed_then_recover_without_stale_keys() {
+        let provider = Arc::new(FlakyProvider {
+            key: [3u8; KEY_LEN],
+            failures: AtomicUsize::new(2),
+        });
+        assert!(KeyRing::new(provider.clone(), KeyVersion::new(1)).is_err());
+        let provider = Arc::new(FlakyProvider {
+            key: [3u8; KEY_LEN],
+            failures: AtomicUsize::new(0),
+        });
+        let ring = KeyRing::new(provider.clone(), KeyVersion::new(1)).unwrap();
+        let blob = ring.encrypt(b"kms", b"object").unwrap();
+        provider.failures.store(1, Ordering::Relaxed);
+        assert!(ring.decrypt(&blob, b"object").is_err());
+        assert_eq!(ring.decrypt(&blob, b"object").unwrap(), b"kms");
     }
 }
