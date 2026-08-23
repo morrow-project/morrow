@@ -44,6 +44,12 @@ pub struct BackupManifest {
     pub objects: Vec<BackupObject>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TieringStats {
+    pub verified_objects: usize,
+    pub evicted_bytes: u64,
+}
+
 pub trait ObjectStore: Send + Sync {
     fn put_immutable(&self, key: &str, bytes: &[u8], sha256: &str) -> Result<()>;
     fn get(&self, key: &str) -> Result<Vec<u8>>;
@@ -247,6 +253,42 @@ impl<S: ObjectStore + 'static> BackupEngine<S> {
             let _ = fs::remove_dir_all(&staging);
         }
         result
+    }
+
+    /// Evict only sealed stream files whose immutable remote copies are still
+    /// present and checksum-valid.  A manifest is the publication fence: callers
+    /// cannot accidentally evict a file merely because an upload returned.
+    pub fn evict_sealed(&self, source: &Path, manifest: &BackupManifest) -> Result<TieringStats> {
+        validate_manifest(manifest)?;
+        let mut stats = TieringStats {
+            verified_objects: 0,
+            evicted_bytes: 0,
+        };
+        for object in &manifest.objects {
+            if !object.relative_path.starts_with("streams/")
+                || !matches!(
+                    Path::new(&object.relative_path)
+                        .extension()
+                        .and_then(|value| value.to_str()),
+                    Some("plog") | Some("idx") | Some("sidx")
+                )
+            {
+                continue;
+            }
+            let bytes = self.store.get(&object.key)?;
+            crate::broker_ensure!(
+                bytes.len() as u64 == object.bytes,
+                "tiered object size mismatch"
+            );
+            verify_checksum(&bytes, &object.sha256)?;
+            let path = source.join(&object.relative_path);
+            if path.exists() {
+                fs::remove_file(&path)?;
+                stats.evicted_bytes = stats.evicted_bytes.saturating_add(object.bytes);
+            }
+            stats.verified_objects += 1;
+        }
+        Ok(stats)
     }
 }
 
@@ -492,5 +534,33 @@ mod tests {
         let mut text = String::new();
         write!(&mut text, "{}", cache.stats().bytes).unwrap();
         assert_eq!(text, "10");
+    }
+
+    #[test]
+    fn eviction_requires_published_remote_objects_and_repeated_restore_detects_conflicts() {
+        let source = tempdir().unwrap();
+        let partition = source.path().join("streams/orders/partition-00000");
+        fs::create_dir_all(&partition).unwrap();
+        fs::write(partition.join("00000000000000000001.plog"), b"sealed").unwrap();
+        fs::write(partition.join("00000000000000000002.plog"), b"active").unwrap();
+        let store = Arc::new(MemoryObjectStore::default());
+        let engine = BackupEngine::new(store);
+        let manifest = engine
+            .create_full(source.path(), Vec::new(), "old", "b2", 2)
+            .unwrap();
+        let stats = engine.evict_sealed(source.path(), &manifest).unwrap();
+        assert_eq!(stats.verified_objects, 1);
+        assert!(!partition.join("00000000000000000001.plog").exists());
+        assert!(partition.join("00000000000000000002.plog").exists());
+
+        let destination = tempdir().unwrap().path().join("restore");
+        engine.restore(&manifest, &destination, "new").unwrap();
+        engine.restore(&manifest, &destination, "new").unwrap();
+        fs::write(
+            destination.join("streams/orders/partition-00000/00000000000000000001.plog"),
+            b"conflict",
+        )
+        .unwrap();
+        assert!(engine.restore(&manifest, &destination, "new").is_err());
     }
 }
