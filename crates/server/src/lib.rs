@@ -1,3 +1,4 @@
+pub mod backup;
 pub mod broker;
 pub mod config;
 pub mod consumer_cursor;
