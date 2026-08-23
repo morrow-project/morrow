@@ -36,6 +36,32 @@ fn object_sink_is_idempotent_and_checkpoint_recovers_after_restart() {
 }
 
 #[test]
+fn object_sink_deduplicates_same_batch_keys_and_rejects_conflicts() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let mut sink = ObjectStoreSink::new("objects", 3, dir.path().join("objects"));
+    let batch = ConnectorBatch {
+        generation: 3,
+        records: vec![record(4), record(4)],
+    };
+    sink.write_batch(&batch).unwrap();
+    let path = dir
+        .path()
+        .join("objects/orders/partition-00000/00000000000000000004.record");
+    assert!(path.exists());
+
+    let mut conflict = record(4);
+    conflict.payload = b"different".to_vec();
+    assert!(
+        ObjectStoreSink::new("objects", 3, dir.path().join("objects"))
+            .write_batch(&ConnectorBatch {
+                generation: 3,
+                records: vec![conflict],
+            })
+            .is_err()
+    );
+}
+
+#[test]
 fn append_database_deduplicates_replayed_offsets_after_process_restart() {
     let dir = tempfile::TempDir::new().unwrap();
     let path = dir.path().join("database.jsonl");

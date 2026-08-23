@@ -36,31 +36,51 @@ impl SinkTask for ObjectStoreSink {
     fn write_batch(&mut self, batch: &ConnectorBatch) -> Result<SinkCompletion, String> {
         fence(self.generation, batch.generation)?;
         let mut offsets = BTreeMap::new();
+        let mut objects = BTreeMap::<PathBuf, Vec<u8>>::new();
+        let mut directories = BTreeSet::new();
         for record in &batch.records {
             let stream = safe_component(&record.stream)?;
             let dir = self
                 .root
                 .join(stream)
                 .join(format!("partition-{:05}", record.partition));
-            std::fs::create_dir_all(&dir).map_err(display)?;
             let path = dir.join(format!("{:020}.record", record.offset));
             let body = serde_json::to_vec(record).map_err(display)?;
+            if let Some(previous) = objects.insert(path, body.clone())
+                && previous != body
+            {
+                return Err("object key already contains different data".to_string());
+            }
+            directories.insert(dir);
+            offsets.insert((record.stream.clone(), record.partition), record.offset);
+        }
+        for (path, body) in objects {
             if path.exists() {
                 if std::fs::read(&path).map_err(display)? != body {
                     return Err("object key already contains different data".to_string());
                 }
-            } else {
-                let temporary = path.with_extension("tmp");
-                std::fs::write(&temporary, &body).map_err(display)?;
-                OpenOptions::new()
-                    .read(true)
-                    .open(&temporary)
-                    .map_err(display)?
-                    .sync_all()
-                    .map_err(display)?;
-                std::fs::rename(temporary, path).map_err(display)?;
+                continue;
             }
-            offsets.insert((record.stream.clone(), record.partition), record.offset);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).map_err(display)?;
+            }
+            let temporary = path.with_extension("tmp");
+            std::fs::write(&temporary, &body).map_err(display)?;
+            OpenOptions::new()
+                .read(true)
+                .open(&temporary)
+                .map_err(display)?
+                .sync_all()
+                .map_err(display)?;
+            std::fs::rename(temporary, path).map_err(display)?;
+        }
+        for directory in directories {
+            OpenOptions::new()
+                .read(true)
+                .open(directory)
+                .map_err(display)?
+                .sync_data()
+                .map_err(display)?;
         }
         Ok(SinkCompletion { offsets })
     }
