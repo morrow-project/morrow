@@ -11,6 +11,7 @@ pub(crate) mod quota;
 pub mod raft;
 pub(crate) mod security;
 pub mod stream;
+pub mod tenancy;
 pub mod tls;
 pub mod wal;
 
