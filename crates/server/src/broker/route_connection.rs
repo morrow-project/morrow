@@ -173,9 +173,9 @@ where
     })
     .context("encoding route frame")?;
     crate::broker_ensure!(payload.len() <= u32::MAX as usize, "route frame too large");
-    writer
-        .write_all(&(payload.len() as u32).to_be_bytes())
-        .await?;
-    writer.write_all(&payload).await?;
+    let mut encoded = Vec::with_capacity(4 + payload.len());
+    encoded.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    encoded.extend_from_slice(&payload);
+    writer.write_all(&encoded).await?;
     Ok(())
 }
