@@ -84,6 +84,8 @@ pub struct ConsumerRecord {
     pub max_in_flight: usize,
     #[serde(default)]
     pub start_position: protocol::StartPosition,
+    #[serde(default)]
+    pub retry_policy: protocol::RetryPolicy,
 }
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct DeliveryAttemptRecord {

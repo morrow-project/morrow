@@ -297,5 +297,6 @@ fn consumer(consumer_id: &str) -> ConsumerRecord {
         ack_timeout_ms: 30_000,
         max_in_flight: 1024,
         start_position: protocol::StartPosition::Latest,
+        retry_policy: protocol::RetryPolicy::default(),
     }
 }

@@ -26,6 +26,10 @@ pub(super) fn consumer_upsert_body(record: &ConsumerRecord) -> Result<Vec<u8>> {
         &mut body,
         &serde_json::to_vec(&record.start_position).context("encoding consumer start position")?,
     )?;
+    put_bytes(
+        &mut body,
+        &serde_json::to_vec(&record.retry_policy).context("encoding consumer retry policy")?,
+    )?;
     Ok(body)
 }
 pub(super) fn delivery_attempt_body(record: &DeliveryAttemptRecord) -> Result<Vec<u8>> {
@@ -197,6 +201,11 @@ pub(super) fn decode_consumer_upsert(body: &[u8]) -> Result<ConsumerRecord> {
     } else {
         serde_json::from_slice(&cursor.bytes()?).context("decoding consumer start position")?
     };
+    let retry_policy = if cursor.is_finished() {
+        protocol::RetryPolicy::default()
+    } else {
+        serde_json::from_slice(&cursor.bytes()?).context("decoding consumer retry policy")?
+    };
     let record = ConsumerRecord {
         consumer_id,
         filter_subject,
@@ -204,6 +213,7 @@ pub(super) fn decode_consumer_upsert(body: &[u8]) -> Result<ConsumerRecord> {
         ack_timeout_ms,
         max_in_flight,
         start_position,
+        retry_policy,
     };
     cursor.finish()?;
     Ok(record)

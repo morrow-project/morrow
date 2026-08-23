@@ -25,6 +25,7 @@ impl Morrow {
         name: String,
         filter_subject: String,
         start: protocol::StartPosition,
+        retry_policy: protocol::RetryPolicy,
     ) -> Result<()> {
         protocol::validate_identifier("consumer name", &name)?;
         crate::broker_ensure!(
@@ -65,6 +66,7 @@ impl Morrow {
             ack_timeout_ms,
             max_in_flight,
             start_position: start,
+            retry_policy,
         };
         let cursors = {
             let inner = self.inner.lock().await;
