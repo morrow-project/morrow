@@ -182,6 +182,50 @@ pub(super) struct BrokerMetrics {
     pub(super) acknowledgements_total: AtomicU64,
     pub(super) nacks_total: AtomicU64,
     pub(super) redeliveries_total: AtomicU64,
+    pub(super) publish_latency_us: LatencyHistogram,
+    pub(super) delivery_latency_us: LatencyHistogram,
+}
+
+#[derive(Debug)]
+pub(super) struct LatencyHistogram {
+    buckets: [AtomicU64; 6],
+    count: AtomicU64,
+    sum_us: AtomicU64,
+}
+
+impl Default for LatencyHistogram {
+    fn default() -> Self {
+        Self {
+            buckets: std::array::from_fn(|_| AtomicU64::new(0)),
+            count: AtomicU64::new(0),
+            sum_us: AtomicU64::new(0),
+        }
+    }
+}
+
+impl LatencyHistogram {
+    pub(super) fn observe(&self, duration: Duration) {
+        let micros = duration.as_micros().min(u64::MAX as u128) as u64;
+        let bucket = match micros {
+            0..=9 => 0,
+            10..=99 => 1,
+            100..=999 => 2,
+            1_000..=9_999 => 3,
+            10_000..=99_999 => 4,
+            _ => 5,
+        };
+        self.buckets[bucket].fetch_add(1, Ordering::Relaxed);
+        self.count.fetch_add(1, Ordering::Relaxed);
+        self.sum_us.fetch_add(micros, Ordering::Relaxed);
+    }
+
+    pub(super) fn snapshot(&self) -> ([u64; 6], u64, u64) {
+        (
+            std::array::from_fn(|index| self.buckets[index].load(Ordering::Relaxed)),
+            self.count.load(Ordering::Relaxed),
+            self.sum_us.load(Ordering::Relaxed),
+        )
+    }
 }
 
 #[derive(Debug, serde::Serialize)]

@@ -366,6 +366,16 @@ impl Morrow {
             "morrow_redeliveries_total {}\n",
             self.metrics.redeliveries_total.load(Ordering::Relaxed)
         ));
+        append_latency_histogram(
+            &mut metrics,
+            "morrow_publish_latency_us",
+            &self.metrics.publish_latency_us,
+        );
+        append_latency_histogram(
+            &mut metrics,
+            "morrow_delivery_latency_us",
+            &self.metrics.delivery_latency_us,
+        );
         metrics.push_str("# HELP morrow_wal_bytes Total WAL bytes.\n");
         metrics.push_str("# TYPE morrow_wal_bytes gauge\n");
         metrics.push_str(&format!("morrow_wal_bytes {}\n", wal.total_wal_bytes));
@@ -783,4 +793,17 @@ impl Morrow {
             .get(&id)
             .is_some_and(|client| client.configured)
     }
+}
+
+fn append_latency_histogram(metrics: &mut String, name: &str, histogram: &LatencyHistogram) {
+    const BOUNDS: [&str; 6] = ["9", "99", "999", "9999", "99999", "+Inf"];
+    let (buckets, count, sum_us) = histogram.snapshot();
+    metrics.push_str(&format!("# HELP {name} Latency in microseconds.\n"));
+    metrics.push_str(&format!("# TYPE {name} histogram\n"));
+    let mut cumulative = 0;
+    for (bound, bucket) in BOUNDS.into_iter().zip(buckets) {
+        cumulative += bucket;
+        metrics.push_str(&format!("{name}_bucket{{le=\"{bound}\"}} {cumulative}\n"));
+    }
+    metrics.push_str(&format!("{name}_sum {sum_us}\n{name}_count {count}\n"));
 }

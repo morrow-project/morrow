@@ -58,21 +58,25 @@ impl Morrow {
         payload: Vec<u8>,
         producer_ack: Option<protocol::ProducerAckRequest>,
     ) -> Result<()> {
+        let started = Instant::now();
         self.metrics.publishes_total.fetch_add(1, Ordering::Relaxed);
         self.metrics
             .published_bytes_total
             .fetch_add(payload.len() as u64, Ordering::Relaxed);
-        self.publish_with_depth(
-            publisher_id,
-            subject_name,
-            reply_to,
-            headers,
-            key,
-            payload,
-            producer_ack,
-            0,
-        )
-        .await
+        let result = self
+            .publish_with_depth(
+                publisher_id,
+                subject_name,
+                reply_to,
+                headers,
+                key,
+                payload,
+                producer_ack,
+                0,
+            )
+            .await;
+        self.metrics.publish_latency_us.observe(started.elapsed());
+        result
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -515,6 +519,7 @@ impl Morrow {
     }
 
     pub(super) async fn deliver_pending(&self) -> Result<()> {
+        let started = Instant::now();
         let deliveries = {
             let connections = ConnectionState {
                 clients: self.connections.lock().await.clients.clone(),
@@ -536,6 +541,7 @@ impl Morrow {
         for delivery in deliveries {
             let _ = delivery.sender.send(delivery.frame).await;
         }
+        self.metrics.delivery_latency_us.observe(started.elapsed());
         Ok(())
     }
 
