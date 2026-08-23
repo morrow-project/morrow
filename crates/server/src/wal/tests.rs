@@ -3,6 +3,7 @@ use std::{
     fs::OpenOptions,
     io::Write,
     path::Path,
+    sync::Arc,
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -49,6 +50,59 @@ fn opens_empty_directory_with_v1_segment() {
     assert_eq!(wal.active_bytes, SEGMENT_HEADER_LEN);
     assert!(segment_path(dir.path(), 1).is_file());
     assert_eq!(replay.next_seq, 1);
+}
+
+#[test]
+fn encrypted_wal_replays_after_restart_and_rejects_the_wrong_key() {
+    let dir = TestDir::new();
+    let provider = Arc::new(crate::encryption::MemoryKeyProvider::default());
+    provider.insert(crate::encryption::KeyVersion::new(1), [9u8; 32]);
+    let keys = Arc::new(
+        crate::encryption::KeyRing::new(provider.clone(), crate::encryption::KeyVersion::new(1))
+            .unwrap(),
+    );
+    let (mut wal, _) = Wal::open_with_encryption(
+        dir.path(),
+        Duration::from_millis(1),
+        DEFAULT_WAL_SEGMENT_BYTES,
+        Some(keys.clone()),
+    )
+    .unwrap();
+    wal.append_publish("orders/created", None, b"encrypted payload")
+        .unwrap();
+    wal.flush().unwrap();
+    let raw = std::fs::read(segment_path(dir.path(), 1)).unwrap();
+    assert!(
+        !raw.windows(b"encrypted payload".len())
+            .any(|window| window == b"encrypted payload")
+    );
+    drop(wal);
+    let (_, replay) = Wal::open_with_encryption(
+        dir.path(),
+        Duration::from_millis(1),
+        DEFAULT_WAL_SEGMENT_BYTES,
+        Some(keys),
+    )
+    .unwrap();
+    assert_eq!(
+        replay.messages.values().next().unwrap().payload,
+        b"encrypted payload"
+    );
+    let wrong_provider = Arc::new(crate::encryption::MemoryKeyProvider::default());
+    wrong_provider.insert(crate::encryption::KeyVersion::new(1), [8u8; 32]);
+    let wrong_keys = Arc::new(
+        crate::encryption::KeyRing::new(wrong_provider, crate::encryption::KeyVersion::new(1))
+            .unwrap(),
+    );
+    assert!(
+        Wal::open_with_encryption(
+            dir.path(),
+            Duration::from_millis(1),
+            DEFAULT_WAL_SEGMENT_BYTES,
+            Some(wrong_keys),
+        )
+        .is_err()
+    );
 }
 
 #[test]

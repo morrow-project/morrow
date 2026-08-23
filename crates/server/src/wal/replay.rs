@@ -22,7 +22,10 @@ struct ReplayState {
     groups: HashMap<String, crate::consumer_group::GroupRecord>,
 }
 
-pub(super) fn replay_dir(dir: &Path) -> Result<ReplayOutput> {
+pub(super) fn replay_dir(
+    dir: &Path,
+    encryption: Option<std::sync::Arc<crate::encryption::KeyRing>>,
+) -> Result<ReplayOutput> {
     let started = Instant::now();
     remove_tmp_segments(dir)?;
     let mut truncations = 0;
@@ -51,6 +54,7 @@ pub(super) fn replay_dir(dir: &Path) -> Result<ReplayOutput> {
             segment.id == highest_id,
             &mut state,
             &mut truncations,
+            encryption.as_ref(),
         )?;
     }
     expire_in_flight(&mut state);
@@ -83,6 +87,7 @@ fn replay_segment(
     is_active: bool,
     state: &mut ReplayState,
     truncations: &mut u64,
+    encryption: Option<&std::sync::Arc<crate::encryption::KeyRing>>,
 ) -> Result<()> {
     let mut file = OpenOptions::new()
         .read(true)
@@ -103,6 +108,7 @@ fn replay_segment(
         match read_record(&mut file) {
             Ok(Some((kind, body, bytes_read))) => {
                 offset += bytes_read;
+                let body = unprotect_body(kind, &body, encryption)?;
                 apply_record(kind, &body, state)
                     .with_context(|| format!("replaying WAL segment {}", segment.path.display()))?;
             }
@@ -245,6 +251,7 @@ fn migrate_legacy_if_present(dir: &Path, truncations: &mut u64) -> Result<()> {
             &mut file,
             state.messages.into_values(),
             state.consumers.into_values(),
+            None,
         )?;
         file.flush()?;
         file.sync_data()?;

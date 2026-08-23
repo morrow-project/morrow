@@ -5,6 +5,7 @@ use std::{
     fs::{File, OpenOptions},
     io::{self, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
+    sync::Arc,
     time::{Duration, Instant},
 };
 const WAL_FILE: &str = "morrow.wal";
@@ -24,6 +25,7 @@ const KIND_DEAD_LETTER: u8 = 8;
 const KIND_DEAD_LETTER_PURGE: u8 = 9;
 const KIND_PRODUCER_SEQUENCE: u8 = 10;
 const KIND_GROUP_STATE: u8 = 11;
+pub(super) const ENCRYPTED_BODY_MAGIC: &[u8] = b"MORROW-WAL-ENC1\n";
 pub const DEFAULT_WAL_SEGMENT_BYTES: u64 = 64 * 1024 * 1024;
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct PublishRecord {
@@ -198,6 +200,7 @@ pub struct Wal {
     pub(super) fsync_interval: Duration,
     pub(super) last_sync: Instant,
     pub(super) metrics: WalMetrics,
+    pub(super) encryption: Option<Arc<crate::encryption::KeyRing>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
