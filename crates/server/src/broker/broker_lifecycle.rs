@@ -1,4 +1,5 @@
 use super::*;
+use super::delivery_index::scheduled_at_ms;
 
 impl Morrow {
     pub fn open(config: Config) -> Result<Self> {
@@ -131,6 +132,18 @@ impl Morrow {
                 })
             })
             .collect();
+        let scheduled_deliveries = replay
+            .messages
+            .values()
+            .filter_map(|record| {
+                scheduled_at_ms(record).map(|scheduled_at_ms| {
+                    Reverse(ScheduledDelivery {
+                        scheduled_at_ms,
+                        seq: record.seq,
+                    })
+                })
+            })
+            .collect();
         let cluster = {
             #[cfg(test)]
             {
@@ -153,6 +166,7 @@ impl Morrow {
                 partition_sequences,
                 ready_consumers,
                 lease_deadlines,
+                scheduled_deliveries,
                 compaction_latest,
                 superseded_since_compaction: 0,
             })),
@@ -324,6 +338,12 @@ impl Morrow {
             .values()
             .map(|consumer| consumer.in_flight.len())
             .sum::<usize>();
+        let scheduled_depth = inner.scheduled_deliveries.len();
+        let scheduled_due_lag_ms = inner
+            .scheduled_deliveries
+            .peek()
+            .map(|entry| self.hooks.clock.now_ms().saturating_sub(entry.0.scheduled_at_ms))
+            .unwrap_or_default();
         let compaction_candidates = inner.superseded_since_compaction;
         let compaction_keys = inner.compaction_latest.len();
         drop(inner);
@@ -371,6 +391,12 @@ impl Morrow {
         metrics.push_str(&format!(
             "morrow_in_flight_deliveries {in_flight_deliveries}\n"
         ));
+        metrics.push_str("# HELP morrow_scheduled_delivery_depth Current scheduled messages.\n");
+        metrics.push_str("# TYPE morrow_scheduled_delivery_depth gauge\n");
+        metrics.push_str(&format!("morrow_scheduled_delivery_depth {scheduled_depth}\n"));
+        metrics.push_str("# HELP morrow_scheduled_delivery_due_lag_ms Age of the oldest due scheduled message.\n");
+        metrics.push_str("# TYPE morrow_scheduled_delivery_due_lag_ms gauge\n");
+        metrics.push_str(&format!("morrow_scheduled_delivery_due_lag_ms {scheduled_due_lag_ms}\n"));
         metrics.push_str("# HELP morrow_publishes_total Publish commands received.\n");
         metrics.push_str("# TYPE morrow_publishes_total counter\n");
         metrics.push_str(&format!(

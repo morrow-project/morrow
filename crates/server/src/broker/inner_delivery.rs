@@ -1,4 +1,5 @@
 use super::*;
+use super::delivery_index::scheduled_at_ms;
 
 impl DurableBrokerState {
     pub(super) fn prepare_durable_deliveries(
@@ -206,6 +207,9 @@ impl DurableBrokerState {
         let Some(metadata) = self.messages.get(&seq) else {
             return Ok(None);
         };
+        if scheduled_at_ms(metadata).is_some_and(|scheduled_at_ms| scheduled_at_ms > now) {
+            return Ok(None);
+        }
         let message = partition_logs.load_record(metadata)?;
         let payload_len = message.payload.len();
         let member = consumer

@@ -7,11 +7,43 @@ impl DurableBrokerState {
     }
 
     pub(super) fn observe_published_record(&mut self, record: &PublishRecord) {
+        if let Some(scheduled_at_ms) = scheduled_at_ms(record) {
+            self.scheduled_deliveries.push(Reverse(ScheduledDelivery {
+                scheduled_at_ms,
+                seq: record.seq,
+            }));
+        }
         for consumer in self.consumers.values_mut() {
             consumer
                 .cursors
                 .observe_published_record(&consumer.record.filter_subject, record);
         }
+    }
+
+    pub(super) fn activate_due_scheduled(&mut self, now: u64, limit: usize) -> usize {
+        let mut activated = 0;
+        while activated < limit {
+            let Some(entry) = self.scheduled_deliveries.peek().map(|entry| entry.0.clone())
+            else {
+                break;
+            };
+            if entry.scheduled_at_ms > now {
+                break;
+            }
+            self.scheduled_deliveries.pop();
+            if self
+                .messages
+                .get(&entry.seq)
+                .and_then(scheduled_at_ms)
+                .is_some_and(|scheduled_at_ms| scheduled_at_ms == entry.scheduled_at_ms)
+            {
+                if let Some(subject) = self.messages.get(&entry.seq).map(|message| message.subject.clone()) {
+                    self.mark_subject_ready(&subject);
+                    activated += 1;
+                }
+            }
+        }
+        activated
     }
 
     pub(super) fn mark_consumer_ready(&mut self, consumer_id: &str) {
@@ -37,9 +69,19 @@ impl DurableBrokerState {
 
     pub(super) fn next_lease_deadline(&mut self) -> Option<u64> {
         self.discard_stale_deadlines();
-        self.lease_deadlines
+        let lease_deadline = self.lease_deadlines
             .peek()
-            .map(|deadline| deadline.0.deadline_ms)
+            .map(|deadline| deadline.0.deadline_ms);
+        let scheduled_deadline = self
+            .scheduled_deliveries
+            .peek()
+            .map(|deadline| deadline.0.scheduled_at_ms);
+        match (lease_deadline, scheduled_deadline) {
+            (Some(lease), Some(scheduled)) => Some(lease.min(scheduled)),
+            (Some(lease), None) => Some(lease),
+            (None, Some(scheduled)) => Some(scheduled),
+            (None, None) => None,
+        }
     }
 
     pub(super) fn expire_due_leases(&mut self, now: u64, limit: usize) -> usize {
@@ -128,4 +170,12 @@ impl DurableBrokerState {
             })
             .collect();
     }
+}
+
+pub(super) fn scheduled_at_ms(record: &PublishRecord) -> Option<u64> {
+    record
+        .headers
+        .iter()
+        .find(|header| header.name.eq_ignore_ascii_case("Morrow-Scheduled-At"))
+        .and_then(|header| header.value.parse().ok())
 }

@@ -1,4 +1,5 @@
 use super::*;
+use super::delivery_index::scheduled_at_ms;
 
 impl DurableBrokerState {
     pub(super) fn reserve_pull_candidate(
@@ -10,6 +11,9 @@ impl DurableBrokerState {
         let (seq, attempt, deadline_ms) =
             self.next_pull_candidate(consumer_id, partition_logs, now)?;
         let metadata = self.messages.get(&seq)?.clone();
+        if scheduled_at_ms(&metadata).is_some_and(|scheduled_at_ms| scheduled_at_ms > now) {
+            return None;
+        }
         self.consumers.get_mut(consumer_id)?.preparing.insert(seq);
         Some((seq, attempt, deadline_ms, metadata))
     }
@@ -115,6 +119,14 @@ impl DurableBrokerState {
                 partition_logs,
                 |seq| in_flight.contains_key(&seq) || preparing.contains(&seq),
             )?;
+            if self
+                .messages
+                .get(&seq)
+                .and_then(scheduled_at_ms)
+                .is_some_and(|scheduled_at_ms| scheduled_at_ms > now)
+            {
+                return None;
+            }
             let attempt = consumer.pending_attempts.get(&seq).copied().unwrap_or(1);
             (seq, attempt)
         };

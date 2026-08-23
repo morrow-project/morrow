@@ -36,6 +36,7 @@ impl Morrow {
         let expired = {
             let _storage_operation = self.storage_gate.read().await;
             let mut inner = self.inner.lock().await;
+            inner.activate_due_scheduled(now, MAX_EXPIRED_LEASES_PER_TICK);
             inner.enforce_stream_retention(&self.partition_logs, &self.config.streams, now)?;
             inner.expire_due_leases(now, MAX_EXPIRED_LEASES_PER_TICK)
         };
