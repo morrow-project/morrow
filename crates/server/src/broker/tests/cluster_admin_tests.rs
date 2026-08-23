@@ -171,6 +171,16 @@ async fn http_metrics_endpoint_is_authenticated_and_bounded() {
 }
 
 #[tokio::test]
+async fn versioned_middleware_endpoint_reports_current_generation() {
+    let scenario = Scenario::new();
+
+    let response = http_request(scenario.broker(), "/api/v1/middleware").await;
+
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+    assert!(response.contains("\"current_generation\":0"));
+}
+
+#[tokio::test]
 async fn http_status_requires_valid_bearer_token() {
     let scenario = Scenario::new();
 

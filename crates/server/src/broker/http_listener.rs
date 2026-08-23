@@ -148,6 +148,9 @@ impl Morrow {
             }
             "/streams" | "/api/v1/streams" => self.write_streams_response(&mut stream).await,
             "/wal" | "/api/v1/storage" => self.write_wal_response(&mut stream).await,
+            "/middleware" | "/api/v1/middleware" => {
+                self.write_middleware_response(&mut stream).await
+            }
             "/metrics" | "/api/v1/metrics" => self.write_metrics_response(&mut stream).await,
             _ => write_http_not_found(&mut stream).await,
         }
@@ -199,6 +202,14 @@ impl Morrow {
     async fn write_metrics_response<W: AsyncWrite + Unpin>(&self, stream: &mut W) -> Result<()> {
         let body = self.metrics_response().await;
         write_http_text_response(stream, "200 OK", &body).await
+    }
+
+    async fn write_middleware_response<W: AsyncWrite + Unpin>(&self, stream: &mut W) -> Result<()> {
+        let body = serde_json::to_vec(&MiddlewareResponse {
+            current_generation: self.middleware.current_generation(),
+        })
+        .context("serializing HTTP middleware response")?;
+        write_http_response(stream, "200 OK", "application/json", &body).await
     }
 }
 

@@ -168,6 +168,11 @@ pub(super) struct HealthResponse {
     pub(super) role: &'static str,
 }
 
+#[derive(Debug, serde::Serialize)]
+pub(super) struct MiddlewareResponse {
+    pub(super) current_generation: u64,
+}
+
 #[derive(Debug, Default)]
 pub(super) struct ClusterApplicationMetrics {
     pub(super) delta_applications: AtomicU64,

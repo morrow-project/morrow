@@ -429,6 +429,12 @@ impl Morrow {
         metrics.push_str(&format!(
             "morrow_route_peers_connected {connected_routes}\n"
         ));
+        metrics.push_str("# HELP morrow_middleware_generation Current middleware generation.\n");
+        metrics.push_str("# TYPE morrow_middleware_generation gauge\n");
+        metrics.push_str(&format!(
+            "morrow_middleware_generation {}\n",
+            self.middleware.current_generation()
+        ));
         metrics.push_str(
             "# HELP morrow_cluster_ready Whether the broker is ready to serve traffic.\n",
         );
