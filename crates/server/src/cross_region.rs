@@ -81,6 +81,14 @@ pub struct ReplicationCheckpoint {
     pub checksum: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReplicationStatus {
+    pub role: RegionRole,
+    pub fencing_token: u64,
+    pub lag_offsets: u64,
+    pub within_lag_policy: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct DurableState {
     role: RegionRole,
@@ -158,6 +166,21 @@ impl CrossRegionReplicator {
         )
     }
 
+    pub fn status(
+        &self,
+        stream: &str,
+        partition: PartitionId,
+        primary_high_watermark: u64,
+    ) -> ReplicationStatus {
+        let lag_offsets = self.lag(stream, partition, primary_high_watermark);
+        ReplicationStatus {
+            role: self.state.role,
+            fencing_token: self.state.fencing_token,
+            lag_offsets,
+            within_lag_policy: lag_offsets <= self.policy.max_lag_offsets,
+        }
+    }
+
     pub fn ship(&mut self, chunk: &SegmentChunk, source_fencing_token: u64) -> Result<bool> {
         crate::broker_ensure!(self.state.role != RegionRole::Fenced, "region is fenced");
         crate::broker_ensure!(
@@ -225,6 +248,20 @@ impl CrossRegionReplicator {
         self.state.role = RegionRole::Primary;
         self.persist()?;
         Ok(self.state.fencing_token)
+    }
+
+    pub fn failover(
+        &mut self,
+        stream: &str,
+        partition: PartitionId,
+        primary_high_watermark: u64,
+        expected_token: u64,
+    ) -> Result<u64> {
+        crate::broker_ensure!(
+            self.lag(stream, partition, primary_high_watermark) <= self.policy.max_lag_offsets,
+            "replication lag exceeds failover recovery-point policy"
+        );
+        self.promote(expected_token)
     }
 
     pub fn fence(&mut self) -> Result<u64> {

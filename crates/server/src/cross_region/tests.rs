@@ -73,3 +73,17 @@ fn promotion_fences_old_primary_and_changes_token() {
     region.fence().unwrap();
     assert!(region.ship(&chunk(0, b"write"), new).is_err());
 }
+
+#[test]
+fn failover_requires_the_configured_recovery_point() {
+    let mut region = CrossRegionReplicator::new(
+        ReplicationPolicy {
+            max_lag_offsets: 1,
+            ..policy()
+        },
+        RegionRole::Standby,
+    );
+    let token = region.fencing_token();
+    assert!(region.failover("orders", PartitionId(0), 5, token).is_err());
+    assert!(region.failover("orders", PartitionId(0), 1, token).is_ok());
+}
