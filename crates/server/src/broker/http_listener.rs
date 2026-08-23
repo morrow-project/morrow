@@ -143,6 +143,10 @@ impl Morrow {
                     .await
             }
             "/quotas" | "/api/v1/quotas" => self.write_quotas_response(&mut stream).await,
+            "/connectors" | "/api/v1/connectors" => {
+                self.write_connectors_response(&mut stream).await
+            }
+            "/routes" | "/api/v1/routes" => self.write_routes_response(&mut stream).await,
             "/subscriptions" => self.write_subscriptions_response(&mut stream, None).await,
             "/api/v1/subscriptions" => {
                 self.write_subscriptions_response(&mut stream, Some(parse_page(query)))
@@ -177,6 +181,18 @@ impl Morrow {
     async fn write_quotas_response<W: AsyncWrite + Unpin>(&self, stream: &mut W) -> Result<()> {
         let body = serde_json::to_vec(&self.quotas_response().await)
             .context("serializing HTTP quota response")?;
+        write_http_response(stream, "200 OK", "application/json", &body).await
+    }
+
+    async fn write_connectors_response<W: AsyncWrite + Unpin>(&self, stream: &mut W) -> Result<()> {
+        let body = serde_json::to_vec(&self.connectors_response().await)
+            .context("serializing HTTP connectors response")?;
+        write_http_response(stream, "200 OK", "application/json", &body).await
+    }
+
+    async fn write_routes_response<W: AsyncWrite + Unpin>(&self, stream: &mut W) -> Result<()> {
+        let body = serde_json::to_vec(&self.routes_response().await)
+            .context("serializing HTTP routes response")?;
         write_http_response(stream, "200 OK", "application/json", &body).await
     }
 

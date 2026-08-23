@@ -66,12 +66,18 @@ same endpoint.
 The same administrative resources are available under the versioned
 `/api/v1/` namespace: `/api/v1/cluster`, `/api/v1/connections`,
 `/api/v1/quotas`, `/api/v1/subscriptions`, `/api/v1/streams`,
-`/api/v1/storage`, and `/api/v1/metrics`. The health endpoints are available
-as `/api/v1/health/live` and `/api/v1/health/ready`.
+`/api/v1/storage`, `/api/v1/routes`, `/api/v1/connectors`, and
+`/api/v1/metrics`. The health endpoints are available as
+`/api/v1/health/live` and `/api/v1/health/ready`.
 
 `/api/v1/middleware` reports the active middleware generation. It is
 intentionally a bounded summary; middleware payloads and credentials are not
 included.
+
+`/api/v1/routes` exposes route topology independently of the cluster response.
+`/api/v1/connectors` lists only currently connected clients whose durable IDs
+use the `connector-` namespace; it excludes connector secrets and configuration
+material.
 
 The server emits exporter-neutral `tracing` spans named `morrow.publish`,
 `morrow.delivery.prepare`, `morrow.partition.read`, `morrow.partition.write`,

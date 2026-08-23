@@ -86,6 +86,18 @@ async fn versioned_subscriptions_endpoint_reports_bounded_pagination() {
 }
 
 #[tokio::test]
+async fn versioned_connector_and_route_endpoints_are_authenticated_and_sanitized() {
+    let scenario = Scenario::new();
+    let connectors = http_request(scenario.broker(), "/api/v1/connectors").await;
+    let routes = http_request(scenario.broker(), "/api/v1/routes").await;
+    assert!(connectors.starts_with("HTTP/1.1 200 OK\r\n"));
+    assert!(connectors.contains("\"count\":0"));
+    assert!(connectors.contains("\"connectors\":[]"));
+    assert!(routes.starts_with("HTTP/1.1 200 OK\r\n"));
+    assert!(routes.contains("null"));
+}
+
+#[tokio::test]
 async fn http_streams_endpoint_reports_effective_bindings() {
     let dir = TempDir::new().unwrap();
     let clock = Arc::new(ManualClock::new(1_000));

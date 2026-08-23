@@ -336,6 +336,37 @@ impl Morrow {
         }
     }
 
+    pub(super) async fn connectors_response(&self) -> ConnectorsResponse {
+        let connections = self.connections.lock().await;
+        let mut connectors = connections
+            .clients
+            .iter()
+            .filter_map(|(connection_id, client)| {
+                let durable_id = client.durable_id.as_deref()?;
+                durable_id
+                    .starts_with("connector-")
+                    .then(|| ConnectorResponse {
+                        connection_id: *connection_id,
+                        durable_id: durable_id.to_string(),
+                        status: "connected",
+                        authenticated: client.authenticated,
+                        connected_at_ms: client.connected_at_ms,
+                        protocol_version: client.protocol_version,
+                    })
+            })
+            .collect::<Vec<_>>();
+        connectors.sort_by_key(|connector| connector.connection_id);
+        ConnectorsResponse {
+            count: connectors.len(),
+            connectors,
+        }
+    }
+
+    pub(super) async fn routes_response(&self) -> Option<RouteTopologyResponse> {
+        let route_mesh = self.route_mesh.as_ref()?;
+        Some(route_mesh.topology_response().await)
+    }
+
     pub(super) async fn wal_status_response(&self) -> WalStatus {
         let inner = self.inner.lock().await;
         inner

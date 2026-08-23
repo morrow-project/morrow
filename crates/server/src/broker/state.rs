@@ -174,6 +174,22 @@ pub(super) struct MiddlewareResponse {
     pub(super) current_generation: u64,
 }
 
+#[derive(Debug, serde::Serialize)]
+pub(super) struct ConnectorsResponse {
+    pub(super) count: usize,
+    pub(super) connectors: Vec<ConnectorResponse>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub(super) struct ConnectorResponse {
+    pub(super) connection_id: u64,
+    pub(super) durable_id: String,
+    pub(super) status: &'static str,
+    pub(super) authenticated: bool,
+    pub(super) connected_at_ms: u64,
+    pub(super) protocol_version: u32,
+}
+
 #[derive(Debug, Default)]
 pub(super) struct ClusterApplicationMetrics {
     pub(super) delta_applications: AtomicU64,
