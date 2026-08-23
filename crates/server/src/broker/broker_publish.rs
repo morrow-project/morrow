@@ -107,6 +107,11 @@ impl Morrow {
             )
             .instrument(span)
             .await;
+        if result.is_err() {
+            self.metrics
+                .rejected_operations_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
         self.metrics.publish_latency_us.observe(started.elapsed());
         result
     }

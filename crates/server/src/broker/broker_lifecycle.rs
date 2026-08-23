@@ -304,6 +304,11 @@ impl Morrow {
             .values()
             .map(|consumer| consumer.pending.len())
             .sum::<usize>();
+        let consumer_lag_messages = inner
+            .consumers
+            .values()
+            .map(|consumer| consumer.pending.len() + consumer.in_flight.len())
+            .sum::<usize>();
         let in_flight_deliveries = inner
             .consumers
             .values()
@@ -367,6 +372,21 @@ impl Morrow {
         metrics.push_str(&format!(
             "morrow_published_bytes_total {}\n",
             self.metrics.published_bytes_total.load(Ordering::Relaxed)
+        ));
+        metrics.push_str(
+            "# HELP morrow_rejected_operations_total Operations rejected by broker policy.\n",
+        );
+        metrics.push_str("# TYPE morrow_rejected_operations_total counter\n");
+        metrics.push_str(&format!(
+            "morrow_rejected_operations_total {}\n",
+            self.metrics
+                .rejected_operations_total
+                .load(Ordering::Relaxed)
+        ));
+        metrics.push_str("# HELP morrow_consumer_lag_messages Current consumer backlog.\n");
+        metrics.push_str("# TYPE morrow_consumer_lag_messages gauge\n");
+        metrics.push_str(&format!(
+            "morrow_consumer_lag_messages {consumer_lag_messages}\n"
         ));
         metrics.push_str("# HELP morrow_partition_reads_total Partition-log records loaded.\n");
         metrics.push_str("# TYPE morrow_partition_reads_total counter\n");
@@ -517,6 +537,10 @@ impl Morrow {
             .unwrap_or_default();
         let (middleware_executions, middleware_drops, middleware_rejects, middleware_failures) =
             self.middleware.metrics_snapshot();
+        let connector_count = self.connectors_response().await.count;
+        metrics.push_str("# HELP morrow_connectors_connected Current connected connectors.\n");
+        metrics.push_str("# TYPE morrow_connectors_connected gauge\n");
+        metrics.push_str(&format!("morrow_connectors_connected {connector_count}\n"));
         metrics.push_str("# HELP morrow_route_peers_connected Current connected route peers.\n");
         metrics.push_str("# TYPE morrow_route_peers_connected gauge\n");
         metrics.push_str(&format!(

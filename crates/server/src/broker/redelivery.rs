@@ -21,6 +21,8 @@ impl Morrow {
             if let Err(err) = self.expire_and_redeliver().await {
                 self.storage_failure.store(true, Ordering::Relaxed);
                 error!(error = ?err, "redelivery error");
+            } else {
+                self.storage_failure.store(false, Ordering::Relaxed);
             }
         }
     }

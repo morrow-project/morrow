@@ -56,7 +56,8 @@ Prometheus text-format metrics for connections, subscriptions, consumers, WAL
 usage, readiness, and resource-quota rejections. It deliberately does not
 include subjects, client IDs, message IDs, payloads, credentials, or other
 unbounded user values. The metric names include publish and delivery counters,
-partition-log read/write counters, latency histograms in microseconds,
+rejected-operation and consumer-lag metrics, partition-log read/write counters,
+latency histograms in microseconds,
 partition retention and recovery, WAL and compaction gauges, cluster and route
 state, middleware execution counters, and quota rejections.
 

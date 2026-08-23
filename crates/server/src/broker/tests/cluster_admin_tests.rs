@@ -168,6 +168,26 @@ async fn http_readiness_rejects_a_cluster_without_a_leader() {
 }
 
 #[tokio::test]
+async fn http_readiness_reports_and_recovers_from_storage_failure() {
+    let scenario = Scenario::new();
+    scenario
+        .broker()
+        .storage_failure
+        .store(true, Ordering::Relaxed);
+    let degraded = http_request(scenario.broker(), "/health/ready").await;
+    assert!(degraded.starts_with("HTTP/1.1 503 Service Unavailable\r\n"));
+    assert!(degraded.contains(r#""reason":"storage_failure""#));
+
+    scenario
+        .broker()
+        .storage_failure
+        .store(false, Ordering::Relaxed);
+    let ready = http_request(scenario.broker(), "/health/ready").await;
+    assert!(ready.starts_with("HTTP/1.1 200 OK\r\n"));
+    assert!(ready.contains(r#""status":"ready""#));
+}
+
+#[tokio::test]
 async fn http_metrics_endpoint_is_authenticated_and_bounded() {
     let scenario = Scenario::new();
 
@@ -181,6 +201,8 @@ async fn http_metrics_endpoint_is_authenticated_and_bounded() {
     assert!(versioned.starts_with("HTTP/1.1 200 OK\r\n"));
     assert!(response.contains("morrow_connections 0\n"));
     assert!(response.contains("morrow_publishes_total 0\n"));
+    assert!(response.contains("morrow_rejected_operations_total 0\n"));
+    assert!(response.contains("morrow_consumer_lag_messages 0\n"));
     assert!(response.contains("morrow_partition_reads_total 0\n"));
     assert!(response.contains("morrow_partition_writes_total 0\n"));
     assert!(response.contains("morrow_delivery_attempts_total 0\n"));
@@ -197,6 +219,7 @@ async fn http_metrics_endpoint_is_authenticated_and_bounded() {
     assert!(response.contains("morrow_configured_partitions 3\n"));
     assert!(response.contains("morrow_cluster_partitions 0\n"));
     assert!(response.contains("morrow_cluster_ready 1\n"));
+    assert!(response.contains("morrow_connectors_connected 0\n"));
     assert!(!response.contains("subject="));
     assert!(!response.contains("client_id="));
 }
