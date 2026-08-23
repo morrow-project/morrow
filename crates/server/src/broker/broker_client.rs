@@ -2,128 +2,133 @@ use super::*;
 
 impl Morrow {
     pub(super) async fn handle_command(&self, connection_id: u64, command: Command) -> Result<()> {
-        match command {
-            Command::Connect {
-                verbose,
-                durable_id,
-                ack_timeout_ms,
-                max_in_flight,
-                protocol_version,
-                auth,
-            } => {
-                self.configure_client(
-                    connection_id,
+        let span = tracing::debug_span!("morrow.command", connection_id);
+        async move {
+            match command {
+                Command::Connect {
                     verbose,
                     durable_id,
                     ack_timeout_ms,
                     max_in_flight,
                     protocol_version,
                     auth,
-                )
-                .await
-            }
-            Command::Ping => self.send_to(connection_id, protocol::pong().to_vec()).await,
-            Command::Pong => Ok(()),
-            Command::Sub {
-                subject,
-                queue,
-                sid,
-                start,
-            } => {
-                self.subscribe(connection_id, subject, queue, sid, start)
+                } => {
+                    self.configure_client(
+                        connection_id,
+                        verbose,
+                        durable_id,
+                        ack_timeout_ms,
+                        max_in_flight,
+                        protocol_version,
+                        auth,
+                    )
                     .await
-            }
-            Command::Unsub { sid, max_messages } => {
-                self.unsubscribe(connection_id, &sid, max_messages).await
-            }
-            Command::ConsumerCreate {
-                name,
-                filter_subject,
-                start,
-            } => {
-                self.create_pull_consumer(connection_id, name, filter_subject, start)
-                    .await
-            }
-            Command::ConsumerDelete { name } => {
-                self.delete_pull_consumer(connection_id, name).await
-            }
-            Command::Fetch {
-                name,
-                max_messages,
-                max_bytes,
-                max_wait_ms,
-            } => {
-                let broker = self.clone();
-                tokio::spawn(async move {
-                    if let Err(error) = broker
-                        .fetch_pull(connection_id, name, max_messages, max_bytes, max_wait_ms)
+                }
+                Command::Ping => self.send_to(connection_id, protocol::pong().to_vec()).await,
+                Command::Pong => Ok(()),
+                Command::Sub {
+                    subject,
+                    queue,
+                    sid,
+                    start,
+                } => {
+                    self.subscribe(connection_id, subject, queue, sid, start)
                         .await
-                    {
-                        let _ = broker
-                            .send_to(connection_id, protocol::err(&error.to_string()))
-                            .await;
-                    }
-                });
-                Ok(())
-            }
-            Command::Ack {
-                name,
-                seq,
-                delivery_id,
-            } => {
-                self.ack_delivery(connection_id, name, seq, delivery_id)
-                    .await
-            }
-            Command::Nack {
-                name,
-                seq,
-                delivery_id,
-                delay_ms,
-            } => {
-                self.control_pull_delivery(
-                    connection_id,
+                }
+                Command::Unsub { sid, max_messages } => {
+                    self.unsubscribe(connection_id, &sid, max_messages).await
+                }
+                Command::ConsumerCreate {
+                    name,
+                    filter_subject,
+                    start,
+                } => {
+                    self.create_pull_consumer(connection_id, name, filter_subject, start)
+                        .await
+                }
+                Command::ConsumerDelete { name } => {
+                    self.delete_pull_consumer(connection_id, name).await
+                }
+                Command::Fetch {
+                    name,
+                    max_messages,
+                    max_bytes,
+                    max_wait_ms,
+                } => {
+                    let broker = self.clone();
+                    tokio::spawn(async move {
+                        if let Err(error) = broker
+                            .fetch_pull(connection_id, name, max_messages, max_bytes, max_wait_ms)
+                            .await
+                        {
+                            let _ = broker
+                                .send_to(connection_id, protocol::err(&error.to_string()))
+                                .await;
+                        }
+                    });
+                    Ok(())
+                }
+                Command::Ack {
                     name,
                     seq,
                     delivery_id,
-                    PullControl::Nack(delay_ms),
-                )
-                .await
-            }
-            Command::Extend {
-                name,
-                seq,
-                delivery_id,
-                extension_ms,
-            } => {
-                self.control_pull_delivery(
-                    connection_id,
+                } => {
+                    self.ack_delivery(connection_id, name, seq, delivery_id)
+                        .await
+                }
+                Command::Nack {
                     name,
                     seq,
                     delivery_id,
-                    PullControl::Extend(extension_ms),
-                )
-                .await
-            }
-            Command::Credit {
-                sid,
-                messages,
-                bytes,
-            } => {
-                self.add_push_credit(connection_id, &sid, messages, bytes)
+                    delay_ms,
+                } => {
+                    self.control_pull_delivery(
+                        connection_id,
+                        name,
+                        seq,
+                        delivery_id,
+                        PullControl::Nack(delay_ms),
+                    )
                     .await
-            }
-            Command::Pub {
-                subject,
-                reply_to,
-                headers,
-                key,
-                payload,
-                ack,
-            } => {
-                self.publish(connection_id, subject, reply_to, headers, key, payload, ack)
+                }
+                Command::Extend {
+                    name,
+                    seq,
+                    delivery_id,
+                    extension_ms,
+                } => {
+                    self.control_pull_delivery(
+                        connection_id,
+                        name,
+                        seq,
+                        delivery_id,
+                        PullControl::Extend(extension_ms),
+                    )
                     .await
+                }
+                Command::Credit {
+                    sid,
+                    messages,
+                    bytes,
+                } => {
+                    self.add_push_credit(connection_id, &sid, messages, bytes)
+                        .await
+                }
+                Command::Pub {
+                    subject,
+                    reply_to,
+                    headers,
+                    key,
+                    payload,
+                    ack,
+                } => {
+                    self.publish(connection_id, subject, reply_to, headers, key, payload, ack)
+                        .await
+                }
             }
         }
+        .instrument(span)
+        .await
     }
 
     pub(super) async fn add_client(

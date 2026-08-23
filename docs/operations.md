@@ -66,7 +66,8 @@ intentionally a bounded summary; middleware payloads and credentials are not
 included.
 
 The server emits exporter-neutral `tracing` spans named `morrow.publish` and
-`morrow.delivery.prepare`, carrying only bounded identifiers and payload sizes.
+`morrow.delivery.prepare`, plus `morrow.command` for client command
+boundaries. They carry only bounded identifiers and payload sizes.
 An OpenTelemetry-compatible tracing subscriber can export these spans; the
 binary currently does not install an OTLP exporter by default.
 
