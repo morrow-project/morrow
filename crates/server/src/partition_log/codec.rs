@@ -38,7 +38,7 @@ pub(super) fn envelope_checksum(envelope: &MessageEnvelope) -> Result<u32> {
     ))
 }
 
-pub(super) fn read_batch(file: &mut std::fs::File) -> io::Result<Option<(MessageEnvelope, u64)>> {
+pub(super) fn read_batch<R: Read>(file: &mut R) -> io::Result<Option<(MessageEnvelope, u64)>> {
     let mut length = [0; 4];
     let read = file.read(&mut length)?;
     if read == 0 {

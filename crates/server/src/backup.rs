@@ -743,6 +743,32 @@ impl<S: ObjectStore + 'static> RemoteSegmentCache<S> {
     }
 }
 
+pub struct RemoteSegmentReader<S> {
+    cache: RemoteSegmentCache<S>,
+}
+
+impl<S: ObjectStore + 'static> RemoteSegmentReader<S> {
+    pub fn new(store: Arc<S>, capacity: usize) -> Self {
+        Self {
+            cache: RemoteSegmentCache::new(store, capacity),
+        }
+    }
+
+    pub fn read_offset(
+        &self,
+        object_key: &str,
+        checksum: &str,
+        offset: u64,
+    ) -> Result<Option<crate::partition_log::MessageEnvelope>> {
+        let bytes = self.cache.get(object_key, checksum)?;
+        crate::partition_log::read_segment_offset(&bytes, offset)
+    }
+
+    pub fn stats(&self) -> CacheStats {
+        self.cache.stats()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -926,5 +952,44 @@ mod tests {
         let serialized = serde_json::to_vec(&manifest).unwrap();
         let decoded: BackupManifest = serde_json::from_slice(&serialized).unwrap();
         assert_eq!(decoded.checkpoint, manifest.checkpoint);
+    }
+
+    #[test]
+    fn remote_segment_reader_validates_and_reads_records_through_cache() {
+        let envelope = crate::partition_log::MessageEnvelope {
+            namespace: "default".to_string(),
+            stream: crate::stream::StreamId::new("orders").unwrap(),
+            partition: crate::stream::PartitionId(0),
+            offset: 7,
+            subject: "orders/created".to_string(),
+            key: None,
+            headers: Vec::new(),
+            timestamp_ms: 1,
+            reply_to: None,
+            payload: b"payload".to_vec(),
+            partitioning_epoch: 1,
+            leader_epoch: 1,
+            legacy_seq: 7,
+        };
+        let body = serde_json::to_vec(&envelope).unwrap();
+        let mut bytes = b"BROKERLOG\x01\n".to_vec();
+        bytes.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&crc32fast::hash(&body).to_le_bytes());
+        bytes.extend_from_slice(&body);
+        let store = Arc::new(MemoryObjectStore::default());
+        let digest = sha256(&bytes);
+        store.put_immutable("segments/7", &bytes, &digest).unwrap();
+        let reader = RemoteSegmentReader::new(store, bytes.len());
+        assert_eq!(
+            reader.read_offset("segments/7", &digest, 7).unwrap(),
+            Some(envelope)
+        );
+        assert!(
+            reader
+                .read_offset("segments/7", &digest, 8)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(reader.stats().hits, 1);
     }
 }

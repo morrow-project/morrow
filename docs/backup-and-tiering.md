@@ -34,6 +34,9 @@ Sealed stream files can be tiered with `BackupEngine::evict_sealed`. Each remote
 object is fetched and checksum-verified immediately before its local copy is
 removed. Reads of evicted segments should use `RemoteSegmentCache`, which bounds
 resident bytes and coalesces concurrent requests for the same object.
+`RemoteSegmentReader` adds record-level segment-header and batch-checksum
+validation on top of that cache, so a missing, corrupt, or incomplete remote
+segment fails before a record is returned.
 
 The current API is intentionally storage-provider-neutral. An S3 adapter should
 map `put_immutable`, `get`, and `delete` to conditional/object-versioned requests,
