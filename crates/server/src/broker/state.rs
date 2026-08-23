@@ -81,6 +81,17 @@ impl DurableBrokerState {
             self.producer_sequences
                 .retain(|(producer_id, _, _), _| producer_id != &producer.producer_id);
         }
+        crate::broker_ensure!(
+            !self
+                .producer_in_flight
+                .iter()
+                .any(|(producer_id, epoch, sequence)| {
+                    producer_id == &producer.producer_id
+                        && *epoch == producer.epoch
+                        && *sequence != producer.sequence
+                }),
+            "producer has another sequence in progress"
+        );
         let last_sequence = self
             .producer_sequences
             .keys()
@@ -89,10 +100,22 @@ impl DurableBrokerState {
             })
             .map(|(_, _, sequence)| *sequence)
             .max();
-        crate::broker_ensure!(
-            last_sequence.is_none_or(|last| producer.sequence <= last.saturating_add(1)),
-            "producer sequence gap"
-        );
+        match last_sequence {
+            None => crate::broker_ensure!(producer.sequence <= 1, "producer sequence gap"),
+            Some(last) => {
+                if producer.sequence <= last {
+                    crate::broker_ensure!(
+                        producer.sequence == last.saturating_add(1),
+                        "producer sequence is outside the deduplication frontier"
+                    );
+                } else {
+                    crate::broker_ensure!(
+                        producer.sequence == last.saturating_add(1),
+                        "producer sequence gap"
+                    );
+                }
+            }
+        }
         let identity = (
             producer.producer_id.clone(),
             producer.epoch,
