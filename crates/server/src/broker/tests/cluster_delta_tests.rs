@@ -1,6 +1,34 @@
 use super::*;
 
 #[tokio::test]
+async fn dynamic_policy_snapshot_replicates_to_cluster_state() {
+    let scenario = Scenario::new_fake_cluster(3);
+    let snapshot = crate::tenancy::PolicySnapshot {
+        generation: 9,
+        roles: [(
+            "observer".to_string(),
+            crate::tenancy::Role {
+                name: "observer".to_string(),
+                permissions: [crate::tenancy::Permission::Observe].into_iter().collect(),
+            },
+        )]
+        .into_iter()
+        .collect(),
+        bindings: Vec::new(),
+    };
+    scenario
+        .broker()
+        .replace_policy_snapshot_replicated(snapshot.clone())
+        .await
+        .unwrap();
+    assert_eq!(scenario.broker().policy_snapshot(), snapshot);
+    assert_eq!(
+        scenario.fake_cluster().durable_state().policy,
+        Some(snapshot)
+    );
+}
+
+#[tokio::test]
 async fn randomized_incremental_application_matches_full_reconciliation() {
     let scenario = Scenario::new_fake_cluster(3);
     let expected = Scenario::new();
