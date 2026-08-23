@@ -39,7 +39,8 @@ use crate::{
     },
     wal::{
         ConsumerCursorRecord, ConsumerRecord, DeadLetterRecord, DeliveryAttemptRecord,
-        PartitionAppendRecord, PublishRecord, ReplayedConsumer, Wal, WalStatus,
+        PartitionAppendRecord, ProducerSequenceRecord, PublishRecord, ReplayedConsumer, Wal,
+        WalStatus,
     },
 };
 
