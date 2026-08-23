@@ -184,6 +184,47 @@ impl ObjectStore for FileObjectStore {
     }
 }
 
+pub struct RetryingObjectStore<S> {
+    inner: Arc<S>,
+    attempts: usize,
+}
+
+impl<S> RetryingObjectStore<S> {
+    pub fn new(inner: Arc<S>, attempts: usize) -> Result<Self> {
+        crate::broker_ensure!(attempts > 0, "object-store retry attempts must be positive");
+        Ok(Self { inner, attempts })
+    }
+
+    fn retry<T>(&self, operation: impl Fn(&S) -> Result<T>) -> Result<T> {
+        let mut last_error = None;
+        for _ in 0..self.attempts {
+            match operation(&self.inner) {
+                Ok(value) => return Ok(value),
+                Err(error) => last_error = Some(error),
+            }
+        }
+        Err(last_error.expect("retry attempts are positive"))
+    }
+}
+
+impl<S: ObjectStore> ObjectStore for RetryingObjectStore<S> {
+    fn put_immutable(&self, key: &str, bytes: &[u8], sha256: &str) -> Result<()> {
+        self.retry(|store| store.put_immutable(key, bytes, sha256))
+    }
+
+    fn get(&self, key: &str) -> Result<Vec<u8>> {
+        self.retry(|store| store.get(key))
+    }
+
+    fn delete(&self, key: &str) -> Result<()> {
+        self.retry(|store| store.delete(key))
+    }
+
+    fn list(&self, prefix: &str) -> Result<Vec<String>> {
+        self.retry(|store| store.list(prefix))
+    }
+}
+
 pub fn sha256(bytes: &[u8]) -> String {
     let mut digest = Sha256::new();
     digest.update(bytes);
@@ -773,7 +814,49 @@ impl<S: ObjectStore + 'static> RemoteSegmentReader<S> {
 mod tests {
     use super::*;
     use std::fmt::Write;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::tempdir;
+
+    struct FlakyStore {
+        inner: MemoryObjectStore,
+        failures: AtomicUsize,
+    }
+
+    impl FlakyStore {
+        fn new(failures: usize) -> Self {
+            Self {
+                inner: MemoryObjectStore::default(),
+                failures: AtomicUsize::new(failures),
+            }
+        }
+    }
+
+    impl ObjectStore for FlakyStore {
+        fn put_immutable(&self, key: &str, bytes: &[u8], digest: &str) -> Result<()> {
+            if self
+                .failures
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
+            {
+                return Err(BrokerError::msg("injected transient object-store failure"));
+            }
+            self.inner.put_immutable(key, bytes, digest)
+        }
+
+        fn get(&self, key: &str) -> Result<Vec<u8>> {
+            self.inner.get(key)
+        }
+
+        fn delete(&self, key: &str) -> Result<()> {
+            self.inner.delete(key)
+        }
+
+        fn list(&self, prefix: &str) -> Result<Vec<String>> {
+            self.inner.list(prefix)
+        }
+    }
     #[test]
     fn backup_excludes_active_segments_and_restores_with_checksum_validation() {
         let source = tempdir().unwrap();
@@ -991,5 +1074,17 @@ mod tests {
                 .is_none()
         );
         assert_eq!(reader.stats().hits, 1);
+    }
+
+    #[test]
+    fn object_store_retries_are_bounded_and_idempotent() {
+        let flaky = Arc::new(FlakyStore::new(2));
+        let store = RetryingObjectStore::new(flaky.clone(), 3).unwrap();
+        let bytes = b"retryable";
+        store
+            .put_immutable("retry/object", bytes, &sha256(bytes))
+            .unwrap();
+        assert_eq!(flaky.inner.get("retry/object").unwrap(), bytes);
+        assert!(RetryingObjectStore::new(flaky, 0).is_err());
     }
 }

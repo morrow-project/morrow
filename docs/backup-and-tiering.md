@@ -43,3 +43,7 @@ map `put_immutable`, `get`, and `delete` to conditional/object-versioned request
 use multipart uploads for large objects, retry idempotently, and expose request
 quotas and latency metrics without logging credentials or object authorization
 headers.
+
+`RetryingObjectStore` provides the bounded idempotent retry policy used by tests and
+provider adapters; a provider remains responsible for mapping the operation to its
+conditional or multipart API.
