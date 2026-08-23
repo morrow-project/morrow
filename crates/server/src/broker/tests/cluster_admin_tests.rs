@@ -111,6 +111,17 @@ async fn http_health_endpoints_report_liveness_and_readiness() {
 }
 
 #[tokio::test]
+async fn http_readiness_rejects_a_cluster_without_a_leader() {
+    let scenario = Scenario::new_fake_cluster_local_node(3, 1, None);
+
+    let ready = http_request_with_auth(scenario.broker(), "/health/ready", None).await;
+
+    assert!(ready.starts_with("HTTP/1.1 503 Service Unavailable\r\n"));
+    assert!(ready.contains(r#""status":"forming""#));
+    assert!(ready.contains(r#""cluster_status":"forming""#));
+}
+
+#[tokio::test]
 async fn http_metrics_endpoint_is_authenticated_and_bounded() {
     let scenario = Scenario::new();
 

@@ -42,6 +42,19 @@ listeners in a cluster. Do not enable
 
 ## Administration
 
+When `http_listen` is configured, the admin listener exposes two health
+endpoints that do not require the admin bearer token:
+
+* `GET /health/live` returns `200` once the process can accept HTTP requests.
+* `GET /health/ready` returns `200` for a standalone broker or a cluster with
+  a known leader, and `503` while a cluster is still forming.
+
+The authenticated `GET /metrics` endpoint exposes bounded-cardinality
+Prometheus text-format metrics for connections, subscriptions, consumers, WAL
+usage, readiness, and resource-quota rejections. It deliberately does not
+include subjects, client IDs, message IDs, payloads, credentials, or other
+unbounded user values.
+
 When `http_listen` is configured, set an admin token and protect the listener.
 The JSON endpoints include `/cluster`, `/connections`, `/subscriptions`,
 `/streams`, `/wal`, and `/quotas`.
