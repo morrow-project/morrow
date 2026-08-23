@@ -30,6 +30,7 @@ pub struct BackupObject {
     pub relative_path: String,
     pub bytes: u64,
     pub sha256: String,
+    #[serde(default)]
     pub sealed: bool,
 }
 
@@ -204,15 +205,125 @@ impl<S: ObjectStore + 'static> BackupEngine<S> {
             streams,
             objects,
         };
-        let encoded = serde_json::to_vec_pretty(&manifest)
-            .map_err(|error| BrokerError::msg(error.to_string()))?;
-        let key = format!("backups/{backup_id}/manifest.json");
-        self.store
-            .put_immutable(&key, &encoded, &sha256(&encoded))?;
+        self.publish_manifest(&manifest)?;
+        Ok(manifest)
+    }
+
+    pub fn create_incremental(
+        &self,
+        source: &Path,
+        streams: Vec<StreamDefinition>,
+        cluster_id: &str,
+        backup_id: &str,
+        created_at_ms: u64,
+        parent: &BackupManifest,
+    ) -> Result<BackupManifest> {
+        validate_manifest(parent)?;
+        crate::broker_ensure!(
+            parent.source_cluster_id == cluster_id,
+            "incremental backup cluster identity does not match its parent"
+        );
+        crate::broker_ensure!(
+            parent.backup_id != backup_id,
+            "incremental backup cannot have the same identity as its parent"
+        );
+        let parent_hashes = parent
+            .objects
+            .iter()
+            .map(|object| (object.relative_path.as_str(), object.sha256.as_str()))
+            .collect::<HashMap<_, _>>();
+        let mut objects = Vec::new();
+        for (relative, sealed) in snapshot_files(source)? {
+            let bytes = read_stable_file(&source.join(&relative))
+                .with_context(|| format!("reading backup file {}", relative.display()))?;
+            let digest = sha256(&bytes);
+            if parent_hashes.get(relative.to_string_lossy().as_ref()) == Some(&digest.as_str()) {
+                continue;
+            }
+            let key = format!("backups/{backup_id}/{}", relative.to_string_lossy());
+            self.store.put_immutable(&key, &bytes, &digest)?;
+            objects.push(BackupObject {
+                key,
+                relative_path: relative.to_string_lossy().into_owned(),
+                bytes: bytes.len() as u64,
+                sha256: digest,
+                sealed,
+            });
+        }
+        let manifest = BackupManifest {
+            version: MANIFEST_VERSION,
+            backup_id: backup_id.to_string(),
+            kind: BackupKind::Incremental,
+            parent_backup_id: Some(parent.backup_id.clone()),
+            created_at_ms,
+            source_cluster_id: cluster_id.to_string(),
+            streams,
+            objects,
+        };
+        self.publish_manifest(&manifest)?;
         Ok(manifest)
     }
 
     pub fn restore(
+        &self,
+        manifest: &BackupManifest,
+        destination: &Path,
+        new_cluster_id: &str,
+    ) -> Result<()> {
+        validate_manifest(manifest)?;
+        crate::broker_ensure!(
+            manifest.kind == BackupKind::Full,
+            "incremental backup requires restore_chain"
+        );
+        self.restore_materialized(manifest, destination, new_cluster_id)
+    }
+
+    pub fn restore_chain(
+        &self,
+        chain: &[BackupManifest],
+        destination: &Path,
+        new_cluster_id: &str,
+    ) -> Result<()> {
+        crate::broker_ensure!(!chain.is_empty(), "backup restore chain is empty");
+        let first = &chain[0];
+        validate_manifest(first)?;
+        crate::broker_ensure!(
+            first.kind == BackupKind::Full && first.parent_backup_id.is_none(),
+            "restore chain must start with a full backup"
+        );
+        let mut objects = BTreeMap::new();
+        for (index, manifest) in chain.iter().enumerate() {
+            validate_manifest(manifest)?;
+            crate::broker_ensure!(
+                manifest.source_cluster_id == first.source_cluster_id,
+                "backup restore chain contains multiple source clusters"
+            );
+            if index > 0 {
+                crate::broker_ensure!(
+                    manifest.parent_backup_id.as_deref()
+                        == Some(chain[index - 1].backup_id.as_str()),
+                    "backup restore chain has a broken parent link"
+                );
+            }
+            for object in &manifest.objects {
+                objects.insert(object.relative_path.clone(), object.clone());
+            }
+        }
+        let last = chain.last().expect("non-empty chain");
+        let materialized = BackupManifest {
+            version: MANIFEST_VERSION,
+            backup_id: last.backup_id.clone(),
+            kind: BackupKind::Full,
+            parent_backup_id: None,
+            created_at_ms: last.created_at_ms,
+            source_cluster_id: first.source_cluster_id.clone(),
+            streams: last.streams.clone(),
+            objects: objects.into_values().collect(),
+        };
+        self.restore_materialized(&materialized, destination, new_cluster_id)
+    }
+
+    fn restore_materialized(
         &self,
         manifest: &BackupManifest,
         destination: &Path,
@@ -255,6 +366,13 @@ impl<S: ObjectStore + 'static> BackupEngine<S> {
             let _ = fs::remove_dir_all(&staging);
         }
         result
+    }
+
+    fn publish_manifest(&self, manifest: &BackupManifest) -> Result<()> {
+        let encoded = serde_json::to_vec_pretty(manifest)
+            .map_err(|error| BrokerError::msg(error.to_string()))?;
+        let key = format!("backups/{}/manifest.json", manifest.backup_id);
+        self.store.put_immutable(&key, &encoded, &sha256(&encoded))
     }
 
     /// Evict only sealed stream files whose immutable remote copies are still
@@ -582,5 +700,55 @@ mod tests {
         )
         .unwrap();
         assert!(engine.restore(&manifest, &destination, "new").is_err());
+    }
+
+    #[test]
+    fn incremental_backup_references_parent_and_chain_restore_materializes_latest_files() {
+        let source = tempdir().unwrap();
+        let partition = source.path().join("streams/orders/partition-00000");
+        fs::create_dir_all(&partition).unwrap();
+        fs::write(partition.join("00000000000000000001.plog"), b"old").unwrap();
+        let store = Arc::new(MemoryObjectStore::default());
+        let engine = BackupEngine::new(store);
+        let full = engine
+            .create_full(source.path(), Vec::new(), "cluster-a", "full", 1)
+            .unwrap();
+        fs::write(partition.join("00000000000000000001.plog"), b"new").unwrap();
+        fs::write(partition.join("00000000000000000002.plog"), b"added").unwrap();
+        let incremental = engine
+            .create_incremental(
+                source.path(),
+                Vec::new(),
+                "cluster-a",
+                "incremental",
+                2,
+                &full,
+            )
+            .unwrap();
+        assert_eq!(incremental.kind, BackupKind::Incremental);
+        assert_eq!(incremental.parent_backup_id.as_deref(), Some("full"));
+        assert!(
+            engine
+                .restore(
+                    &incremental,
+                    &tempdir().unwrap().path().join("bad"),
+                    "cluster-b"
+                )
+                .is_err()
+        );
+        let destination = tempdir().unwrap().path().join("restore");
+        engine
+            .restore_chain(&[full, incremental], &destination, "cluster-b")
+            .unwrap();
+        assert_eq!(
+            fs::read(destination.join("streams/orders/partition-00000/00000000000000000001.plog"))
+                .unwrap(),
+            b"new"
+        );
+        assert_eq!(
+            fs::read(destination.join("streams/orders/partition-00000/00000000000000000002.plog"))
+                .unwrap(),
+            b"added"
+        );
     }
 }

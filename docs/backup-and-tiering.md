@@ -17,6 +17,11 @@ directory, and publishes the directory only after all files pass size and checks
 validation. A different cluster identity is required. Repeating an identical
 restore is safe; a conflicting destination is rejected.
 
+Incremental backups contain only files whose digest changed since their parent.
+Restore them with the ordered full-to-incremental chain; the chain must have one
+source cluster, an unbroken parent link at every step, and a full manifest at its
+root. Restoring an incremental manifest by itself is rejected.
+
 Sealed stream files can be tiered with `BackupEngine::evict_sealed`. Each remote
 object is fetched and checksum-verified immediately before its local copy is
 removed. Reads of evicted segments should use `RemoteSegmentCache`, which bounds
