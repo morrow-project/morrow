@@ -415,6 +415,7 @@ impl RouteMesh {
         reply_to: Option<&str>,
         payload: &[u8],
     ) {
+        let _span = tracing::info_span!("morrow.route.forward", payload_bytes = payload.len());
         let targets = {
             let state = self.inner.lock().await;
             state

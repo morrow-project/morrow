@@ -1,4 +1,5 @@
 use super::*;
+use tracing::Instrument;
 
 #[derive(Clone)]
 pub(super) struct NetworkFactory {
@@ -112,18 +113,25 @@ impl NetworkClient {
         request: RaftRequest,
     ) -> std::result::Result<RaftResponse, RPCError<u64, BasicNode, openraft::error::RaftError<u64>>>
     {
-        let mut connection = self.connection.lock().await;
-        if connection.is_none() {
-            *connection = Some(self.connect().await?);
+        async {
+            let mut connection = self.connection.lock().await;
+            if connection.is_none() {
+                *connection = Some(self.connect().await?);
+            }
+            let result = match connection.as_mut().expect("Raft connection initialized") {
+                RaftConnection::Plain(stream) => self.exchange(&mut *stream, request).await,
+                RaftConnection::Tls(stream) => self.exchange(&mut *stream, request).await,
+            };
+            if result.is_err() {
+                *connection = None;
+            }
+            result
         }
-        let result = match connection.as_mut().expect("Raft connection initialized") {
-            RaftConnection::Plain(stream) => self.exchange(&mut *stream, request).await,
-            RaftConnection::Tls(stream) => self.exchange(&mut *stream, request).await,
-        };
-        if result.is_err() {
-            *connection = None;
-        }
-        result
+        .instrument(tracing::info_span!(
+            "morrow.raft.rpc",
+            target_node_id = self.target,
+        ))
+        .await
     }
 
     async fn connect(

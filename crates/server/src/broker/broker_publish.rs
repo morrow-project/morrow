@@ -1,5 +1,22 @@
 use super::*;
 
+fn valid_traceparent(headers: &[(String, String)]) -> Option<&str> {
+    let value = headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("traceparent"))
+        .map(|(_, value)| value.as_str())?;
+    let bytes = value.as_bytes();
+    (bytes.len() == 55
+        && bytes[2] == b'-'
+        && bytes[35] == b'-'
+        && bytes[52] == b'-'
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| matches!(index, 2 | 35 | 52) || byte.is_ascii_hexdigit()))
+    .then_some(value)
+}
+
 impl Morrow {
     pub(super) async fn load_partition_record(
         &self,
@@ -64,11 +81,13 @@ impl Morrow {
         payload: Vec<u8>,
         producer_ack: Option<protocol::ProducerAckRequest>,
     ) -> Result<()> {
+        let traceparent = valid_traceparent(&headers).unwrap_or("none");
         let span = tracing::info_span!(
             "morrow.publish",
             publisher_id,
             payload_bytes = payload.len(),
             recursion_depth = 0usize,
+            traceparent,
         );
         let started = Instant::now();
         self.metrics.publishes_total.fetch_add(1, Ordering::Relaxed);
