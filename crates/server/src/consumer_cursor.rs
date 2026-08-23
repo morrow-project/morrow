@@ -2,7 +2,7 @@ use crate::{
     error::Result, partition_log::PartitionLogSet, stream::StreamCatalog, wal::PublishRecord,
 };
 use protocol::{StartPosition, subject};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct PartitionCursor {
@@ -18,6 +18,8 @@ pub struct PartitionCursor {
 pub struct ConsumerCursorSet {
     pub partitions: BTreeMap<String, PartitionCursor>,
     pub ack_window: usize,
+    #[serde(default)]
+    pub frontiers: BTreeMap<String, VecDeque<u64>>,
 }
 
 impl Default for ConsumerCursorSet {
@@ -25,6 +27,7 @@ impl Default for ConsumerCursorSet {
         Self {
             partitions: BTreeMap::new(),
             ack_window: 1024,
+            frontiers: BTreeMap::new(),
         }
     }
 }
@@ -56,6 +59,7 @@ impl ConsumerCursorSet {
         Self {
             partitions,
             ack_window,
+            frontiers: BTreeMap::new(),
         }
     }
 
@@ -88,27 +92,30 @@ impl ConsumerCursorSet {
         messages: &HashMap<u64, PublishRecord>,
         partition_sequences: &BTreeMap<(String, u32, u64), u64>,
         logs: &PartitionLogSet,
-        leased: &HashSet<u64>,
+        is_leased: impl Fn(u64) -> bool,
     ) -> Option<u64> {
+        self.ensure_frontiers(filter_subject, logs);
         self.partitions
             .values()
             .filter_map(|cursor| {
-                logs.matching_offsets(
-                    &cursor.stream,
-                    crate::stream::PartitionId(cursor.partition),
-                    filter_subject,
-                )
-                .ok()?
-                .offsets
-                .into_iter()
-                .filter(|offset| {
-                    *offset >= cursor.committed_offset
-                        && !cursor.acknowledged_offsets.contains(offset)
-                })
-                .find_map(|offset| {
+                let frontier = self
+                    .frontiers
+                    .get_mut(&cursor_key(&cursor.stream, cursor.partition))?;
+                while let Some(offset) = frontier.front().copied() {
+                    let key = (cursor.stream.clone(), cursor.partition, offset);
+                    if offset < cursor.committed_offset || !partition_sequences.contains_key(&key) {
+                        frontier.pop_front();
+                    } else {
+                        break;
+                    }
+                }
+                frontier.iter().find_map(|offset| {
+                    if cursor.acknowledged_offsets.contains(offset) {
+                        return None;
+                    }
                     partition_sequences
-                        .get(&(cursor.stream.clone(), cursor.partition, offset))
-                        .filter(|seq| !leased.contains(seq))
+                        .get(&(cursor.stream.clone(), cursor.partition, *offset))
+                        .filter(|seq| !is_leased(**seq))
                         .copied()
                 })
             })
@@ -140,21 +147,48 @@ impl ConsumerCursorSet {
             .offset
             .ok_or_else(|| crate::error::BrokerError::msg("message has no partition offset"))?;
         let ack_window = self.ack_window;
-        let cursor = self
-            .cursor_for_mut(record)
-            .ok_or_else(|| crate::error::BrokerError::msg("consumer has no partition cursor"))?;
+        let key = cursor_key(
+            record.stream.as_deref().unwrap_or_default(),
+            record.partition.unwrap_or_default(),
+        );
+        let mut frontier = self.frontiers.remove(&key);
+        let Some(cursor) = self.cursor_for_mut(record) else {
+            if let Some(frontier) = frontier {
+                self.frontiers.insert(key, frontier);
+            }
+            return Err(crate::error::BrokerError::msg(
+                "consumer has no partition cursor",
+            ));
+        };
         if offset < cursor.committed_offset {
+            if let Some(frontier) = frontier.take() {
+                self.frontiers.insert(key, frontier);
+            }
             return Ok(());
         }
-        let closes_gap = next_matching_offset(cursor, filter_subject, messages) == Some(offset);
-        crate::broker_ensure!(
-            cursor.acknowledged_offsets.contains(&offset)
-                || cursor.acknowledged_offsets.len() < ack_window
-                || closes_gap,
-            "consumer acknowledgement window exceeded"
+        let closes_gap = frontier.as_ref().map_or_else(
+            || next_matching_offset(cursor, filter_subject, messages) == Some(offset),
+            |frontier| next_frontier_offset(cursor, frontier) == Some(offset),
         );
+        let allowed = cursor.acknowledged_offsets.contains(&offset)
+            || cursor.acknowledged_offsets.len() < ack_window
+            || closes_gap;
+        if !allowed {
+            let _ = cursor;
+            if let Some(frontier) = frontier {
+                self.frontiers.insert(key, frontier);
+            }
+            crate::broker_bail!("consumer acknowledgement window exceeded");
+        }
         cursor.acknowledged_offsets.insert(offset);
-        advance_committed(cursor, filter_subject, messages);
+        if let Some(frontier) = frontier.as_ref() {
+            advance_committed_from_frontier(cursor, frontier);
+        } else {
+            advance_committed(cursor, filter_subject, messages);
+        }
+        if let Some(frontier) = frontier {
+            self.frontiers.insert(key, frontier);
+        }
         Ok(())
     }
 
@@ -173,15 +207,69 @@ impl ConsumerCursorSet {
         let Some(cursor) = self.partitions.get_mut(&cursor_key(stream, partition)) else {
             return false;
         };
-        if cursor.committed_offset >= earliest_offset {
-            return false;
+        let advanced = cursor.committed_offset < earliest_offset;
+        if advanced {
+            cursor.committed_offset = earliest_offset;
+            cursor.retention_gaps = cursor.retention_gaps.saturating_add(1);
+            cursor
+                .acknowledged_offsets
+                .retain(|offset| *offset >= earliest_offset);
         }
-        cursor.committed_offset = earliest_offset;
-        cursor.retention_gaps = cursor.retention_gaps.saturating_add(1);
-        cursor
-            .acknowledged_offsets
-            .retain(|offset| *offset >= earliest_offset);
-        true
+        if let Some(frontier) = self.frontiers.get_mut(&cursor_key(stream, partition)) {
+            frontier.retain(|offset| *offset >= earliest_offset);
+        }
+        advanced
+    }
+
+    pub fn observe_published_record(&mut self, filter_subject: &str, record: &PublishRecord) {
+        let (Some(stream), Some(partition), Some(offset)) =
+            (record.stream.as_deref(), record.partition, record.offset)
+        else {
+            return;
+        };
+        if !subject::matches(filter_subject, &record.subject) {
+            return;
+        }
+        let Some(frontier) = self.frontiers.get_mut(&cursor_key(stream, partition)) else {
+            return;
+        };
+        if frontier.back().is_none_or(|last| *last < offset) {
+            frontier.push_back(offset);
+        } else if frontier.binary_search(&offset).is_err() {
+            let position = frontier.partition_point(|candidate| *candidate < offset);
+            frontier.insert(position, offset);
+        }
+    }
+
+    pub fn remove_record(&mut self, stream: &str, partition: u32, offset: u64) {
+        if let Some(frontier) = self.frontiers.get_mut(&cursor_key(stream, partition)) {
+            frontier.retain(|candidate| *candidate != offset);
+        }
+    }
+
+    fn ensure_frontiers(&mut self, filter_subject: &str, logs: &PartitionLogSet) {
+        let missing = self
+            .partitions
+            .values()
+            .filter(|cursor| {
+                !self
+                    .frontiers
+                    .contains_key(&cursor_key(&cursor.stream, cursor.partition))
+            })
+            .map(|cursor| (cursor.stream.clone(), cursor.partition))
+            .collect::<Vec<_>>();
+        for (stream, partition) in missing {
+            let offsets = logs
+                .matching_offsets(
+                    &stream,
+                    crate::stream::PartitionId(partition),
+                    filter_subject,
+                )
+                .map(|query| query.offsets)
+                .unwrap_or_default();
+            self.frontiers
+                .insert(cursor_key(&stream, partition), offsets.into());
+        }
     }
 
     fn cursor_for(&self, record: &PublishRecord) -> Option<&PartitionCursor> {
@@ -262,6 +350,22 @@ fn advance_committed(
         }
         cursor.committed_offset = next.saturating_add(1);
     }
+}
+
+fn advance_committed_from_frontier(cursor: &mut PartitionCursor, frontier: &VecDeque<u64>) {
+    while let Some(next) = next_frontier_offset(cursor, frontier) {
+        if !cursor.acknowledged_offsets.remove(&next) {
+            break;
+        }
+        cursor.committed_offset = next.saturating_add(1);
+    }
+}
+
+fn next_frontier_offset(cursor: &PartitionCursor, frontier: &VecDeque<u64>) -> Option<u64> {
+    frontier
+        .iter()
+        .copied()
+        .find(|offset| *offset >= cursor.committed_offset)
 }
 
 fn next_matching_offset(

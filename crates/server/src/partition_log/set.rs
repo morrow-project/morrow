@@ -1,6 +1,7 @@
 use super::{log::PartitionLog, *};
 use crate::error::ResultExt;
 use crate::wal::PublishRecord;
+use std::collections::BTreeSet;
 use std::sync::{
     Mutex,
     atomic::{AtomicU64, Ordering},
@@ -268,9 +269,9 @@ impl PartitionLogSet {
             .rewrite(records, Some(change.earliest_offset))
     }
 
-    pub(crate) fn compact_visible_records(
+    pub(crate) fn compact_visible_offsets(
         &self,
-        records: &[PublishRecord],
+        visible_offsets: &HashMap<(String, PartitionId), BTreeSet<u64>>,
         catalog: &StreamCatalog,
     ) -> Result<()> {
         for stream in catalog
@@ -280,30 +281,17 @@ impl PartitionLogSet {
         {
             for partition in 0..stream.partitions {
                 let partition = PartitionId(partition);
+                let key = (stream.name.as_str().to_string(), partition);
+                let Some(offsets) = visible_offsets.get(&key) else {
+                    continue;
+                };
                 let mut log = self
                     .logs
-                    .get(&(stream.name.as_str().to_string(), partition))
-                    .expect("catalog partitions are opened together")
+                    .get(&key)
+                    .ok_or_else(|| crate::error::BrokerError::msg("unknown stream partition"))?
                     .lock()
                     .expect("partition log lock poisoned");
-                let mut retained = records
-                    .iter()
-                    .filter(|record| {
-                        record.stream.as_deref() == Some(stream.name.as_str())
-                            && record.partition == Some(partition.0)
-                    })
-                    .map(|record| {
-                        let offset = record.offset.ok_or_else(|| {
-                            crate::error::BrokerError::msg("compacted record has no offset")
-                        })?;
-                        log.read_offset(offset)?.ok_or_else(|| {
-                            crate::error::BrokerError::msg("compacted record is unavailable")
-                        })
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-                retained.sort_by_key(|record| record.offset);
-                let next_offset = log.retention_status(partition).next_offset;
-                log.rewrite(&retained, Some(next_offset))?;
+                while log.compact_visible_offsets(offsets)? {}
             }
         }
         Ok(())

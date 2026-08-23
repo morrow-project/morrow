@@ -1,7 +1,7 @@
 use super::{codec::*, subject_index::*, *};
 use crate::error::{BrokerError, ResultExt};
 use std::{
-    collections::{BTreeSet, VecDeque},
+    collections::{BTreeSet, HashSet, VecDeque},
     fs::{File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
     path::PathBuf,
@@ -13,6 +13,8 @@ const INDEX_STRIDE: u64 = 64;
 const RETENTION_OFFSET_FILE: &str = "retention-offset";
 const REWRITE_TMP_FILE: &str = "rewrite.plog.tmp";
 const REWRITE_MARKER_FILE: &str = "rewrite.marker";
+const COMPACTION_TMP_FILE: &str = "compact.plog.tmp";
+const COMPACTION_MARKER_FILE: &str = "compact.marker";
 
 #[derive(Debug)]
 struct RetentionRecord {
@@ -26,6 +28,8 @@ struct SegmentRange {
     path: PathBuf,
     first_offset: u64,
     last_offset: u64,
+    reader: File,
+    sparse_index: Vec<(u64, u64)>,
 }
 
 #[derive(Debug)]
@@ -61,6 +65,7 @@ impl PartitionLog {
         std::fs::create_dir_all(&dir)
             .with_context(|| format!("creating partition-log directory {}", dir.display()))?;
         install_pending_rewrite(&dir)?;
+        install_pending_segment_compaction(&dir)?;
         let mut paths = segment_paths(&dir)?;
         if paths.is_empty() {
             let path = segment_path(&dir, 1);
@@ -104,6 +109,8 @@ impl PartitionLog {
                     path: path.clone(),
                     first_offset: first.offset,
                     last_offset: last.offset,
+                    reader: open_segment_reader(path)?,
+                    sparse_index: load_sparse_index(path)?,
                 });
             }
             if active {
@@ -182,17 +189,17 @@ impl PartitionLog {
             envelope.offset == self.next_offset,
             "partition-log append creates an offset gap"
         );
-        let batch = encode_batch(&envelope)?;
+        let batch = encode_batch_with_len(&envelope)?;
         if self.active_bytes > SEGMENT_HEADER_LEN
-            && self.active_bytes.saturating_add(batch.len() as u64) > self.segment_bytes
+            && self.active_bytes.saturating_add(batch.len) > self.segment_bytes
         {
             self.rotate()?;
         }
         let position = self.active_bytes;
-        self.file.write_all(&batch)?;
-        self.active_bytes += batch.len() as u64;
+        self.file.write_all(&batch.bytes)?;
+        self.active_bytes += batch.len;
         self.next_offset += 1;
-        let bytes = encoded_batch_len(&envelope)?;
+        let bytes = batch.len;
         self.retained_bytes = self.retained_bytes.saturating_add(bytes);
         self.retention_records.push_back(RetentionRecord {
             offset: envelope.offset,
@@ -208,9 +215,11 @@ impl PartitionLog {
             range.last_offset = envelope.offset;
         } else {
             self.segment_ranges.push(SegmentRange {
-                path: active_path,
+                path: active_path.clone(),
                 first_offset: envelope.offset,
                 last_offset: envelope.offset,
+                reader: open_segment_reader(&active_path)?,
+                sparse_index: load_sparse_index(&active_path)?,
             });
         }
         self.active_subjects
@@ -221,6 +230,13 @@ impl PartitionLog {
                 envelope.offset,
                 position,
             )?;
+            if let Some(range) = self
+                .segment_ranges
+                .iter_mut()
+                .find(|range| range.path == active_path)
+            {
+                range.sparse_index.push((envelope.offset, position));
+            }
         }
         Ok(envelope)
     }
@@ -254,6 +270,90 @@ impl PartitionLog {
         replacement.deleted_bytes = self.deleted_bytes;
         *self = replacement;
         Ok(())
+    }
+
+    pub(super) fn compact_visible_offsets(
+        &mut self,
+        visible_offsets: &BTreeSet<u64>,
+    ) -> Result<bool> {
+        let sealed_ranges = self.segment_ranges.len().saturating_sub(1);
+        for range_index in 0..sealed_ranges {
+            let path = self.segment_ranges[range_index].path.clone();
+            let records = read_segment_records(&path)?;
+            let retained = records
+                .iter()
+                .filter(|record| visible_offsets.contains(&record.offset))
+                .cloned()
+                .collect::<Vec<_>>();
+            if retained.len() == records.len() {
+                continue;
+            }
+
+            stage_segment_compaction(&self.dir, &path, &retained)?;
+            install_pending_segment_compaction(&self.dir)?;
+            rebuild_index(&path, &self.stream, self.partition)?;
+
+            let retained_offsets = retained
+                .iter()
+                .map(|record| record.offset)
+                .collect::<HashSet<_>>();
+            let old_bytes = self
+                .retention_records
+                .iter()
+                .filter(|record| {
+                    record.offset >= self.segment_ranges[range_index].first_offset
+                        && record.offset <= self.segment_ranges[range_index].last_offset
+                        && !retained_offsets.contains(&record.offset)
+                })
+                .map(|record| record.bytes)
+                .sum::<u64>();
+            let removed = self
+                .retention_records
+                .iter()
+                .filter(|record| {
+                    record.offset >= self.segment_ranges[range_index].first_offset
+                        && record.offset <= self.segment_ranges[range_index].last_offset
+                        && !retained_offsets.contains(&record.offset)
+                })
+                .count() as u64;
+            self.retention_records.retain(|record| {
+                retained_offsets.contains(&record.offset)
+                    || record.offset < self.segment_ranges[range_index].first_offset
+                    || record.offset > self.segment_ranges[range_index].last_offset
+            });
+            self.retained_bytes = self.retained_bytes.saturating_sub(old_bytes);
+            self.deleted_messages = self.deleted_messages.saturating_add(removed);
+            self.deleted_bytes = self.deleted_bytes.saturating_add(old_bytes);
+
+            if retained.is_empty() {
+                self.segment_ranges.remove(range_index);
+                self.sealed_subject_segments
+                    .retain(|segment| segment.path != path);
+                remove_segment_files(&path)?;
+            } else {
+                let range = &mut self.segment_ranges[range_index];
+                range.first_offset = retained[0].offset;
+                range.last_offset = retained.last().unwrap().offset;
+                range.reader = open_segment_reader(&path)?;
+                range.sparse_index = load_sparse_index(&path)?;
+                if let Some(segment) = self
+                    .sealed_subject_segments
+                    .iter_mut()
+                    .find(|segment| segment.path == path)
+                {
+                    *segment = SubjectSegment::new(
+                        path.clone(),
+                        retained
+                            .iter()
+                            .map(|record| (record.subject.clone(), record.offset))
+                            .collect(),
+                    );
+                    segment.rebuild(0)?;
+                }
+            }
+            return Ok(true);
+        }
+        Ok(false)
     }
 
     pub(super) fn enforce_retention(
@@ -315,6 +415,14 @@ impl PartitionLog {
         self.subject_index_cache_bytes += sealed.rebuild(
             MAX_PARTITION_INDEX_CACHE_BYTES.saturating_sub(self.subject_index_cache_bytes),
         )?;
+        let sealed_path = segment_path(&self.dir, self.segment_id);
+        if let Some(range) = self
+            .segment_ranges
+            .iter_mut()
+            .find(|range| range.path == sealed_path)
+        {
+            range.sparse_index = load_sparse_index(&sealed_path)?;
+        }
         self.sealed_subject_segments.push(sealed);
         self.segment_id += 1;
         let path = segment_path(&self.dir, self.segment_id);
@@ -338,17 +446,16 @@ impl PartitionLog {
         })
     }
 
-    pub(super) fn read_offset(&self, offset: u64) -> Result<Option<MessageEnvelope>> {
-        for range in &self.segment_ranges {
+    pub(super) fn read_offset(&mut self, offset: u64) -> Result<Option<MessageEnvelope>> {
+        for range in &mut self.segment_ranges {
             if offset < range.first_offset || offset > range.last_offset {
                 continue;
             }
-            let mut file = OpenOptions::new().read(true).open(&range.path)?;
-            validate_segment_header(&mut file, &range.path)?;
-            if let Some(position) = indexed_position(&range.path, offset)? {
-                file.seek(SeekFrom::Start(position))?;
+            range.reader.seek(SeekFrom::Start(SEGMENT_HEADER_LEN))?;
+            if let Some(position) = indexed_position(&range.sparse_index, offset) {
+                range.reader.seek(SeekFrom::Start(position))?;
             }
-            while let Some((envelope, _)) = read_batch(&mut file)? {
+            while let Some((envelope, _)) = read_batch(&mut range.reader)? {
                 if envelope.offset == offset {
                     return Ok(Some(envelope));
                 }
@@ -370,28 +477,93 @@ impl PartitionLog {
     }
 }
 
-fn indexed_position(path: &Path, target: u64) -> Result<Option<u64>> {
+fn open_segment_reader(path: &Path) -> Result<File> {
+    let mut file = OpenOptions::new().read(true).open(path)?;
+    validate_segment_header(&mut file, path)?;
+    Ok(file)
+}
+
+fn read_segment_records(path: &Path) -> Result<Vec<MessageEnvelope>> {
+    let mut file = OpenOptions::new().read(true).open(path)?;
+    validate_segment_header(&mut file, path)?;
+    let mut records = Vec::new();
+    while let Some((record, _)) = read_batch(&mut file)? {
+        records.push(record);
+    }
+    Ok(records)
+}
+
+fn stage_segment_compaction(dir: &Path, path: &Path, records: &[MessageEnvelope]) -> Result<()> {
+    let tmp = dir.join(COMPACTION_TMP_FILE);
+    if tmp.exists() {
+        std::fs::remove_file(&tmp)?;
+    }
+    let mut file = create_segment(&tmp)?;
+    for record in records {
+        file.write_all(&encode_batch(record)?)?;
+    }
+    file.flush()?;
+    file.sync_data()?;
+    let marker = dir.join(COMPACTION_MARKER_FILE);
+    let target = path
+        .file_name()
+        .ok_or_else(|| BrokerError::msg("partition compaction target has no filename"))?;
+    std::fs::write(&marker, target.to_string_lossy().as_bytes())?;
+    OpenOptions::new().read(true).open(&marker)?.sync_data()?;
+    File::open(dir)?.sync_data()?;
+    Ok(())
+}
+
+fn install_pending_segment_compaction(dir: &Path) -> Result<()> {
+    let marker = dir.join(COMPACTION_MARKER_FILE);
+    if !marker.exists() {
+        return Ok(());
+    }
+    let target = String::from_utf8(std::fs::read(&marker)?)
+        .map_err(|_| BrokerError::msg("invalid partition compaction marker"))?;
+    let target = dir.join(target);
+    let tmp = dir.join(COMPACTION_TMP_FILE);
+    if tmp.exists() {
+        for extension in [INDEX_EXTENSION, "sidx"] {
+            let sidecar = target.with_extension(extension);
+            if sidecar.exists() {
+                std::fs::remove_file(sidecar)?;
+            }
+        }
+        std::fs::rename(&tmp, &target)?;
+    }
+    std::fs::remove_file(marker)?;
+    File::open(dir)?.sync_data()?;
+    Ok(())
+}
+
+fn load_sparse_index(path: &Path) -> Result<Vec<(u64, u64)>> {
     let index_path = path.with_extension(INDEX_EXTENSION);
     if !index_path.exists() {
-        return Ok(None);
+        return Ok(Vec::new());
     }
     let mut file = File::open(index_path)?;
+    let mut entries = Vec::new();
     let mut entry = [0_u8; 16];
-    let mut position = None;
     loop {
         match file.read_exact(&mut entry) {
-            Ok(()) => {
-                let offset = u64::from_le_bytes(entry[..8].try_into().unwrap());
-                if offset > target {
-                    break;
-                }
-                position = Some(u64::from_le_bytes(entry[8..].try_into().unwrap()));
-            }
+            Ok(()) => entries.push((
+                u64::from_le_bytes(entry[..8].try_into().unwrap()),
+                u64::from_le_bytes(entry[8..].try_into().unwrap()),
+            )),
             Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => break,
             Err(err) => return Err(err.into()),
         }
     }
-    Ok(position)
+    Ok(entries)
+}
+
+fn indexed_position(index: &[(u64, u64)], target: u64) -> Option<u64> {
+    match index.binary_search_by_key(&target, |(offset, _)| *offset) {
+        Ok(position) => Some(index[position].1),
+        Err(0) => None,
+        Err(position) => Some(index[position - 1].1),
+    }
 }
 
 fn read_retention_offset(dir: &Path) -> Result<u64> {

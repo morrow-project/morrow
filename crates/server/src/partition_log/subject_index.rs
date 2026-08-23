@@ -14,7 +14,7 @@ pub(super) const MAX_PARTITION_INDEX_CACHE_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug)]
 pub(super) struct SubjectSegment {
-    path: PathBuf,
+    pub(super) path: PathBuf,
     records: Vec<(String, u64)>,
     record_count: usize,
     source_checksum: u64,

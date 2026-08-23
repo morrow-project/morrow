@@ -252,6 +252,7 @@ pub(super) async fn send_data_append(
         node_id,
         target,
         tls,
+        connection: Arc::new(tokio::sync::Mutex::new(None)),
     };
     match client
         .request(RaftRequest::DataAppend(request))
@@ -278,6 +279,7 @@ pub(super) async fn send_data_progress(
         node_id,
         target,
         tls,
+        connection: Arc::new(tokio::sync::Mutex::new(None)),
     };
     match client
         .request(RaftRequest::DataProgress(request))

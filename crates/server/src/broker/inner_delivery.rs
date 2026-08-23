@@ -17,19 +17,48 @@ impl DurableBrokerState {
                 else {
                     break;
                 };
+                let PublishRecord {
+                    seq: message_seq,
+                    namespace,
+                    stream,
+                    partition,
+                    offset,
+                    subject,
+                    key,
+                    headers,
+                    timestamp_ms,
+                    reply_to,
+                    payload,
+                    partitioning_epoch,
+                    leader_epoch,
+                } = message;
+                let cursor_record = PublishRecord {
+                    seq: message_seq,
+                    namespace: namespace.clone(),
+                    stream: stream.clone(),
+                    partition,
+                    offset,
+                    subject: String::new(),
+                    key: None,
+                    headers: Vec::new(),
+                    timestamp_ms,
+                    reply_to: None,
+                    payload: Vec::new(),
+                    partitioning_epoch,
+                    leader_epoch,
+                };
                 let outcome = middleware
                     .process(
                         MiddlewareStage::BeforeDeliver,
                         MiddlewareMessage {
-                            subject: message.subject.clone(),
-                            key: message.key.clone(),
-                            headers: message
-                                .headers
-                                .iter()
-                                .map(|header| (header.name.clone(), header.value.clone()))
+                            subject,
+                            key,
+                            headers: headers
+                                .into_iter()
+                                .map(|header| (header.name, header.value))
                                 .collect(),
-                            payload: message.payload.clone(),
-                            reply_to: message.reply_to.clone(),
+                            payload,
+                            reply_to,
                         },
                         0,
                     )
@@ -44,27 +73,36 @@ impl DurableBrokerState {
                     crate::broker_bail!("before-deliver middleware rejected delivery");
                 }
                 if outcome.decision == MiddlewareDecision::Drop {
-                    self.acknowledge_filtered_delivery(&consumer_id, &message)?;
+                    self.acknowledge_filtered_delivery(&consumer_id, &cursor_record)?;
                     continue;
                 }
-                let mut delivery_message = message.clone();
-                delivery_message.subject = outcome.message.subject;
-                delivery_message.key = outcome.message.key;
-                delivery_message.headers = outcome
-                    .message
-                    .headers
-                    .into_iter()
-                    .map(|(name, value)| MessageHeader { name, value })
-                    .collect();
-                delivery_message.payload = outcome.message.payload;
-                delivery_message.reply_to = outcome.message.reply_to;
+                let delivery_message = PublishRecord {
+                    seq: message_seq,
+                    namespace,
+                    stream,
+                    partition,
+                    offset,
+                    subject: outcome.message.subject,
+                    key: outcome.message.key,
+                    headers: outcome
+                        .message
+                        .headers
+                        .into_iter()
+                        .map(|(name, value)| MessageHeader { name, value })
+                        .collect(),
+                    timestamp_ms,
+                    reply_to: outcome.message.reply_to,
+                    payload: outcome.message.payload,
+                    partitioning_epoch,
+                    leader_epoch,
+                };
                 let delivery =
                     self.wal
                         .append_delivery_attempt(seq, &consumer_id, deadline_ms, attempt)?;
                 let ack_subject = protocol::ack_subject(&consumer_id, seq, delivery.delivery_id);
                 let cursor_snapshot = if let Some(consumer) = self.consumers.get_mut(&consumer_id) {
-                    if message.offset.is_some() {
-                        consumer.cursors.mark_delivered(&message);
+                    if cursor_record.offset.is_some() {
+                        consumer.cursors.mark_delivered(&cursor_record);
                     }
                     consumer.pending.remove(&seq);
                     consumer.pending_attempts.remove(&seq);
@@ -145,7 +183,7 @@ impl DurableBrokerState {
         {
             return Ok(None);
         }
-        let leased = consumer.in_flight.keys().copied().collect::<HashSet<_>>();
+        let in_flight = &consumer.in_flight;
         let seq = consumer
             .cursors
             .next_indexed_candidate(
@@ -153,13 +191,13 @@ impl DurableBrokerState {
                 &self.messages,
                 &self.partition_sequences,
                 partition_logs,
-                &leased,
+                |seq| in_flight.contains_key(&seq),
             )
             .or_else(|| {
                 consumer
                     .pending
                     .iter()
-                    .find(|seq| !leased.contains(seq))
+                    .find(|seq| !in_flight.contains_key(seq))
                     .copied()
             });
         let Some(seq) = seq else {
@@ -300,6 +338,10 @@ impl DurableBrokerState {
                 .as_ref()
                 .map(|consumer| consumer.pending_attempts.clone())
                 .unwrap_or_default();
+            let preparing = existing
+                .as_ref()
+                .map(|consumer| consumer.preparing.clone())
+                .unwrap_or_default();
             let in_flight = existing
                 .as_ref()
                 .map(|consumer| consumer.in_flight.clone())
@@ -313,6 +355,7 @@ impl DurableBrokerState {
                     members,
                     pending,
                     pending_attempts,
+                    preparing,
                     in_flight,
                     acked,
                     delivered,

@@ -124,6 +124,10 @@ impl DurableBrokerState {
         catalog: &crate::stream::StreamCatalog,
     ) -> &mut Consumer {
         let consumer_id = record.consumer_id.clone();
+        let filter_changed = self
+            .consumers
+            .get(&consumer_id)
+            .is_some_and(|existing| existing.record.filter_subject != record.filter_subject);
         if let Some(existing) = self.consumers.get(&consumer_id) {
             self.consumer_interest_index
                 .remove(&existing.record.filter_subject, &consumer_id);
@@ -147,11 +151,15 @@ impl DurableBrokerState {
                 members: HashMap::new(),
                 pending: BTreeSet::new(),
                 pending_attempts: HashMap::new(),
+                preparing: HashSet::new(),
                 in_flight: HashMap::new(),
                 acked: HashSet::new(),
                 delivered: 0,
             });
         consumer.record = record;
+        if filter_changed {
+            consumer.cursors.frontiers.clear();
+        }
         consumer
     }
 }

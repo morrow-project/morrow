@@ -92,6 +92,27 @@ fn out_of_order_acknowledgements_close_the_gap() {
 }
 
 #[test]
+fn frontier_acknowledgements_advance_without_resident_history() {
+    let messages = HashMap::new();
+    let first = message(1, 0);
+    let second = message(2, 1);
+    let mut cursors = ConsumerCursorSet::new(
+        "orders/*",
+        StartPosition::Earliest,
+        3,
+        &catalog(),
+        &messages,
+    );
+    cursors
+        .frontiers
+        .insert("orders:0".into(), VecDeque::from([0, 1]));
+    cursors.acknowledge(&second, "orders/*", &messages).unwrap();
+    assert_eq!(cursors.committed_offset("orders", 0), Some(0));
+    cursors.acknowledge(&first, "orders/*", &messages).unwrap();
+    assert_eq!(cursors.committed_offset("orders", 0), Some(2));
+}
+
+#[test]
 fn acknowledgement_window_is_bounded() {
     let messages = [(1, message(1, 0)), (2, message(2, 1)), (3, message(3, 2))]
         .into_iter()

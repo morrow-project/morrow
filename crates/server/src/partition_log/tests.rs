@@ -415,8 +415,8 @@ fn byte_retention_keeps_newest_records_within_limit() {
         request.payload = payload;
         envelopes.push(logs.append(request).unwrap());
     }
-    let newest_bytes = codec::encoded_batch_len(&envelopes[1]).unwrap()
-        + codec::encoded_batch_len(&envelopes[2]).unwrap();
+    let newest_bytes = codec::encode_batch_with_len(&envelopes[1]).unwrap().len
+        + codec::encode_batch_with_len(&envelopes[2]).unwrap().len;
     let mut retained_definition = definition(1);
     retained_definition.retention.max_bytes = Some(newest_bytes);
     let retained_catalog = StreamCatalog::new(vec![retained_definition]).unwrap();

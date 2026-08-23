@@ -52,6 +52,7 @@ pub(super) struct Consumer {
     pub(super) members: HashMap<u64, SubscriptionMember>,
     pub(super) pending: BTreeSet<u64>,
     pub(super) pending_attempts: HashMap<u64, u32>,
+    pub(super) preparing: HashSet<u64>,
     pub(super) in_flight: HashMap<u64, InFlight>,
     pub(super) acked: HashSet<u64>,
     pub(super) delivered: usize,

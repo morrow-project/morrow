@@ -110,55 +110,57 @@ pub(super) async fn handle_raft_stream<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let request = read_authenticated_request(&mut stream, auth_token, tls_peer_id).await?;
-    let response = match request {
-        RaftRequest::AppendEntries(rpc) => match raft.append_entries(rpc).await {
-            Ok(response) => RaftResponse::AppendEntries(response),
-            Err(err) => RaftResponse::Error(err.to_string()),
-        },
-        RaftRequest::Vote(rpc) => match raft.vote(rpc).await {
-            Ok(response) => RaftResponse::Vote(response),
-            Err(err) => RaftResponse::Error(err.to_string()),
-        },
-        RaftRequest::FullSnapshot { vote, meta, data } => {
-            let snapshot: Snapshot<BrokerRaftConfig> = Snapshot {
-                meta,
-                snapshot: Box::new(data),
-            };
-            match raft.install_full_snapshot(vote, snapshot).await {
-                Ok(response) => RaftResponse::FullSnapshot(response),
+    loop {
+        let request = read_authenticated_request(&mut stream, auth_token, tls_peer_id).await?;
+        let response = match request {
+            RaftRequest::AppendEntries(rpc) => match raft.append_entries(rpc).await {
+                Ok(response) => RaftResponse::AppendEntries(response),
                 Err(err) => RaftResponse::Error(err.to_string()),
-            }
-        }
-        RaftRequest::DataAppend(mut request) => {
-            let metadata = state_machine.durable_state();
-            let key = partition_key(
-                request.envelope.stream.as_str(),
-                request.envelope.partition.0,
-            );
-            let committed = metadata.partition_commits.get(&key);
-            let assignment = metadata.partition_assignments.get(&key);
-            if raft.current_leader().await != Some(request.leader_id)
-                || assignment.is_none_or(|assignment| {
-                    assignment.leader_id != request.leader_id
-                        || assignment.leader_epoch != request.leader_epoch
-                })
-            {
-                RaftResponse::Error("fenced partition leader epoch".to_string())
-            } else {
-                request.committed_high_watermark = committed.map(|commit| commit.high_watermark);
-                match partition_data.lock().unwrap().append(&request) {
-                    Ok(response) => RaftResponse::DataAppend(response),
+            },
+            RaftRequest::Vote(rpc) => match raft.vote(rpc).await {
+                Ok(response) => RaftResponse::Vote(response),
+                Err(err) => RaftResponse::Error(err.to_string()),
+            },
+            RaftRequest::FullSnapshot { vote, meta, data } => {
+                let snapshot: Snapshot<BrokerRaftConfig> = Snapshot {
+                    meta,
+                    snapshot: Box::new(data),
+                };
+                match raft.install_full_snapshot(vote, snapshot).await {
+                    Ok(response) => RaftResponse::FullSnapshot(response),
                     Err(err) => RaftResponse::Error(err.to_string()),
                 }
             }
-        }
-        RaftRequest::DataProgress(request) => {
-            RaftResponse::DataProgress(partition_data.lock().unwrap().progress(&request))
-        }
-    };
-    write_frame(&mut stream, &response).await?;
-    Ok(())
+            RaftRequest::DataAppend(mut request) => {
+                let metadata = state_machine.durable_state();
+                let key = partition_key(
+                    request.envelope.stream.as_str(),
+                    request.envelope.partition.0,
+                );
+                let committed = metadata.partition_commits.get(&key);
+                let assignment = metadata.partition_assignments.get(&key);
+                if raft.current_leader().await != Some(request.leader_id)
+                    || assignment.is_none_or(|assignment| {
+                        assignment.leader_id != request.leader_id
+                            || assignment.leader_epoch != request.leader_epoch
+                    })
+                {
+                    RaftResponse::Error("fenced partition leader epoch".to_string())
+                } else {
+                    request.committed_high_watermark =
+                        committed.map(|commit| commit.high_watermark);
+                    match partition_data.lock().unwrap().append(&request) {
+                        Ok(response) => RaftResponse::DataAppend(response),
+                        Err(err) => RaftResponse::Error(err.to_string()),
+                    }
+                }
+            }
+            RaftRequest::DataProgress(request) => {
+                RaftResponse::DataProgress(partition_data.lock().unwrap().progress(&request))
+            }
+        };
+        write_frame(&mut stream, &response).await?;
+    }
 }
 
 pub(super) async fn read_authenticated_request<R>(
@@ -194,8 +196,10 @@ where
         "Raft frame exceeds maximum size"
     );
     let len: u32 = body.len().try_into().context("Raft frame too large")?;
-    writer.write_all(&len.to_le_bytes()).await?;
-    writer.write_all(&body).await?;
+    let mut frame = Vec::with_capacity(4 + body.len());
+    frame.extend_from_slice(&len.to_le_bytes());
+    frame.extend_from_slice(&body);
+    writer.write_all(&frame).await?;
     Ok(())
 }
 

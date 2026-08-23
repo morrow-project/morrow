@@ -22,6 +22,7 @@ impl RaftNetworkFactory<BrokerRaftConfig> for NetworkFactory {
             node_id: self.node_id,
             target,
             tls: self.tls.clone(),
+            connection: Arc::new(tokio::sync::Mutex::new(None)),
         }
     }
 }
@@ -32,6 +33,12 @@ pub(super) struct NetworkClient {
     pub(super) node_id: u64,
     pub(super) target: u64,
     pub(super) tls: Option<RaftTlsRuntime>,
+    pub(super) connection: Arc<tokio::sync::Mutex<Option<RaftConnection>>>,
+}
+
+pub(super) enum RaftConnection {
+    Plain(TcpStream),
+    Tls(tokio_rustls::client::TlsStream<TcpStream>),
 }
 impl RaftNetwork<BrokerRaftConfig> for NetworkClient {
     async fn append_entries(
@@ -105,6 +112,26 @@ impl NetworkClient {
         request: RaftRequest,
     ) -> std::result::Result<RaftResponse, RPCError<u64, BasicNode, openraft::error::RaftError<u64>>>
     {
+        let mut connection = self.connection.lock().await;
+        if connection.is_none() {
+            *connection = Some(self.connect().await?);
+        }
+        let result = match connection.as_mut().expect("Raft connection initialized") {
+            RaftConnection::Plain(stream) => self.exchange(&mut *stream, request).await,
+            RaftConnection::Tls(stream) => self.exchange(&mut *stream, request).await,
+        };
+        if result.is_err() {
+            *connection = None;
+        }
+        result
+    }
+
+    async fn connect(
+        &self,
+    ) -> std::result::Result<
+        RaftConnection,
+        RPCError<u64, BasicNode, openraft::error::RaftError<u64>>,
+    > {
         let stream = TcpStream::connect(&self.addr).await.map_err(|err| {
             RPCError::Unreachable(Unreachable::new(&io::Error::new(
                 err.kind(),
@@ -118,7 +145,7 @@ impl NetworkClient {
                 .ok_or_else(|| network_error("missing Raft TLS server name"))?;
             let server_name = rustls::pki_types::ServerName::try_from(server_name.clone())
                 .map_err(|err| network_error(err.to_string()))?;
-            let mut stream = tls
+            let stream = tls
                 .connector
                 .connect(server_name, stream)
                 .await
@@ -133,10 +160,10 @@ impl NetworkClient {
                     "Raft TLS certificate belongs to a different node",
                 ));
             }
-            return self.exchange(&mut stream, request).await;
+            Ok(RaftConnection::Tls(stream))
+        } else {
+            Ok(RaftConnection::Plain(stream))
         }
-        let mut stream = stream;
-        self.exchange(&mut stream, request).await
     }
 
     async fn exchange<S>(

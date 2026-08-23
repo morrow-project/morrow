@@ -1,5 +1,6 @@
 use super::*;
 use std::collections::BTreeMap;
+use std::io::Write;
 
 fn record(offset: u64) -> ConnectorRecord {
     ConnectorRecord {
@@ -36,6 +37,32 @@ fn object_sink_is_idempotent_and_checkpoint_recovers_after_restart() {
 }
 
 #[test]
+fn object_sink_deduplicates_same_batch_keys_and_rejects_conflicts() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let mut sink = ObjectStoreSink::new("objects", 3, dir.path().join("objects"));
+    let batch = ConnectorBatch {
+        generation: 3,
+        records: vec![record(4), record(4)],
+    };
+    sink.write_batch(&batch).unwrap();
+    let path = dir
+        .path()
+        .join("objects/orders/partition-00000/00000000000000000004.record");
+    assert!(path.exists());
+
+    let mut conflict = record(4);
+    conflict.payload = b"different".to_vec();
+    assert!(
+        ObjectStoreSink::new("objects", 3, dir.path().join("objects"))
+            .write_batch(&ConnectorBatch {
+                generation: 3,
+                records: vec![conflict],
+            })
+            .is_err()
+    );
+}
+
+#[test]
 fn append_database_deduplicates_replayed_offsets_after_process_restart() {
     let dir = tempfile::TempDir::new().unwrap();
     let path = dir.path().join("database.jsonl");
@@ -52,6 +79,35 @@ fn append_database_deduplicates_replayed_offsets_after_process_restart() {
         .write_batch(&batch)
         .unwrap();
     assert_eq!(std::fs::read_to_string(path).unwrap().lines().count(), 1);
+}
+
+#[test]
+fn append_database_recovers_from_index_tail_and_torn_record() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("database.jsonl");
+    let batch = ConnectorBatch {
+        generation: 4,
+        records: vec![record(7), record(8)],
+    };
+    AppendDatabaseSink::open("database", 4, &path)
+        .unwrap()
+        .write_batch(&batch)
+        .unwrap();
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(br#"{"stream":"orders"}"#)
+        .unwrap();
+
+    let mut restarted = AppendDatabaseSink::open("database", 4, &path).unwrap();
+    restarted
+        .write_batch(&ConnectorBatch {
+            generation: 4,
+            records: vec![record(8), record(9)],
+        })
+        .unwrap();
+    assert_eq!(std::fs::read_to_string(path).unwrap().lines().count(), 3);
 }
 
 struct OutageSink {

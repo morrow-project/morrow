@@ -128,10 +128,13 @@ impl DurableBrokerState {
     fn remove_compacted_sequence(&mut self, seq: u64) {
         if let Some(record) = self.messages.remove(&seq)
             && let (Some(stream), Some(partition), Some(offset)) =
-                (record.stream, record.partition, record.offset)
+                (record.stream.as_deref(), record.partition, record.offset)
         {
             self.partition_sequences
-                .remove(&(stream, partition, offset));
+                .remove(&(stream.to_string(), partition, offset));
+            for consumer in self.consumers.values_mut() {
+                consumer.cursors.remove_record(stream, partition, offset);
+            }
         }
         for consumer in self.consumers.values_mut() {
             consumer.pending.remove(&seq);
@@ -217,14 +220,22 @@ impl Morrow {
 
     async fn compact_stream_segments(&self) -> Result<()> {
         let _storage_operation = self.storage_gate.write().await;
-        let records = self
-            .inner
-            .lock()
-            .await
-            .messages
-            .values()
-            .cloned()
-            .collect::<Vec<_>>();
+        let visible_offsets = {
+            let inner = self.inner.lock().await;
+            let mut offsets = HashMap::<(String, crate::stream::PartitionId), BTreeSet<u64>>::new();
+            for record in inner.messages.values() {
+                let (Some(stream), Some(partition), Some(offset)) =
+                    (record.stream.as_deref(), record.partition, record.offset)
+                else {
+                    continue;
+                };
+                offsets
+                    .entry((stream.to_string(), crate::stream::PartitionId(partition)))
+                    .or_default()
+                    .insert(offset);
+            }
+            offsets
+        };
         let logs = self.partition_logs.clone();
         let catalog = self.config.streams.clone();
         let permit = self
@@ -235,7 +246,7 @@ impl Morrow {
             .map_err(|_| BrokerError::msg("storage worker pool closed"))?;
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            logs.compact_visible_records(&records, &catalog)
+            logs.compact_visible_offsets(&visible_offsets, &catalog)
         })
         .await
         .map_err(|err| BrokerError::with_source("stream compaction worker failed", err))?
