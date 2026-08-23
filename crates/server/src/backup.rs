@@ -810,6 +810,65 @@ impl<S: ObjectStore + 'static> RemoteSegmentReader<S> {
     }
 }
 
+pub struct TieredPartitionReader<S> {
+    source: PathBuf,
+    objects: BTreeMap<String, BackupObject>,
+    remote: RemoteSegmentReader<S>,
+}
+
+impl<S: ObjectStore + 'static> TieredPartitionReader<S> {
+    pub fn new(
+        source: impl Into<PathBuf>,
+        manifest: &BackupManifest,
+        store: Arc<S>,
+        cache_capacity: usize,
+    ) -> Result<Self> {
+        validate_manifest(manifest)?;
+        let objects = manifest
+            .objects
+            .iter()
+            .filter(|object| object.relative_path.ends_with(".plog"))
+            .map(|object| (object.relative_path.clone(), object.clone()))
+            .collect();
+        Ok(Self {
+            source: source.into(),
+            objects,
+            remote: RemoteSegmentReader::new(store, cache_capacity),
+        })
+    }
+
+    pub fn read_offset(
+        &self,
+        stream: &str,
+        partition: u32,
+        offset: u64,
+    ) -> Result<Option<crate::partition_log::MessageEnvelope>> {
+        let prefix = format!("streams/{stream}/partition-{partition:05}/");
+        for (relative, object) in self
+            .objects
+            .iter()
+            .filter(|(relative, _)| relative.starts_with(&prefix))
+        {
+            let local = self.source.join(relative);
+            let result = if local.is_file() {
+                let bytes = fs::read(&local)?;
+                crate::partition_log::read_segment_offset(&bytes, offset)?
+            } else {
+                self.remote
+                    .read_offset(&object.key, &object.sha256, offset)?
+            };
+            if result.is_some() {
+                return Ok(result);
+            }
+        }
+        Ok(None)
+    }
+
+    pub fn stats(&self) -> CacheStats {
+        self.remote.stats()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1074,6 +1133,59 @@ mod tests {
                 .is_none()
         );
         assert_eq!(reader.stats().hits, 1);
+    }
+
+    #[test]
+    fn tiered_partition_reader_falls_back_after_sealed_local_eviction() {
+        let source = tempdir().unwrap();
+        let partition = source.path().join("streams/orders/partition-00000");
+        fs::create_dir_all(&partition).unwrap();
+        let make_segment = |offset: u64, payload: &[u8]| {
+            let envelope = crate::partition_log::MessageEnvelope {
+                namespace: "default".to_string(),
+                stream: crate::stream::StreamId::new("orders").unwrap(),
+                partition: crate::stream::PartitionId(0),
+                offset,
+                subject: "orders/created".to_string(),
+                key: None,
+                headers: Vec::new(),
+                timestamp_ms: offset,
+                reply_to: None,
+                payload: payload.to_vec(),
+                partitioning_epoch: 1,
+                leader_epoch: 1,
+                legacy_seq: offset,
+            };
+            let body = serde_json::to_vec(&envelope).unwrap();
+            let mut bytes = b"BROKERLOG\x01\n".to_vec();
+            bytes.extend_from_slice(&(body.len() as u32).to_le_bytes());
+            bytes.extend_from_slice(&crc32fast::hash(&body).to_le_bytes());
+            bytes.extend_from_slice(&body);
+            bytes
+        };
+        fs::write(
+            partition.join("00000000000000000001.plog"),
+            make_segment(1, b"remote"),
+        )
+        .unwrap();
+        fs::write(
+            partition.join("00000000000000000002.plog"),
+            make_segment(2, b"local"),
+        )
+        .unwrap();
+        let store = Arc::new(MemoryObjectStore::default());
+        let engine = BackupEngine::new(store.clone());
+        let manifest = engine
+            .create_full(source.path(), Vec::new(), "cluster-a", "tiered", 1)
+            .unwrap();
+        engine.evict_sealed(source.path(), &manifest).unwrap();
+        let reader = TieredPartitionReader::new(source.path(), &manifest, store, 1 << 20).unwrap();
+        let record = reader.read_offset("orders", 0, 1).unwrap().unwrap();
+        assert_eq!(record.payload, b"remote");
+        assert_eq!(
+            reader.read_offset("orders", 0, 2).unwrap().unwrap().payload,
+            b"local"
+        );
     }
 
     #[test]

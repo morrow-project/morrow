@@ -37,6 +37,9 @@ resident bytes and coalesces concurrent requests for the same object.
 `RemoteSegmentReader` adds record-level segment-header and batch-checksum
 validation on top of that cache, so a missing, corrupt, or incomplete remote
 segment fails before a record is returned.
+`TieredPartitionReader` selects local segment files first and falls back to that
+remote path for evicted sealed segments, preserving the same record-level result
+and failure behavior.
 
 The current API is intentionally storage-provider-neutral. An S3 adapter should
 map `put_immutable`, `get`, and `delete` to conditional/object-versioned requests,
