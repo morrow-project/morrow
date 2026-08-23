@@ -31,9 +31,12 @@ async fn main() -> server::error::Result<()> {
 fn init_tracing() -> server::error::Result<Option<opentelemetry_sdk::trace::SdkTracerProvider>> {
     global::set_text_map_propagator(TraceContextPropagator::new());
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let otel_disabled = std::env::var("OTEL_SDK_DISABLED")
+        .ok()
+        .is_some_and(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes"));
     let otlp_configured = std::env::var_os("OTEL_EXPORTER_OTLP_ENDPOINT").is_some()
         || std::env::var_os("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT").is_some();
-    if !otlp_configured {
+    if otel_disabled || !otlp_configured {
         tracing_subscriber::fmt().with_env_filter(filter).init();
         return Ok(None);
     }

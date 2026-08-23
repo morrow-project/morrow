@@ -80,7 +80,7 @@ included.
 use the `connector-` namespace; it excludes connector secrets and configuration
 material.
 
-The server emits exporter-neutral `tracing` spans named `morrow.publish`,
+The server emits `tracing` spans named `morrow.publish`,
 `morrow.delivery.prepare`, `morrow.partition.read`, `morrow.partition.write`,
 `morrow.partition.flush`, `morrow.cluster.commit`, `morrow.raft.rpc`, and
 `morrow.route.forward`, plus `morrow.command` for client command boundaries and
@@ -91,6 +91,8 @@ span context metadata. Spans carry no payloads, credentials, subjects, or
 message IDs. When `OTEL_EXPORTER_OTLP_ENDPOINT` or
 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` is set, the server installs a batched OTLP
 gRPC exporter; otherwise it uses the lightweight local formatter only.
+`OTEL_SDK_DISABLED=true` disables the OpenTelemetry exporter even when an
+endpoint is present.
 
 High-cardinality connection listings can be paged with
 `/api/v1/connections?limit=100&offset=0`. The server clamps the page size to
@@ -98,6 +100,21 @@ High-cardinality connection listings can be paged with
 The versioned subscriptions listing uses the same bounded `limit` and `offset`
 parameters and returns separate totals and continuation offsets for durable
 consumers and transient subscriptions.
+
+### Observability load validation
+
+The release-mode integration benchmark reports throughput and p50/p95/p99
+latency for 250 clustered durable publishes. Run it in three configurations:
+
+1. formatter-only metrics: `cargo test -p integration --release --test
+   client_server benchmark_cluster_durable_publish_latency -- --ignored
+   --nocapture` with no OTLP endpoint.
+2. metrics plus OTLP tracing: run the same command with
+   `OTEL_EXPORTER_OTLP_ENDPOINT` pointed at an OpenTelemetry Collector.
+3. exporter disabled: run the first command with `OTEL_SDK_DISABLED=true`.
+
+Record the printed throughput and percentile values for each run; the benchmark
+does not include payloads or user identifiers in telemetry.
 
 When `http_listen` is configured, set an admin token and protect the listener.
 The JSON endpoints include `/cluster`, `/connections`, `/subscriptions`,
