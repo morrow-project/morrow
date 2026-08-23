@@ -12,6 +12,7 @@ pub mod partition_replication;
 pub(crate) mod quota;
 pub mod raft;
 pub mod reassignment;
+pub mod schema_registry;
 pub(crate) mod security;
 pub mod stream;
 pub mod tenancy;
