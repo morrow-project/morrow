@@ -113,6 +113,48 @@ pub struct ReassignmentProgress {
     pub quorum_available: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MoveThrottle {
+    max_concurrent_moves: u32,
+    max_bytes_per_window: u64,
+    active_moves: u32,
+    bytes_in_window: u64,
+}
+
+impl MoveThrottle {
+    pub fn new(max_concurrent_moves: u32, max_bytes_per_window: u64) -> Self {
+        Self {
+            max_concurrent_moves,
+            max_bytes_per_window,
+            active_moves: 0,
+            bytes_in_window: 0,
+        }
+    }
+
+    pub fn try_start(&mut self, estimated_bytes: u64) -> bool {
+        if self.active_moves >= self.max_concurrent_moves
+            || self.bytes_in_window.saturating_add(estimated_bytes) > self.max_bytes_per_window
+        {
+            return false;
+        }
+        self.active_moves += 1;
+        self.bytes_in_window += estimated_bytes;
+        true
+    }
+
+    pub fn finish(&mut self) {
+        self.active_moves = self.active_moves.saturating_sub(1);
+    }
+
+    pub fn reset_window(&mut self) {
+        self.bytes_in_window = 0;
+    }
+
+    pub fn active_moves(&self) -> u32 {
+        self.active_moves
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct PersistedState {
     next_id: u64,

@@ -169,3 +169,16 @@ fn planner_prefers_lower_load_and_respects_region_constraints() {
     assert_eq!(moves[0].from, 1);
     assert_eq!(moves[0].to, 3);
 }
+
+#[test]
+fn move_throttle_bounds_concurrency_and_bandwidth_until_window_reset() {
+    let mut throttle = MoveThrottle::new(2, 100);
+    assert!(throttle.try_start(60));
+    assert!(!throttle.try_start(50));
+    throttle.finish();
+    assert!(throttle.try_start(40));
+    throttle.finish();
+    throttle.reset_window();
+    assert!(throttle.try_start(40));
+    assert_eq!(throttle.active_moves(), 1);
+}
