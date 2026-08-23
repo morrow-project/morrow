@@ -297,6 +297,8 @@ impl Morrow {
             .values()
             .map(|consumer| consumer.in_flight.len())
             .sum::<usize>();
+        let compaction_candidates = inner.superseded_since_compaction;
+        let compaction_keys = inner.compaction_latest.len();
         drop(inner);
         let pull_waiters = self.pull_waiters.len();
 
@@ -372,6 +374,50 @@ impl Morrow {
         metrics.push_str(&format!(
             "morrow_wal_retained_messages {}\n",
             wal.retained_message_count
+        ));
+        metrics.push_str("# HELP morrow_wal_rotations_total WAL segment rotations.\n");
+        metrics.push_str("# TYPE morrow_wal_rotations_total counter\n");
+        metrics.push_str(&format!("morrow_wal_rotations_total {}\n", wal.rotations));
+        metrics.push_str("# HELP morrow_wal_checkpoints_total WAL checkpoints.\n");
+        metrics.push_str("# TYPE morrow_wal_checkpoints_total counter\n");
+        metrics.push_str(&format!(
+            "morrow_wal_checkpoints_total {}\n",
+            wal.checkpoints
+        ));
+        metrics.push_str("# HELP morrow_wal_truncations_total WAL truncations.\n");
+        metrics.push_str("# TYPE morrow_wal_truncations_total counter\n");
+        metrics.push_str(&format!(
+            "morrow_wal_truncations_total {}\n",
+            wal.truncations
+        ));
+        metrics.push_str(
+            "# HELP morrow_compaction_candidates Current superseded records awaiting compaction.\n",
+        );
+        metrics.push_str("# TYPE morrow_compaction_candidates gauge\n");
+        metrics.push_str(&format!(
+            "morrow_compaction_candidates {compaction_candidates}\n"
+        ));
+        metrics.push_str("# HELP morrow_compaction_keys Current compaction index keys.\n");
+        metrics.push_str("# TYPE morrow_compaction_keys gauge\n");
+        metrics.push_str(&format!("morrow_compaction_keys {compaction_keys}\n"));
+        metrics.push_str("# HELP morrow_cluster_partitions Current cluster partitions.\n");
+        metrics.push_str("# TYPE morrow_cluster_partitions gauge\n");
+        metrics.push_str(&format!(
+            "morrow_cluster_partitions {}\n",
+            cluster.partitions.len()
+        ));
+        metrics.push_str("# HELP morrow_cluster_peers Current configured cluster peers.\n");
+        metrics.push_str("# TYPE morrow_cluster_peers gauge\n");
+        metrics.push_str(&format!("morrow_cluster_peers {}\n", cluster.peers.len()));
+        let connected_routes = cluster
+            .routes
+            .as_ref()
+            .map(|routes| routes.connected.len())
+            .unwrap_or_default();
+        metrics.push_str("# HELP morrow_route_peers_connected Current connected route peers.\n");
+        metrics.push_str("# TYPE morrow_route_peers_connected gauge\n");
+        metrics.push_str(&format!(
+            "morrow_route_peers_connected {connected_routes}\n"
         ));
         metrics.push_str(
             "# HELP morrow_cluster_ready Whether the broker is ready to serve traffic.\n",
