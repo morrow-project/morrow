@@ -31,28 +31,28 @@ impl Default for GroupConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Member {
     pub id: String,
     pub instance_id: Option<String>,
     pub last_heartbeat_ms: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Assignment {
     pub generation: u64,
     pub member_id: String,
     pub partitions: Vec<u32>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Rebalance {
     pub generation: u64,
     pub moved_partitions: Vec<u32>,
     pub deadline_ms: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct GroupSnapshot {
     pub generation: u64,
     pub members: Vec<Member>,

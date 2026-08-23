@@ -213,6 +213,7 @@ impl Morrow {
                 self.write_producers_response(&mut stream, parse_page(query))
                     .await
             }
+            "/groups" | "/api/v1/groups" => self.write_groups_response(&mut stream).await,
             "/wal" | "/api/v1/storage" => self.write_wal_response(&mut stream).await,
             "/middleware" | "/api/v1/middleware" => {
                 self.write_middleware_response(&mut stream).await
@@ -274,6 +275,17 @@ impl Morrow {
     async fn write_streams_response<W: AsyncWrite + Unpin>(&self, stream: &mut W) -> Result<()> {
         let body = serde_json::to_vec(&self.streams_response().await)
             .context("serializing HTTP streams response")?;
+        write_http_response(stream, "200 OK", "application/json", &body).await
+    }
+
+    async fn write_groups_response<W: AsyncWrite + Unpin>(&self, stream: &mut W) -> Result<()> {
+        let groups = self.groups.lock().await;
+        let mut response = groups
+            .iter()
+            .map(|(name, coordinator)| (name.clone(), coordinator.snapshot()))
+            .collect::<Vec<_>>();
+        response.sort_by(|left, right| left.0.cmp(&right.0));
+        let body = serde_json::to_vec(&response).context("serializing HTTP group response")?;
         write_http_response(stream, "200 OK", "application/json", &body).await
     }
 

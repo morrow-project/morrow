@@ -1,4 +1,5 @@
 use super::*;
+use crate::consumer_group::GroupCoordinator;
 
 #[derive(Clone)]
 pub struct Morrow {
@@ -9,6 +10,7 @@ pub struct Morrow {
     pub(super) storage_gate: Arc<tokio::sync::RwLock<()>>,
     pub(super) connections: Arc<Mutex<ConnectionState>>,
     pub(super) transient: Arc<Mutex<TransientState>>,
+    pub(super) groups: Arc<Mutex<HashMap<String, GroupCoordinator>>>,
     pub(super) next_connection_id: Arc<AtomicU64>,
     pub(super) config: Config,
     pub(super) tls_acceptor: Option<TlsAcceptor>,

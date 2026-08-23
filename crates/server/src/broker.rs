@@ -64,6 +64,7 @@ mod cluster_operations;
 mod cluster_runtime;
 mod compaction;
 mod consumer;
+mod consumer_group_commands;
 mod delivery_index;
 mod fake_cluster;
 mod fake_cluster_types;
@@ -92,10 +93,10 @@ mod wal_runtime;
 pub use self::broker::Morrow;
 #[allow(unused_imports)]
 use self::{
-    cluster_runtime::*, compaction::*, consumer::*, fake_cluster::*, fake_cluster_types::*,
-    hooks::*, http::*, inner_admin::*, inner_delivery::*, manual_clock::*, pull_consumer::*,
-    pull_waiters::*, retention::*, route_connection::*, route_interests::*, route_mesh::*,
-    route_state::*, route_tls::*, state::*, subject_helpers::*, wal_runtime::*,
+    cluster_runtime::*, compaction::*, consumer::*, consumer_group_commands::*, fake_cluster::*,
+    fake_cluster_types::*, hooks::*, http::*, inner_admin::*, inner_delivery::*, manual_clock::*,
+    pull_consumer::*, pull_waiters::*, retention::*, route_connection::*, route_interests::*,
+    route_mesh::*, route_state::*, route_tls::*, state::*, subject_helpers::*, wal_runtime::*,
 };
 
 #[cfg(test)]

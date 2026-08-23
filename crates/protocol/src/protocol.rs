@@ -70,6 +70,30 @@ pub enum Command {
         messages: usize,
         bytes: usize,
     },
+    GroupJoin {
+        group: String,
+        member: String,
+        partitions: u32,
+        strategy: GroupAssignmentStrategy,
+        instance_id: Option<String>,
+    },
+    GroupHeartbeat {
+        group: String,
+        member: String,
+        generation: u64,
+    },
+    GroupLeave {
+        group: String,
+        member: String,
+        generation: u64,
+    },
+    GroupCommit {
+        group: String,
+        member: String,
+        generation: u64,
+        partition: u32,
+        offset: u64,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,6 +153,13 @@ pub enum RetryTerminalAction {
     Discard,
     Pause,
     Retain,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroupAssignmentStrategy {
+    Range,
+    RoundRobin,
+    Sticky,
 }
 
 impl Default for RetryPolicy {
@@ -243,6 +274,7 @@ pub async fn read_command<R: AsyncBufRead + Unpin>(
         "NACK" => parse_delivery_control(parts, "NACK").map(Some),
         "EXTEND" => parse_delivery_control(parts, "EXTEND").map(Some),
         "CREDIT" => parse_credit(parts).map(Some),
+        "GROUP" => parse_group(parts).map(Some),
         "PUB" => read_pub(reader, parts, max_payload).await.map(Some),
         "HPUB" => read_hpub(reader, parts, max_payload).await.map(Some),
         _ => Err(ProtocolError(format!("unsupported command {op}"))),

@@ -121,6 +121,56 @@ impl Morrow {
                     self.add_push_credit(connection_id, &sid, messages, bytes)
                         .await
                 }
+                Command::GroupJoin {
+                    group,
+                    member,
+                    partitions,
+                    strategy,
+                    instance_id,
+                } => {
+                    self.handle_group_join(
+                        connection_id,
+                        group,
+                        member,
+                        partitions,
+                        strategy,
+                        instance_id,
+                    )
+                    .await
+                }
+                Command::GroupHeartbeat {
+                    group,
+                    member,
+                    generation,
+                } => {
+                    self.handle_group_heartbeat(connection_id, group, member, generation)
+                        .await
+                }
+                Command::GroupLeave {
+                    group,
+                    member,
+                    generation,
+                } => {
+                    self.handle_group_leave(connection_id, group, member, generation)
+                        .await
+                }
+                Command::GroupCommit {
+                    group,
+                    member,
+                    generation,
+                    partition,
+                    offset,
+                } => {
+                    self.handle_group_commit(
+                        connection_id,
+                        group,
+                        member,
+                        generation,
+                        partition,
+                        offset,
+                    )
+                    .await
+                }
                 Command::Pub {
                     subject,
                     reply_to,

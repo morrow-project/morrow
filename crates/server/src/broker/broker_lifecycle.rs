@@ -205,6 +205,7 @@ impl Morrow {
                 interest_index: subject::SubjectTrie::default(),
                 route_interest_counts: BTreeMap::new(),
             })),
+            groups: Arc::new(Mutex::new(HashMap::new())),
             next_connection_id: Arc::new(AtomicU64::new(1)),
             config,
             tls_acceptor,

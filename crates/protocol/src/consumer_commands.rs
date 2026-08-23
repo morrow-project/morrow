@@ -1,7 +1,100 @@
 use crate::protocol::{
-    Command, ProtocolError, RetryBackoff, RetryPolicy, RetryTerminalAction, StartPosition,
-    validate_identifier,
+    Command, GroupAssignmentStrategy, ProtocolError, RetryBackoff, RetryPolicy,
+    RetryTerminalAction, StartPosition, validate_identifier,
 };
+
+pub(super) fn parse_group<'a>(
+    mut parts: impl Iterator<Item = &'a str>,
+) -> Result<Command, ProtocolError> {
+    let operation = required(
+        &mut parts,
+        "GROUP requires JOIN, HEARTBEAT, LEAVE, or COMMIT",
+    )?;
+    let group = required(&mut parts, "GROUP requires a group name")?.to_string();
+    validate_identifier("group name", &group)?;
+    let member = required(&mut parts, "GROUP requires a member name")?.to_string();
+    validate_identifier("group member", &member)?;
+    match operation.to_ascii_uppercase().as_str() {
+        "JOIN" => {
+            let partitions = parse_u32(
+                required(&mut parts, "GROUP JOIN requires partitions")?,
+                "group partitions",
+            )?;
+            if partitions == 0 {
+                return Err(ProtocolError(
+                    "group partitions must be greater than zero".into(),
+                ));
+            }
+            let strategy = match required(&mut parts, "GROUP JOIN requires a strategy")?
+                .to_ascii_lowercase()
+                .as_str()
+            {
+                "range" => GroupAssignmentStrategy::Range,
+                "round_robin" => GroupAssignmentStrategy::RoundRobin,
+                "sticky" => GroupAssignmentStrategy::Sticky,
+                _ => {
+                    return Err(ProtocolError(
+                        "group strategy must be range, round_robin, or sticky".into(),
+                    ));
+                }
+            };
+            let instance_id = parts.next().map(str::to_string);
+            no_more(parts, "GROUP JOIN")?;
+            Ok(Command::GroupJoin {
+                group,
+                member,
+                partitions,
+                strategy,
+                instance_id,
+            })
+        }
+        "HEARTBEAT" | "LEAVE" => {
+            let generation = parse_u64(
+                required(&mut parts, "GROUP operation requires generation")?,
+                "group generation",
+            )?;
+            no_more(parts, "GROUP operation")?;
+            if operation.eq_ignore_ascii_case("HEARTBEAT") {
+                Ok(Command::GroupHeartbeat {
+                    group,
+                    member,
+                    generation,
+                })
+            } else {
+                Ok(Command::GroupLeave {
+                    group,
+                    member,
+                    generation,
+                })
+            }
+        }
+        "COMMIT" => {
+            let generation = parse_u64(
+                required(&mut parts, "GROUP COMMIT requires generation")?,
+                "group generation",
+            )?;
+            let partition = parse_u32(
+                required(&mut parts, "GROUP COMMIT requires partition")?,
+                "group partition",
+            )?;
+            let offset = parse_u64(
+                required(&mut parts, "GROUP COMMIT requires offset")?,
+                "group offset",
+            )?;
+            no_more(parts, "GROUP COMMIT")?;
+            Ok(Command::GroupCommit {
+                group,
+                member,
+                generation,
+                partition,
+                offset,
+            })
+        }
+        _ => Err(ProtocolError(
+            "GROUP operation must be JOIN, HEARTBEAT, LEAVE, or COMMIT".into(),
+        )),
+    }
+}
 
 pub(super) fn parse_consumer<'a>(
     mut parts: impl Iterator<Item = &'a str>,
@@ -231,6 +324,12 @@ fn no_more<'a>(
 }
 
 fn parse_u64(value: &str, field: &str) -> Result<u64, ProtocolError> {
+    value
+        .parse()
+        .map_err(|_| ProtocolError(format!("{field} must be an integer")))
+}
+
+fn parse_u32(value: &str, field: &str) -> Result<u32, ProtocolError> {
     value
         .parse()
         .map_err(|_| ProtocolError(format!("{field} must be an integer")))
