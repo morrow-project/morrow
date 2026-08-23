@@ -85,10 +85,11 @@ The server emits exporter-neutral `tracing` spans named `morrow.publish`,
 `morrow.partition.flush`, `morrow.raft.rpc`, and `morrow.route.forward`, plus
 `morrow.command` for client command boundaries and `morrow.middleware` for
 middleware stage/generation boundaries. A valid W3C `traceparent` publish
-header is recorded as bounded span context metadata. Spans carry no payloads,
-credentials, subjects, or message IDs.
-An OpenTelemetry-compatible tracing subscriber can export these spans; the
-binary currently does not install an OTLP exporter by default.
+header is extracted as the OpenTelemetry parent context and recorded as bounded
+span context metadata. Spans carry no payloads, credentials, subjects, or
+message IDs. When `OTEL_EXPORTER_OTLP_ENDPOINT` or
+`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` is set, the server installs a batched OTLP
+gRPC exporter; otherwise it uses the lightweight local formatter only.
 
 High-cardinality connection listings can be paged with
 `/api/v1/connections?limit=100&offset=0`. The server clamps the page size to

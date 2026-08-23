@@ -31,13 +31,17 @@ crc32fast = { version = "1.5.0", default-features = false, features = ["std"] }
 ed25519-dalek = { version = "2.2.0", default-features = false, features = ["alloc"] }
 getrandom = { version = "0.4.3", default-features = false, features = ["std"] }
 openraft = { version = "0.9.25", default-features = false, features = ["generic-snapshot-data", "serde", "storage-v2"] }
+opentelemetry = { version = "0.32.0", default-features = false, features = ["trace"] }
+opentelemetry-otlp = { version = "0.32.0", default-features = false, features = ["trace", "grpc-tonic"] }
+opentelemetry_sdk = { version = "0.32.0", default-features = false, features = ["trace", "rt-tokio"] }
 rustls = { version = "0.23.43", default-features = false, features = ["aws_lc_rs", "std"] }
 serde = { version = "1.0.229", default-features = false, features = ["derive", "std"] }
 serde_json = { version = "1.0.151", default-features = false, features = ["std"] }
 tokio = { version = "1.53.1", default-features = false, features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-rustls = { version = "0.26.4", default-features = false }
 tracing = { version = "0.1.44", default-features = false, features = ["std"] }
-tracing-subscriber = { version = "0.3.23", default-features = false, features = ["ansi", "env-filter", "fmt", "std"] }
+tracing-opentelemetry = "0.33.0"
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["ansi", "env-filter", "fmt", "registry", "std"] }
 wasmtime = { version = "47.0.4", default-features = false, features = ["anyhow", "cranelift", "pooling-allocator", "runtime", "std"] }
 
 [profile.release]

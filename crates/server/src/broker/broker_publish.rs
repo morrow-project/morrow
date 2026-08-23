@@ -1,4 +1,21 @@
 use super::*;
+use opentelemetry::propagation::{Extractor, TextMapPropagator};
+use tracing_opentelemetry::OpenTelemetrySpanExt;
+
+struct HeaderExtractor<'a>(&'a [(String, String)]);
+
+impl Extractor for HeaderExtractor<'_> {
+    fn get(&self, key: &str) -> Option<&str> {
+        self.0
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(key))
+            .map(|(_, value)| value.as_str())
+    }
+
+    fn keys(&self) -> Vec<&str> {
+        self.0.iter().map(|(name, _)| name.as_str()).collect()
+    }
+}
 
 fn valid_traceparent(headers: &[(String, String)]) -> Option<&str> {
     let value = headers
@@ -89,6 +106,9 @@ impl Morrow {
             recursion_depth = 0usize,
             traceparent,
         );
+        let parent = opentelemetry_sdk::propagation::TraceContextPropagator::new()
+            .extract(&HeaderExtractor(&headers));
+        let _ = span.set_parent(parent);
         let started = Instant::now();
         self.metrics.publishes_total.fetch_add(1, Ordering::Relaxed);
         self.metrics
