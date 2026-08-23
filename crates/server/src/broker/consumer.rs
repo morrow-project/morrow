@@ -52,6 +52,7 @@ impl Consumer {
                             delivery_id: attempt.delivery_id,
                             deadline_ms: attempt.deadline_ms,
                             attempt: attempt.attempt,
+                            retry_waiting: attempt.retry_waiting,
                         },
                     )
                 })

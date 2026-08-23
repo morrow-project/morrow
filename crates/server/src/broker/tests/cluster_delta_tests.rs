@@ -22,6 +22,7 @@ async fn randomized_incremental_application_matches_full_reconciliation() {
                     ack_timeout_ms: 1_000 + step,
                     max_in_flight: 16,
                     start_position: protocol::StartPosition::Earliest,
+                    retry_policy: protocol::RetryPolicy::default(),
                 };
                 let cursors = crate::consumer_cursor::ConsumerCursorSet::new(
                     &record.filter_subject,
@@ -120,6 +121,7 @@ async fn duplicate_consumer_delta_is_idempotent_and_does_not_regress_cursors() {
         ack_timeout_ms: 1_000,
         max_in_flight: 16,
         start_position: protocol::StartPosition::Earliest,
+        retry_policy: protocol::RetryPolicy::default(),
     };
     let cursors = crate::consumer_cursor::ConsumerCursorSet::new(
         &record.filter_subject,

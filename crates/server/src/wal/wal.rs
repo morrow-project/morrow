@@ -152,6 +152,7 @@ impl Wal {
             delivery_id,
             deadline_ms,
             attempt,
+            retry_waiting: false,
         };
         self.write_delivery_attempt(&record)?;
         Ok(record)
@@ -174,6 +175,17 @@ impl Wal {
         };
         self.append_record(KIND_ACK, &ack_body(&record)?)?;
         Ok(record)
+    }
+
+    pub fn append_dead_letter(&mut self, record: &DeadLetterRecord) -> Result<()> {
+        self.append_record(KIND_DEAD_LETTER, &dead_letter_body(record)?)
+    }
+
+    pub fn purge_dead_letter(&mut self, id: u64) -> Result<()> {
+        self.append_record(
+            KIND_DEAD_LETTER_PURGE,
+            &dead_letter_purge_body(&DeadLetterPurgeRecord { id })?,
+        )
     }
 
     pub fn flush_due(&mut self) -> Result<()> {
@@ -200,6 +212,7 @@ impl Wal {
         &mut self,
         messages: impl IntoIterator<Item = PublishRecord>,
         consumers: impl IntoIterator<Item = ReplayedConsumer>,
+        dead_letters: impl IntoIterator<Item = DeadLetterRecord>,
     ) -> Result<()> {
         let started = Instant::now();
         self.flush()?;
@@ -210,6 +223,11 @@ impl Wal {
         {
             let mut file = create_segment(&tmp)?;
             checkpoint_bytes += write_compact_state(&mut file, messages, consumers)?;
+            for record in dead_letters {
+                let body = dead_letter_body(&record)?;
+                write_record_to(&mut file, KIND_DEAD_LETTER, &body)?;
+                checkpoint_bytes += record_size(&body)?;
+            }
             file.flush()?;
             file.sync_data()?;
         }
@@ -369,6 +387,7 @@ pub(super) fn write_compact_state(
                 delivery_id: 0,
                 deadline_ms: 0,
                 attempt: 0,
+                retry_waiting: false,
             })?;
             write_record_to(file, KIND_DELIVERY_ATTEMPT, &body)?;
             bytes += record_size(&body)?;
@@ -380,6 +399,7 @@ pub(super) fn write_compact_state(
                 delivery_id: 0,
                 deadline_ms: 0,
                 attempt: next_attempt.saturating_sub(1),
+                retry_waiting: false,
             })?;
             write_record_to(file, KIND_DELIVERY_ATTEMPT, &body)?;
             bytes += record_size(&body)?;

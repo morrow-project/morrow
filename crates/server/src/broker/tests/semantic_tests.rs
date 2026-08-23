@@ -110,6 +110,34 @@ async fn redelivery_waits_for_manual_clock_deadline() {
     assert!(second.starts_with("DELIVER orders/created sid1 _MORROW/ACK/durable-client1-sid1/1/2"));
     assert!(second.ends_with("5\r\nhello\r\n"));
 }
+
+#[tokio::test]
+async fn scheduled_publish_waits_for_committed_delivery_time() {
+    let scenario = Scenario::new();
+    let mut subscriber = scenario.connect_durable("client1", 25).await;
+    let mut publisher = scenario.connect_durable("publisher1", 25).await;
+
+    subscriber.subscribe("orders/*", "sid1").await;
+    subscriber.ping_roundtrip().await;
+    publisher
+        .publish_hpub(
+            "orders/created",
+            &[("Morrow-Scheduled-At", "2000")],
+            b"hello",
+        )
+        .await;
+
+    scenario.tick_redelivery().await;
+    subscriber.expect_no_frame_short().await;
+    scenario.advance_ms(999);
+    scenario.tick_redelivery().await;
+    subscriber.expect_no_frame_short().await;
+    scenario.advance_ms(1);
+    scenario.tick_redelivery().await;
+    let frame = subscriber.expect_hmsg().await;
+    assert!(frame.starts_with("HDELIVER orders/created sid1"));
+    assert!(frame.ends_with("\r\nhello\r\n"));
+}
 #[tokio::test]
 async fn acked_message_does_not_redeliver_after_manual_ticks() {
     let scenario = Scenario::new();

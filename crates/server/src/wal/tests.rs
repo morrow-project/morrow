@@ -79,6 +79,27 @@ fn replays_consumer_publish_delivery_and_ack_state() {
 }
 
 #[test]
+fn replays_consumer_retry_policy() {
+    let dir = TestDir::new();
+    let (mut wal, _) = open_wal(dir.path());
+    let mut consumer = consumer("retry-consumer");
+    consumer.retry_policy = protocol::RetryPolicy {
+        max_attempts: 4,
+        backoff: protocol::RetryBackoff::Exponential,
+        initial_delay_ms: 25,
+        max_delay_ms: 500,
+        jitter_percent: 0,
+        terminal_action: protocol::RetryTerminalAction::DeadLetter,
+    };
+    wal.append_consumer_upsert(&consumer).unwrap();
+    wal.flush().unwrap();
+    drop(wal);
+
+    let (_, replay) = open_wal(dir.path());
+    assert_eq!(replay.consumers[&consumer.consumer_id].record, consumer);
+}
+
+#[test]
 fn replay_retains_message_until_all_matching_consumers_ack() {
     let dir = TestDir::new();
     let (mut wal, _) = open_wal(dir.path());
@@ -207,7 +228,8 @@ fn checkpoint_removes_covered_segments() {
         acked: HashSet::new(),
     };
 
-    wal.checkpoint(vec![first, second], vec![replayed]).unwrap();
+    wal.checkpoint(vec![first, second], vec![replayed], Vec::new())
+        .unwrap();
 
     assert!(wal.sealed_segments.is_empty());
     assert_eq!(segmented_paths(dir.path()).unwrap().len(), 1);
@@ -297,5 +319,6 @@ fn consumer(consumer_id: &str) -> ConsumerRecord {
         ack_timeout_ms: 30_000,
         max_in_flight: 1024,
         start_position: protocol::StartPosition::Latest,
+        retry_policy: protocol::RetryPolicy::default(),
     }
 }

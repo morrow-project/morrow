@@ -33,12 +33,18 @@ impl Morrow {
             cluster.enforce_retention(now)?;
             self.sync_cluster_deltas(&cluster).await?;
         }
-        let expired = {
+        let (expired, dead_letter_writes) = {
             let _storage_operation = self.storage_gate.read().await;
             let mut inner = self.inner.lock().await;
+            inner.activate_due_scheduled(now, MAX_EXPIRED_LEASES_PER_TICK);
             inner.enforce_stream_retention(&self.partition_logs, &self.config.streams, now)?;
-            inner.expire_due_leases(now, MAX_EXPIRED_LEASES_PER_TICK)
+            let before = inner.dead_letters.len();
+            let expired = inner.expire_due_leases(now, MAX_EXPIRED_LEASES_PER_TICK)?;
+            (expired, inner.dead_letters.len().saturating_sub(before))
         };
+        self.metrics
+            .dead_letter_writes_total
+            .fetch_add(dead_letter_writes as u64, Ordering::Relaxed);
         if expired > 0 {
             self.metrics
                 .redeliveries_total

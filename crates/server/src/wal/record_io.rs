@@ -26,6 +26,10 @@ pub(super) fn consumer_upsert_body(record: &ConsumerRecord) -> Result<Vec<u8>> {
         &mut body,
         &serde_json::to_vec(&record.start_position).context("encoding consumer start position")?,
     )?;
+    put_bytes(
+        &mut body,
+        &serde_json::to_vec(&record.retry_policy).context("encoding consumer retry policy")?,
+    )?;
     Ok(body)
 }
 pub(super) fn delivery_attempt_body(record: &DeliveryAttemptRecord) -> Result<Vec<u8>> {
@@ -35,6 +39,7 @@ pub(super) fn delivery_attempt_body(record: &DeliveryAttemptRecord) -> Result<Ve
     put_u64(&mut body, record.delivery_id);
     put_u64(&mut body, record.deadline_ms);
     put_u32(&mut body, record.attempt);
+    body.push(u8::from(record.retry_waiting));
     Ok(body)
 }
 pub(super) fn ack_body(record: &AckRecord) -> Result<Vec<u8>> {
@@ -42,6 +47,14 @@ pub(super) fn ack_body(record: &AckRecord) -> Result<Vec<u8>> {
     put_u64(&mut body, record.seq);
     put_string(&mut body, &record.consumer_id)?;
     put_u64(&mut body, record.delivery_id);
+    Ok(body)
+}
+pub(super) fn dead_letter_body(record: &DeadLetterRecord) -> Result<Vec<u8>> {
+    serde_json::to_vec(record).context("encoding dead-letter record")
+}
+pub(super) fn dead_letter_purge_body(record: &DeadLetterPurgeRecord) -> Result<Vec<u8>> {
+    let mut body = Vec::new();
+    put_u64(&mut body, record.id);
     Ok(body)
 }
 pub(super) fn partition_append_body(record: &PartitionAppendRecord) -> Result<Vec<u8>> {
@@ -197,6 +210,11 @@ pub(super) fn decode_consumer_upsert(body: &[u8]) -> Result<ConsumerRecord> {
     } else {
         serde_json::from_slice(&cursor.bytes()?).context("decoding consumer start position")?
     };
+    let retry_policy = if cursor.is_finished() {
+        protocol::RetryPolicy::default()
+    } else {
+        serde_json::from_slice(&cursor.bytes()?).context("decoding consumer retry policy")?
+    };
     let record = ConsumerRecord {
         consumer_id,
         filter_subject,
@@ -204,6 +222,7 @@ pub(super) fn decode_consumer_upsert(body: &[u8]) -> Result<ConsumerRecord> {
         ack_timeout_ms,
         max_in_flight,
         start_position,
+        retry_policy,
     };
     cursor.finish()?;
     Ok(record)
@@ -219,6 +238,11 @@ pub(super) fn decode_delivery_attempt(body: &[u8]) -> Result<DeliveryAttemptReco
         delivery_id: cursor.u64()?,
         deadline_ms: cursor.u64()?,
         attempt: cursor.u32()?,
+        retry_waiting: if cursor.is_finished() {
+            false
+        } else {
+            cursor.take(1)?[0] != 0
+        },
     };
     cursor.finish()?;
     Ok(record)
@@ -233,6 +257,18 @@ pub(super) fn decode_ack(body: &[u8]) -> Result<AckRecord> {
         consumer_id: cursor.string()?,
         delivery_id: cursor.u64()?,
     };
+    cursor.finish()?;
+    Ok(record)
+}
+pub(super) fn decode_dead_letter(body: &[u8]) -> Result<DeadLetterRecord> {
+    serde_json::from_slice(body).context("decoding dead-letter record")
+}
+pub(super) fn decode_dead_letter_purge(body: &[u8]) -> Result<DeadLetterPurgeRecord> {
+    let mut cursor = Cursor {
+        bytes: body,
+        pos: 0,
+    };
+    let record = DeadLetterPurgeRecord { id: cursor.u64()? };
     cursor.finish()?;
     Ok(record)
 }

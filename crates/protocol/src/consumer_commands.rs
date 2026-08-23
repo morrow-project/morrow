@@ -1,4 +1,7 @@
-use crate::protocol::{Command, ProtocolError, StartPosition, validate_identifier};
+use crate::protocol::{
+    Command, ProtocolError, RetryBackoff, RetryPolicy, RetryTerminalAction, StartPosition,
+    validate_identifier,
+};
 
 pub(super) fn parse_consumer<'a>(
     mut parts: impl Iterator<Item = &'a str>,
@@ -14,11 +17,17 @@ pub(super) fn parse_consumer<'a>(
                 .map(parse_start_position)
                 .transpose()?
                 .unwrap_or_default();
+            let retry_policy = parts
+                .next()
+                .map(parse_retry_policy)
+                .transpose()?
+                .unwrap_or_default();
             no_more(parts, "CONSUMER CREATE")?;
             Ok(Command::ConsumerCreate {
                 name,
                 filter_subject: filter_subject.to_string(),
                 start,
+                retry_policy,
             })
         }
         "DELETE" => {
@@ -29,6 +38,58 @@ pub(super) fn parse_consumer<'a>(
             "CONSUMER operation must be CREATE or DELETE".into(),
         )),
     }
+}
+
+fn parse_retry_policy(value: &str) -> Result<RetryPolicy, ProtocolError> {
+    let fields = value
+        .strip_prefix("retry=")
+        .ok_or_else(|| ProtocolError("retry policy must start with retry=".into()))?
+        .split(':')
+        .collect::<Vec<_>>();
+    if fields.len() != 6 {
+        return Err(ProtocolError(
+            "retry policy requires attempts:backoff:initial_ms:max_ms:jitter_percent:action".into(),
+        ));
+    }
+    let max_attempts = fields[0]
+        .parse()
+        .map_err(|_| ProtocolError("retry max attempts must be an integer".into()))?;
+    let backoff = match fields[1] {
+        "fixed" => RetryBackoff::Fixed,
+        "exponential" => RetryBackoff::Exponential,
+        _ => {
+            return Err(ProtocolError(
+                "retry backoff must be fixed or exponential".into(),
+            ));
+        }
+    };
+    let initial_delay_ms = fields[2]
+        .parse()
+        .map_err(|_| ProtocolError("retry initial delay must be an integer".into()))?;
+    let max_delay_ms = fields[3]
+        .parse()
+        .map_err(|_| ProtocolError("retry max delay must be an integer".into()))?;
+    let jitter_percent = fields[4]
+        .parse()
+        .map_err(|_| ProtocolError("retry jitter must be an integer".into()))?;
+    if jitter_percent > 100 || max_attempts == 0 || max_delay_ms < initial_delay_ms {
+        return Err(ProtocolError("invalid retry policy bounds".into()));
+    }
+    let terminal_action = match fields[5] {
+        "dead_letter" => RetryTerminalAction::DeadLetter,
+        "discard" => RetryTerminalAction::Discard,
+        "pause" => RetryTerminalAction::Pause,
+        "retain" => RetryTerminalAction::Retain,
+        _ => return Err(ProtocolError("invalid retry terminal action".into())),
+    };
+    Ok(RetryPolicy {
+        max_attempts,
+        backoff,
+        initial_delay_ms,
+        max_delay_ms,
+        jitter_percent,
+        terminal_action,
+    })
 }
 
 pub(super) fn parse_fetch<'a>(

@@ -37,6 +37,7 @@ pub enum Command {
         name: String,
         filter_subject: String,
         start: StartPosition,
+        retry_policy: RetryPolicy,
     },
     ConsumerDelete {
         name: String,
@@ -94,6 +95,71 @@ pub enum StartPosition {
     Committed,
     Offset(u64),
     Timestamp(u64),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct RetryPolicy {
+    pub max_attempts: u32,
+    pub backoff: RetryBackoff,
+    pub initial_delay_ms: u64,
+    pub max_delay_ms: u64,
+    pub jitter_percent: u8,
+    pub terminal_action: RetryTerminalAction,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetryBackoff {
+    Fixed,
+    Exponential,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetryTerminalAction {
+    DeadLetter,
+    Discard,
+    Pause,
+    Retain,
+}
+
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        Self {
+            max_attempts: u32::MAX,
+            backoff: RetryBackoff::Fixed,
+            initial_delay_ms: 0,
+            max_delay_ms: 300_000,
+            jitter_percent: 0,
+            terminal_action: RetryTerminalAction::Retain,
+        }
+    }
+}
+
+impl RetryPolicy {
+    pub fn delay_ms(&self, attempt: u32) -> u64 {
+        let exponent = attempt.saturating_sub(1).min(63);
+        let multiplier = match self.backoff {
+            RetryBackoff::Fixed => 1,
+            RetryBackoff::Exponential => 1u64 << exponent,
+        };
+        let delay = self
+            .initial_delay_ms
+            .saturating_mul(multiplier)
+            .min(self.max_delay_ms);
+        if self.jitter_percent == 0 || delay == 0 {
+            return delay;
+        }
+        let spread = delay.saturating_mul(self.jitter_percent as u64) / 100;
+        let range = spread.saturating_mul(2).saturating_add(1);
+        let offset = ((attempt as u64)
+            .wrapping_mul(1_664_525)
+            .wrapping_add(1_013_904_223)
+            % range) as i128
+            - spread as i128;
+        let jittered = delay as i128 + offset;
+        jittered.clamp(0, self.max_delay_ms as i128) as u64
+    }
 }
 
 impl AckLevel {

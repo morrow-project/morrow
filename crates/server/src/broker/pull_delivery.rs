@@ -1,3 +1,4 @@
+use super::delivery_index::scheduled_at_ms;
 use super::*;
 
 impl DurableBrokerState {
@@ -10,6 +11,9 @@ impl DurableBrokerState {
         let (seq, attempt, deadline_ms) =
             self.next_pull_candidate(consumer_id, partition_logs, now)?;
         let metadata = self.messages.get(&seq)?.clone();
+        if scheduled_at_ms(&metadata).is_some_and(|scheduled_at_ms| scheduled_at_ms > now) {
+            return None;
+        }
         self.consumers.get_mut(consumer_id)?.preparing.insert(seq);
         Some((seq, attempt, deadline_ms, metadata))
     }
@@ -77,6 +81,7 @@ impl DurableBrokerState {
                     delivery_id: lease.delivery_id,
                     deadline_ms: lease.deadline_ms,
                     attempt: lease.attempt,
+                    retry_waiting: false,
                 },
             );
             consumer.delivered += 1;
@@ -108,13 +113,30 @@ impl DurableBrokerState {
             }
             let in_flight = &consumer.in_flight;
             let preparing = &consumer.preparing;
-            let seq = consumer.cursors.next_indexed_candidate(
-                &consumer.record.filter_subject,
-                &self.messages,
-                &self.partition_sequences,
-                partition_logs,
-                |seq| in_flight.contains_key(&seq) || preparing.contains(&seq),
-            )?;
+            let seq = consumer
+                .cursors
+                .next_indexed_candidate(
+                    &consumer.record.filter_subject,
+                    &self.messages,
+                    &self.partition_sequences,
+                    partition_logs,
+                    |seq| in_flight.contains_key(&seq) || preparing.contains(&seq),
+                )
+                .or_else(|| {
+                    consumer
+                        .pending
+                        .iter()
+                        .find(|seq| !in_flight.contains_key(seq) && !preparing.contains(seq))
+                        .copied()
+                })?;
+            if self
+                .messages
+                .get(&seq)
+                .and_then(scheduled_at_ms)
+                .is_some_and(|scheduled_at_ms| scheduled_at_ms > now)
+            {
+                return None;
+            }
             let attempt = consumer.pending_attempts.get(&seq).copied().unwrap_or(1);
             (seq, attempt)
         };

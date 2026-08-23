@@ -57,6 +57,7 @@ async fn one_redelivery_tick_expires_at_most_the_work_limit() {
             delivery_id: seq,
             deadline_ms: 1,
             attempt: 1,
+            retry_waiting: false,
         };
         inner
             .consumers
@@ -69,13 +70,16 @@ async fn one_redelivery_tick_expires_at_most_the_work_limit() {
                     delivery_id: seq,
                     deadline_ms: 1,
                     attempt: 1,
+                    retry_waiting: false,
                 },
             );
         inner.schedule_lease(consumer_id, seq, &lease);
     }
 
     assert_eq!(
-        inner.expire_due_leases(1, MAX_EXPIRED_LEASES_PER_TICK),
+        inner
+            .expire_due_leases(1, MAX_EXPIRED_LEASES_PER_TICK)
+            .unwrap(),
         MAX_EXPIRED_LEASES_PER_TICK
     );
     assert_eq!(inner.consumers[consumer_id].in_flight.len(), 500);
@@ -101,6 +105,7 @@ async fn rescheduled_lease_ignores_its_stale_deadline() {
         delivery_id: lease.delivery_id,
         deadline_ms: lease.deadline_ms + 100,
         attempt: lease.attempt,
+        retry_waiting: lease.retry_waiting,
     };
     inner
         .consumers
@@ -112,7 +117,7 @@ async fn rescheduled_lease_ignores_its_stale_deadline() {
         .deadline_ms = extended.deadline_ms;
     inner.schedule_lease(consumer_id, 1, &extended);
 
-    assert_eq!(inner.expire_due_leases(lease.deadline_ms, 10), 0);
+    assert_eq!(inner.expire_due_leases(lease.deadline_ms, 10).unwrap(), 0);
     assert_eq!(inner.next_lease_deadline(), Some(extended.deadline_ms));
 }
 

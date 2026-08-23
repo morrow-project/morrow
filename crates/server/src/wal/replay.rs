@@ -17,6 +17,7 @@ struct ReplayState {
     messages: HashMap<u64, PublishRecord>,
     partition_appends: HashMap<u64, PartitionAppendRecord>,
     consumers: HashMap<String, ReplayedConsumer>,
+    dead_letters: HashMap<u64, DeadLetterRecord>,
 }
 
 pub(super) fn replay_dir(dir: &Path) -> Result<ReplayOutput> {
@@ -58,6 +59,7 @@ pub(super) fn replay_dir(dir: &Path) -> Result<ReplayOutput> {
         messages: state.messages,
         partition_appends: state.partition_appends,
         consumers: state.consumers,
+        dead_letters: state.dead_letters,
         next_seq: state.max_seq + 1,
         next_delivery_id: state.max_delivery_id + 1,
         duration_ms: millis_since(started),
@@ -196,6 +198,14 @@ fn apply_record(kind: u8, body: &[u8], state: &mut ReplayState) -> Result<()> {
         KIND_CONSUMER_DELETE => {
             let record = decode_consumer_delete(body)?;
             state.consumers.remove(&record.consumer_id);
+        }
+        KIND_DEAD_LETTER => {
+            let record = decode_dead_letter(body)?;
+            state.dead_letters.insert(record.id, record);
+        }
+        KIND_DEAD_LETTER_PURGE => {
+            let record = decode_dead_letter_purge(body)?;
+            state.dead_letters.remove(&record.id);
         }
         _ => crate::broker_bail!("unknown WAL record kind {kind}"),
     }

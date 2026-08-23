@@ -8,6 +8,8 @@ pub(super) struct DurableBrokerState {
     pub(super) partition_sequences: BTreeMap<(String, u32, u64), u64>,
     pub(super) ready_consumers: BTreeSet<String>,
     pub(super) lease_deadlines: BinaryHeap<Reverse<LeaseDeadline>>,
+    pub(super) scheduled_deliveries: BinaryHeap<Reverse<ScheduledDelivery>>,
+    pub(super) dead_letters: BTreeMap<u64, DeadLetterRecord>,
     pub(super) compaction_latest: HashMap<CompactionKey, (u64, u64)>,
     pub(super) superseded_since_compaction: usize,
 }
@@ -18,6 +20,12 @@ pub(super) struct LeaseDeadline {
     pub(super) consumer_id: String,
     pub(super) seq: u64,
     pub(super) delivery_id: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) struct ScheduledDelivery {
+    pub(super) scheduled_at_ms: u64,
+    pub(super) seq: u64,
 }
 
 pub(super) struct ConnectionState {
@@ -71,6 +79,7 @@ pub(super) struct InFlight {
     pub(super) delivery_id: u64,
     pub(super) deadline_ms: u64,
     pub(super) attempt: u32,
+    pub(super) retry_waiting: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -190,6 +199,29 @@ pub(super) struct ConnectorResponse {
     pub(super) protocol_version: u32,
 }
 
+#[derive(Debug, serde::Serialize)]
+pub(super) struct DeadLettersResponse {
+    pub(super) count: usize,
+    pub(super) total_count: usize,
+    pub(super) next_offset: Option<usize>,
+    pub(super) records: Vec<DeadLetterResponse>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub(super) struct DeadLetterResponse {
+    pub(super) id: u64,
+    pub(super) source_seq: u64,
+    pub(super) consumer_id: String,
+    pub(super) source_stream: Option<String>,
+    pub(super) source_partition: Option<u32>,
+    pub(super) source_offset: Option<u64>,
+    pub(super) reason: String,
+    pub(super) attempt_count: u32,
+    pub(super) first_delivery_ms: u64,
+    pub(super) last_delivery_ms: u64,
+    pub(super) payload_bytes: usize,
+}
+
 #[derive(Debug, Default)]
 pub(super) struct ClusterApplicationMetrics {
     pub(super) delta_applications: AtomicU64,
@@ -207,6 +239,8 @@ pub(super) struct BrokerMetrics {
     pub(super) acknowledgements_total: AtomicU64,
     pub(super) nacks_total: AtomicU64,
     pub(super) redeliveries_total: AtomicU64,
+    pub(super) dead_letter_writes_total: AtomicU64,
+    pub(super) dead_letter_replay_outcomes_total: AtomicU64,
     pub(super) publish_latency_us: LatencyHistogram,
     pub(super) delivery_latency_us: LatencyHistogram,
 }

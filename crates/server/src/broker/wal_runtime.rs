@@ -32,11 +32,14 @@ enum WalCommand {
         delivery_id: u64,
         response: mpsc::Sender<Result<()>>,
     },
+    DeadLetter(DeadLetterRecord, mpsc::Sender<Result<()>>),
+    DeadLetterPurge(u64, mpsc::Sender<Result<()>>),
     FlushDue(mpsc::Sender<Result<()>>),
     Flush(mpsc::Sender<Result<()>>),
     Checkpoint {
         messages: Vec<PublishRecord>,
         consumers: Vec<ReplayedConsumer>,
+        dead_letters: Vec<DeadLetterRecord>,
         response: mpsc::Sender<Result<()>>,
     },
     Status {
@@ -124,6 +127,14 @@ impl WalRuntime {
         })
     }
 
+    pub(super) fn append_dead_letter(&self, record: &DeadLetterRecord) -> Result<()> {
+        self.request(|response| WalCommand::DeadLetter(record.clone(), response))
+    }
+
+    pub(super) fn purge_dead_letter(&self, id: u64) -> Result<()> {
+        self.request(|response| WalCommand::DeadLetterPurge(id, response))
+    }
+
     pub(super) async fn flush_due(&self) -> Result<()> {
         let runtime = self.clone();
         tokio::task::spawn_blocking(move || runtime.request(WalCommand::FlushDue))
@@ -142,12 +153,14 @@ impl WalRuntime {
         &self,
         messages: Vec<PublishRecord>,
         consumers: Vec<ReplayedConsumer>,
+        dead_letters: Vec<DeadLetterRecord>,
     ) -> Result<()> {
         let runtime = self.clone();
         tokio::task::spawn_blocking(move || {
             runtime.request(|response| WalCommand::Checkpoint {
                 messages,
                 consumers,
+                dead_letters,
                 response,
             })
         })
@@ -232,6 +245,12 @@ fn wal_worker(mut wal: Wal, receiver: mpsc::Receiver<WalCommand>) {
                 let result = wal.append_ack(seq, &consumer_id, delivery_id).map(|_| ());
                 let _ = response.send(result);
             }
+            WalCommand::DeadLetter(record, response) => {
+                let _ = response.send(wal.append_dead_letter(&record));
+            }
+            WalCommand::DeadLetterPurge(id, response) => {
+                let _ = response.send(wal.purge_dead_letter(id));
+            }
             WalCommand::FlushDue(response) => {
                 let _ = response.send(wal.flush_due());
             }
@@ -241,9 +260,10 @@ fn wal_worker(mut wal: Wal, receiver: mpsc::Receiver<WalCommand>) {
             WalCommand::Checkpoint {
                 messages,
                 consumers,
+                dead_letters,
                 response,
             } => {
-                let _ = response.send(wal.checkpoint(messages, consumers));
+                let _ = response.send(wal.checkpoint(messages, consumers, dead_letters));
             }
             WalCommand::Status {
                 retained_message_count,

@@ -283,6 +283,7 @@ fn consumer_metadata_upsert_and_delete_are_consensus_managed() {
         ack_timeout_ms: 30_000,
         max_in_flight: 1024,
         start_position: protocol::StartPosition::Latest,
+        retry_policy: protocol::RetryPolicy::default(),
     };
     assert_eq!(
         state.apply_command(BrokerCommand::ConsumerUpsert {

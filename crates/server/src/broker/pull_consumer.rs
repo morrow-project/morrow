@@ -25,6 +25,7 @@ impl Morrow {
         name: String,
         filter_subject: String,
         start: protocol::StartPosition,
+        retry_policy: protocol::RetryPolicy,
     ) -> Result<()> {
         protocol::validate_identifier("consumer name", &name)?;
         crate::broker_ensure!(
@@ -65,6 +66,7 @@ impl Morrow {
             ack_timeout_ms,
             max_in_flight,
             start_position: start,
+            retry_policy,
         };
         let cursors = {
             let inner = self.inner.lock().await;
@@ -382,11 +384,29 @@ impl Morrow {
                     "NACK delay exceeds server limit {}",
                     self.config.max_ack_timeout_ms
                 );
+                let (attempt, policy) = {
+                    let inner = self.inner.lock().await;
+                    let lease = inner
+                        .consumers
+                        .get(&consumer_id)
+                        .and_then(|consumer| consumer.in_flight.get(&seq))
+                        .filter(|lease| lease.delivery_id == delivery_id)
+                        .ok_or_else(|| BrokerError::msg("stale or unknown delivery identity"))?;
+                    (
+                        lease.attempt,
+                        inner.consumers[&consumer_id].record.retry_policy.clone(),
+                    )
+                };
+                let requested_delay = if delay_ms == 0 {
+                    policy.delay_ms(attempt.saturating_add(1))
+                } else {
+                    delay_ms
+                };
                 let deadline = self
                     .hooks
                     .clock
                     .now_ms()
-                    .checked_add(delay_ms)
+                    .checked_add(requested_delay)
                     .ok_or_else(|| BrokerError::msg("NACK deadline overflow"))?;
                 self.update_pull_lease(&consumer_id, seq, delivery_id, deadline)
                     .await?;
@@ -473,6 +493,7 @@ impl Morrow {
             delivery_id,
             deadline_ms,
             attempt: lease.attempt,
+            retry_waiting: lease.retry_waiting,
         };
         inner.wal.append_delivery_lease(&record)?;
         inner

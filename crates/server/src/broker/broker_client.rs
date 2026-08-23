@@ -42,9 +42,16 @@ impl Morrow {
                     name,
                     filter_subject,
                     start,
+                    retry_policy,
                 } => {
-                    self.create_pull_consumer(connection_id, name, filter_subject, start)
-                        .await
+                    self.create_pull_consumer(
+                        connection_id,
+                        name,
+                        filter_subject,
+                        start,
+                        retry_policy,
+                    )
+                    .await
                 }
                 Command::ConsumerDelete { name } => {
                     self.delete_pull_consumer(connection_id, name).await
@@ -369,6 +376,7 @@ impl Morrow {
                         ack_timeout_ms,
                         max_in_flight,
                         start_position: start,
+                        retry_policy: protocol::RetryPolicy::default(),
                     };
                     (
                         Some((consumer_id, record, sid, protocol_version)),
