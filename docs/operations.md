@@ -55,7 +55,10 @@ The authenticated `GET /metrics` endpoint exposes bounded-cardinality
 Prometheus text-format metrics for connections, subscriptions, consumers, WAL
 usage, readiness, and resource-quota rejections. It deliberately does not
 include subjects, client IDs, message IDs, payloads, credentials, or other
-unbounded user values.
+unbounded user values. The metric names include publish and delivery counters,
+partition-log read/write counters, latency histograms in microseconds,
+partition retention and recovery, WAL and compaction gauges, cluster and route
+state, middleware execution counters, and quota rejections.
 
 Middleware execution, drop, reject, and failure counters are included in the
 same endpoint.
@@ -70,9 +73,11 @@ as `/api/v1/health/live` and `/api/v1/health/ready`.
 intentionally a bounded summary; middleware payloads and credentials are not
 included.
 
-The server emits exporter-neutral `tracing` spans named `morrow.publish` and
-`morrow.delivery.prepare`, plus `morrow.command` for client command
-boundaries. They carry only bounded identifiers and payload sizes.
+The server emits exporter-neutral `tracing` spans named `morrow.publish`,
+`morrow.delivery.prepare`, `morrow.partition.read`, `morrow.partition.write`,
+and `morrow.partition.flush`, plus `morrow.command` for client command
+boundaries and `morrow.middleware` for middleware stage/generation boundaries.
+They carry only bounded identifiers and payload sizes.
 An OpenTelemetry-compatible tracing subscriber can export these spans; the
 binary currently does not install an OTLP exporter by default.
 

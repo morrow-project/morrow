@@ -11,6 +11,7 @@ impl Morrow {
         self.metrics
             .partition_reads_total
             .fetch_add(1, Ordering::Relaxed);
+        let span = tracing::info_span!("morrow.partition.read");
         let partition_logs = self.partition_logs.clone();
         let permit = self
             .storage_permits
@@ -22,6 +23,7 @@ impl Morrow {
             let _permit = permit;
             partition_logs.load_record(&metadata)
         })
+        .instrument(span)
         .await
         .map_err(|err| BrokerError::with_source("partition read worker failed", err))?
     }
@@ -47,6 +49,7 @@ impl Morrow {
             let _permit = permit;
             partition_logs.flush_partition(&stream, partition)
         })
+        .instrument(tracing::info_span!("morrow.partition.flush"))
         .await
         .map_err(|err| BrokerError::with_source("partition flush worker failed", err))?
     }
@@ -331,6 +334,7 @@ impl Morrow {
                 let _permit = permit;
                 partition_logs.append_envelope(pending_envelope)
             })
+            .instrument(tracing::info_span!("morrow.partition.write"))
             .await
             .map_err(|err| BrokerError::with_source("partition append worker failed", err))??;
             self.metrics
