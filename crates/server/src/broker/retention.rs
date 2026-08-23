@@ -97,6 +97,7 @@ fn message_envelope(record: &PublishRecord) -> Result<MessageEnvelope> {
         headers: record.headers.clone(),
         timestamp_ms: record.timestamp_ms,
         reply_to: record.reply_to.clone(),
+        schema_id: None,
         payload: record.payload.clone(),
         partitioning_epoch: record.partitioning_epoch,
         leader_epoch: record.leader_epoch,

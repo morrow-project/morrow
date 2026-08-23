@@ -100,6 +100,7 @@ impl FakeClusterRuntime {
                     headers: record.headers,
                     timestamp_ms: record.timestamp_ms,
                     reply_to: record.reply_to,
+                    schema_id: None,
                     payload: record.payload,
                     partitioning_epoch: record.partitioning_epoch,
                     leader_epoch: record.leader_epoch,

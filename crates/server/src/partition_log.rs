@@ -54,6 +54,9 @@ pub struct MessageEnvelope {
     pub headers: Vec<MessageHeader>,
     pub timestamp_ms: u64,
     pub reply_to: Option<String>,
+    /// Immutable registry identifier; routing never deserializes the payload.
+    #[serde(default)]
+    pub schema_id: Option<u64>,
     pub payload: Vec<u8>,
     pub partitioning_epoch: u64,
     pub leader_epoch: u64,
