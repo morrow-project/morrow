@@ -34,10 +34,14 @@ an external audit stream and should treat a failed verification as an
 integrity incident.
 
 The current default bootstrap maps unauthenticated connection admission to the
-`default` tenant. Authentication-to-tenant identity mapping and propagation of
-tenant scope through every protocol/API, connector, middleware, storage, and
-cluster endpoint remain required integration work before multi-tenant mode is
-advertised as complete.
+`default` tenant. Authenticated clients can declare a bounded tenant,
+namespace, external subject, and expiry in configuration; mixed-tenant mode
+requires the tenant/namespace subject prefix. To enable storage encryption in
+the broker, set `encryption_key_dir` to a directory containing exact
+32-byte `key-<version>.bin` files and optionally set
+`encryption_active_key_version`; startup then passes one key ring to both WAL
+and partition-log recovery and append paths. The key directory contains key
+material and must be protected separately from the broker configuration.
 
 Break-glass access is explicitly out of band: an operator must use a separate
 identity, a tenant-scoped policy snapshot, and an audited change window. The

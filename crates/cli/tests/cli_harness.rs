@@ -294,6 +294,8 @@ impl Harness {
             admin_tls: None,
             quotas: Default::default(),
             wal_dir: wal_dir.path().to_path_buf(),
+            encryption_key_dir: None,
+            encryption_active_key_version: 1,
             wal_segment_bytes: server::wal::DEFAULT_WAL_SEGMENT_BYTES,
             fsync_interval_ms: 1,
             max_payload,

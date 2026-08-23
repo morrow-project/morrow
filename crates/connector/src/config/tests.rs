@@ -85,6 +85,8 @@ async fn secure_secret_permissions_are_used_for_tls_authentication() {
         admin_tls: None,
         quotas: Default::default(),
         wal_dir: dir.path().join("wal"),
+        encryption_key_dir: None,
+        encryption_active_key_version: 1,
         wal_segment_bytes: server::wal::DEFAULT_WAL_SEGMENT_BYTES,
         fsync_interval_ms: 1,
         max_payload: 1024 * 1024,

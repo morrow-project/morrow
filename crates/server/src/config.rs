@@ -21,6 +21,8 @@ pub struct Config {
     pub admin_tls: Option<TlsConfig>,
     pub quotas: ResourceQuotaConfig,
     pub wal_dir: PathBuf,
+    pub encryption_key_dir: Option<PathBuf>,
+    pub encryption_active_key_version: u32,
     pub wal_segment_bytes: u64,
     pub fsync_interval_ms: u64,
     pub max_payload: usize,
@@ -164,6 +166,11 @@ impl Config {
         let admin_tls = get_named_tls_config(value, "admin_tls")?;
         let quotas = get_resource_quotas(value)?;
         let wal_dir = PathBuf::from(get_string(value, "wal_dir")?.unwrap_or("./morrow-wal"));
+        let encryption_key_dir = get_string(value, "encryption_key_dir")?.map(PathBuf::from);
+        let encryption_active_key_version = get_u64(value, "encryption_active_key_version")?
+            .unwrap_or(1)
+            .try_into()
+            .context("config field encryption_active_key_version is too large")?;
         let wal_segment_bytes =
             get_u64(value, "wal_segment_bytes")?.unwrap_or(crate::wal::DEFAULT_WAL_SEGMENT_BYTES);
         let fsync_interval_ms = get_u64(value, "fsync_interval_ms")?.unwrap_or(5);
@@ -193,6 +200,8 @@ impl Config {
             admin_tls,
             quotas,
             wal_dir,
+            encryption_key_dir,
+            encryption_active_key_version,
             wal_segment_bytes,
             fsync_interval_ms,
             max_payload: max_payload
@@ -218,6 +227,17 @@ impl Config {
 
     pub fn fsync_interval(&self) -> Duration {
         Duration::from_millis(self.fsync_interval_ms)
+    }
+
+    pub fn storage_encryption(&self) -> Result<Option<std::sync::Arc<crate::encryption::KeyRing>>> {
+        let Some(directory) = &self.encryption_key_dir else {
+            return Ok(None);
+        };
+        let provider = std::sync::Arc::new(crate::encryption::FileKeyProvider::new(directory));
+        Ok(Some(std::sync::Arc::new(crate::encryption::KeyRing::new(
+            provider,
+            crate::encryption::KeyVersion::new(self.encryption_active_key_version),
+        )?)))
     }
 
     pub fn validate(&self) -> Result<()> {

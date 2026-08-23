@@ -5,6 +5,7 @@ use std::io::{self, Read, Write};
 pub(super) const SEGMENT_HEADER: &[u8] = b"BROKERLOG\x01\n";
 pub(super) const SEGMENT_HEADER_LEN: u64 = SEGMENT_HEADER.len() as u64;
 pub(super) const BATCH_PREFIX_LEN: u64 = 8;
+pub(super) const ENCRYPTED_BODY_MAGIC: &[u8] = b"MORROW-PLOG-ENC1\n";
 const MAX_BATCH_BYTES: usize = 64 * 1024 * 1024;
 
 pub(super) struct EncodedBatch {
@@ -32,6 +33,31 @@ pub(super) fn encode_batch_with_len(envelope: &MessageEnvelope) -> Result<Encode
     })
 }
 
+pub(super) fn encode_encrypted_batch_with_len(
+    envelope: &MessageEnvelope,
+    encryption: &std::sync::Arc<crate::encryption::KeyRing>,
+) -> Result<EncodedBatch> {
+    let body = serde_json::to_vec(envelope).context("encoding partition-log envelope")?;
+    let encrypted = encryption.encrypt(&body, b"partition-log")?;
+    let mut protected = ENCRYPTED_BODY_MAGIC.to_vec();
+    protected.extend(
+        serde_json::to_vec(&encrypted)
+            .map_err(|error| crate::error::BrokerError::msg(error.to_string()))?,
+    );
+    crate::broker_ensure!(
+        protected.len() <= u32::MAX as usize,
+        "partition-log envelope is too large"
+    );
+    let mut batch = Vec::with_capacity(BATCH_PREFIX_LEN as usize + protected.len());
+    batch.extend_from_slice(&(protected.len() as u32).to_le_bytes());
+    batch.extend_from_slice(&crc32fast::hash(&protected).to_le_bytes());
+    batch.extend_from_slice(&protected);
+    Ok(EncodedBatch {
+        len: batch.len() as u64,
+        bytes: batch,
+    })
+}
+
 pub(super) fn envelope_checksum(envelope: &MessageEnvelope) -> Result<u32> {
     Ok(crc32fast::hash(
         &serde_json::to_vec(envelope).context("encoding partition-log envelope")?,
@@ -39,6 +65,13 @@ pub(super) fn envelope_checksum(envelope: &MessageEnvelope) -> Result<u32> {
 }
 
 pub(super) fn read_batch<R: Read>(file: &mut R) -> io::Result<Option<(MessageEnvelope, u64)>> {
+    read_batch_with_key(file, None)
+}
+
+pub(super) fn read_batch_with_key<R: Read>(
+    file: &mut R,
+    encryption: Option<&std::sync::Arc<crate::encryption::KeyRing>>,
+) -> io::Result<Option<(MessageEnvelope, u64)>> {
     let mut length = [0; 4];
     let read = file.read(&mut length)?;
     if read == 0 {
@@ -67,6 +100,22 @@ pub(super) fn read_batch<R: Read>(file: &mut R) -> io::Result<Option<(MessageEnv
             "partition-log batch checksum mismatch",
         ));
     }
+    let body = if body.starts_with(ENCRYPTED_BODY_MAGIC) {
+        let encryption = encryption.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "encrypted partition log requires key",
+            )
+        })?;
+        let envelope: crate::encryption::EncryptedBlob =
+            serde_json::from_slice(&body[ENCRYPTED_BODY_MAGIC.len()..])
+                .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
+        encryption
+            .decrypt(&envelope, b"partition-log")
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?
+    } else {
+        body
+    };
     let envelope = serde_json::from_slice(&body).map_err(|err| {
         io::Error::new(
             io::ErrorKind::InvalidData,

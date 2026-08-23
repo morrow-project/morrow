@@ -8,16 +8,22 @@ impl Morrow {
 
     pub(crate) fn open_with_hooks(config: Config, hooks: BrokerHooks) -> Result<Self> {
         config.validate()?;
-        let (mut wal, mut replay) = Wal::open(
+        let encryption = config.storage_encryption()?;
+        let (mut wal, mut replay) = Wal::open_with_encryption(
             &config.wal_dir,
             config.fsync_interval(),
             config.wal_segment_bytes,
+            encryption.clone(),
         )?;
         if let Some(cluster) = &config.cluster {
             wal.namespace_delivery_ids(cluster.node_id);
         }
-        let (partition_logs, mut envelopes) =
-            PartitionLogSet::open(&config.wal_dir, &config.streams, config.wal_segment_bytes)?;
+        let (partition_logs, mut envelopes) = PartitionLogSet::open_with_encryption(
+            &config.wal_dir,
+            &config.streams,
+            config.wal_segment_bytes,
+            encryption,
+        )?;
         partition_logs.enforce_retention(&mut envelopes, &config.streams, hooks.clock.now_ms())?;
         let mut envelope_seqs = envelopes
             .iter()
