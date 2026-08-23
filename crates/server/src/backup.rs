@@ -623,7 +623,7 @@ fn collect_files(root: &Path, current: &Path, files: &mut Vec<PathBuf>) -> Resul
         let path = entry.path();
         if path.is_dir() {
             collect_files(root, &path, files)?;
-        } else if path.extension().is_some_and(|extension| extension != "tmp") {
+        } else if !path.extension().is_some_and(|extension| extension == "tmp") {
             files.push(path.strip_prefix(root).expect("root prefix").to_path_buf());
         }
     }
@@ -1038,7 +1038,7 @@ mod tests {
     #[test]
     fn orphan_cleanup_is_scoped_and_object_keys_cannot_escape_store() {
         let source = tempdir().unwrap();
-        fs::write(source.path().join("metadata"), b"state").unwrap();
+        fs::write(source.path().join("metadata.json"), b"state").unwrap();
         let store = Arc::new(MemoryObjectStore::default());
         let engine = BackupEngine::new(store.clone());
         let manifest = engine
@@ -1186,6 +1186,37 @@ mod tests {
             reader.read_offset("orders", 0, 2).unwrap().unwrap().payload,
             b"local"
         );
+    }
+
+    #[test]
+    fn restore_rejects_tampered_or_missing_objects_without_publishing_staging_data() {
+        let source = tempdir().unwrap();
+        fs::write(source.path().join("metadata.json"), b"state").unwrap();
+        let store = Arc::new(MemoryObjectStore::default());
+        let engine = BackupEngine::new(store.clone());
+        let manifest = engine
+            .create_full(source.path(), Vec::new(), "cluster-a", "faults", 1)
+            .unwrap();
+        let mut tampered = manifest.clone();
+        tampered.objects[0].sha256 = "00".repeat(32);
+        let destination = tempdir().unwrap().path().join("tampered");
+        assert!(
+            engine
+                .restore(&tampered, &destination, "cluster-b")
+                .is_err()
+        );
+        assert!(!destination.exists());
+        assert!(!destination.with_extension("restore.tmp").exists());
+
+        store.delete(&manifest.objects[0].key).unwrap();
+        let missing_destination = tempdir().unwrap().path().join("missing");
+        assert!(
+            engine
+                .restore(&manifest, &missing_destination, "cluster-b")
+                .is_err()
+        );
+        assert!(!missing_destination.exists());
+        assert!(!missing_destination.with_extension("restore.tmp").exists());
     }
 
     #[test]
