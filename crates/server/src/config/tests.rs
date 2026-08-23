@@ -10,6 +10,19 @@ fn recognizes_server_help_flags() {
 }
 
 #[test]
+fn uses_defaults_when_no_config_path_is_supplied() {
+    let config = Config::load_from_args_iter([OsString::from("morrow-server")]).unwrap();
+
+    assert_eq!(config.listen, "127.0.0.1:4222".parse().unwrap());
+    assert_eq!(config.wal_dir, PathBuf::from("./morrow-wal"));
+    assert_eq!(config.max_payload, 1_048_576);
+    assert!(config.http_listen.is_none());
+    assert!(config.tls.is_none());
+    assert!(!config.auth.enabled);
+    assert!(config.cluster.is_none());
+}
+
+#[test]
 fn parses_json_config() {
     let value = serde_json::json!({
         "listen": "127.0.0.1:4223",
