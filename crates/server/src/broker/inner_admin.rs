@@ -304,6 +304,38 @@ impl Morrow {
         response
     }
 
+    pub(super) async fn subscriptions_response_page(
+        &self,
+        offset: usize,
+        limit: usize,
+    ) -> SubscriptionsPageResponse {
+        let response = self.subscriptions_response().await;
+        let durable_total_count = response.durable_consumers.len();
+        let transient_total_count = response.transient_subscriptions.len();
+        let durable_consumers = response
+            .durable_consumers
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .collect::<Vec<_>>();
+        let transient_subscriptions = response
+            .transient_subscriptions
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .collect::<Vec<_>>();
+        SubscriptionsPageResponse {
+            durable_next_offset: (offset + durable_consumers.len() < durable_total_count)
+                .then_some(offset + durable_consumers.len()),
+            transient_next_offset: (offset + transient_subscriptions.len() < transient_total_count)
+                .then_some(offset + transient_subscriptions.len()),
+            durable_consumers,
+            transient_subscriptions,
+            durable_total_count,
+            transient_total_count,
+        }
+    }
+
     pub(super) async fn wal_status_response(&self) -> WalStatus {
         let inner = self.inner.lock().await;
         inner

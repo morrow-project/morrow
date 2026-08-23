@@ -306,6 +306,16 @@ pub(super) struct SubscriptionsResponse {
 }
 
 #[derive(Debug, serde::Serialize)]
+pub(super) struct SubscriptionsPageResponse {
+    pub(super) durable_consumers: Vec<DurableConsumerResponse>,
+    pub(super) transient_subscriptions: Vec<TransientSubscriptionResponse>,
+    pub(super) durable_total_count: usize,
+    pub(super) durable_next_offset: Option<usize>,
+    pub(super) transient_total_count: usize,
+    pub(super) transient_next_offset: Option<usize>,
+}
+
+#[derive(Debug, serde::Serialize)]
 pub(super) struct StreamsResponse {
     pub(super) streams: Vec<StreamResponse>,
     pub(super) recovery: crate::partition_log::PartitionRecoveryStatus,

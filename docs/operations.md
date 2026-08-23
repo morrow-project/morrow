@@ -84,6 +84,9 @@ binary currently does not install an OTLP exporter by default.
 High-cardinality connection listings can be paged with
 `/api/v1/connections?limit=100&offset=0`. The server clamps the page size to
 1,000 and returns `total_count` plus `next_offset` when more results remain.
+The versioned subscriptions listing uses the same bounded `limit` and `offset`
+parameters and returns separate totals and continuation offsets for durable
+consumers and transient subscriptions.
 
 When `http_listen` is configured, set an admin token and protect the listener.
 The JSON endpoints include `/cluster`, `/connections`, `/subscriptions`,

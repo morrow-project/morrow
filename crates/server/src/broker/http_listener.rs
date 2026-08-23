@@ -143,8 +143,10 @@ impl Morrow {
                     .await
             }
             "/quotas" | "/api/v1/quotas" => self.write_quotas_response(&mut stream).await,
-            "/subscriptions" | "/api/v1/subscriptions" => {
-                self.write_subscriptions_response(&mut stream).await
+            "/subscriptions" => self.write_subscriptions_response(&mut stream, None).await,
+            "/api/v1/subscriptions" => {
+                self.write_subscriptions_response(&mut stream, Some(parse_page(query)))
+                    .await
             }
             "/streams" | "/api/v1/streams" => self.write_streams_response(&mut stream).await,
             "/wal" | "/api/v1/storage" => self.write_wal_response(&mut stream).await,
@@ -181,9 +183,15 @@ impl Morrow {
     async fn write_subscriptions_response<W: AsyncWrite + Unpin>(
         &self,
         stream: &mut W,
+        page: Option<(usize, usize)>,
     ) -> Result<()> {
-        let body = serde_json::to_vec(&self.subscriptions_response().await)
-            .context("serializing HTTP subscriptions response")?;
+        let body = match page {
+            Some((offset, limit)) => {
+                serde_json::to_vec(&self.subscriptions_response_page(offset, limit).await)
+            }
+            None => serde_json::to_vec(&self.subscriptions_response().await),
+        }
+        .context("serializing HTTP subscriptions response")?;
         write_http_response(stream, "200 OK", "application/json", &body).await
     }
 

@@ -76,6 +76,16 @@ async fn http_subscriptions_endpoint_reports_durable_and_transient_state() {
 }
 
 #[tokio::test]
+async fn versioned_subscriptions_endpoint_reports_bounded_pagination() {
+    let scenario = Scenario::new();
+    let response = http_request(scenario.broker(), "/api/v1/subscriptions?limit=1").await;
+    assert!(response.contains("\"durable_total_count\":0"));
+    assert!(response.contains("\"transient_total_count\":0"));
+    assert!(response.contains("\"durable_next_offset\":null"));
+    assert!(response.contains("\"transient_next_offset\":null"));
+}
+
+#[tokio::test]
 async fn http_streams_endpoint_reports_effective_bindings() {
     let dir = TempDir::new().unwrap();
     let clock = Arc::new(ManualClock::new(1_000));
