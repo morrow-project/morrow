@@ -9,6 +9,9 @@ use crate::error::{BrokerError, Result};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
+    fs::{File, OpenOptions},
+    io::{BufRead, BufReader, Write},
+    path::{Path, PathBuf},
     sync::{Arc, RwLock},
 };
 
@@ -255,6 +258,7 @@ pub struct AuditRecord {
 pub struct AuditLog {
     records: Vec<AuditRecord>,
     max_records: usize,
+    path: Option<PathBuf>,
 }
 
 impl Default for AuditLog {
@@ -262,6 +266,7 @@ impl Default for AuditLog {
         Self {
             records: Vec::new(),
             max_records: 10_000,
+            path: None,
         }
     }
 }
@@ -272,6 +277,36 @@ impl AuditLog {
         Ok(Self {
             records: Vec::new(),
             max_records,
+            path: None,
+        })
+    }
+
+    pub fn open(path: impl AsRef<Path>, max_records: usize) -> Result<Self> {
+        crate::broker_ensure!(max_records > 0, "audit log capacity must be positive");
+        let path = path.as_ref().to_path_buf();
+        let mut records = Vec::new();
+        if path.exists() {
+            let file = File::open(&path)
+                .map_err(|error| BrokerError::with_source("opening audit log", error))?;
+            for line in BufReader::new(file).lines() {
+                let line =
+                    line.map_err(|error| BrokerError::with_source("reading audit log", error))?;
+                if line.trim().is_empty() {
+                    continue;
+                }
+                records.push(
+                    serde_json::from_str(&line).map_err(|error| {
+                        BrokerError::with_source("decoding audit record", error)
+                    })?,
+                );
+                crate::broker_ensure!(records.len() <= max_records, "audit log capacity exceeded");
+            }
+        }
+        Self::verify_export(&records)?;
+        Ok(Self {
+            records,
+            max_records,
+            path: Some(path),
         })
     }
 
@@ -286,11 +321,25 @@ impl AuditLog {
             .last()
             .map_or_else(|| "0".repeat(64), |record| record.hash.clone());
         let hash = audit_hash(&event, &previous_hash)?;
-        self.records.push(AuditRecord {
+        let record = AuditRecord {
             event,
             previous_hash,
             hash,
-        });
+        };
+        if let Some(path) = &self.path {
+            let mut file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .map_err(|error| BrokerError::with_source("opening audit log for append", error))?;
+            serde_json::to_writer(&mut file, &record)
+                .map_err(|error| BrokerError::with_source("encoding audit record", error))?;
+            file.write_all(b"\n")
+                .map_err(|error| BrokerError::with_source("writing audit record", error))?;
+            file.sync_data()
+                .map_err(|error| BrokerError::with_source("syncing audit record", error))?;
+        }
+        self.records.push(record);
         Ok(self.records.last().expect("record was appended"))
     }
 
@@ -342,6 +391,7 @@ fn verify_audit_records(records: &[AuditRecord]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     fn scope() -> ResourceScope {
         ResourceScope {
@@ -419,5 +469,31 @@ mod tests {
         let mut reordered = log.records().to_vec();
         reordered.swap(0, 1);
         assert!(AuditLog::verify_export(&reordered).is_err());
+    }
+
+    #[test]
+    fn persisted_audit_chain_survives_reopen_and_rejects_tampering() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("audit.log");
+        let mut log = AuditLog::open(&path, 8).unwrap();
+        log.append(AuditEvent {
+            sequence: 0,
+            timestamp_ms: 1,
+            actor: "operator".to_string(),
+            tenant: Some(TenantId::new("tenant-a").unwrap()),
+            action: "policy.update".to_string(),
+            resource: "tenant-a/orders".to_string(),
+            outcome: "success".to_string(),
+            details: BTreeMap::new(),
+        })
+        .unwrap();
+        drop(log);
+        let reopened = AuditLog::open(&path, 8).unwrap();
+        assert_eq!(reopened.records().len(), 1);
+        let mut bytes = std::fs::read(&path).unwrap();
+        let index = bytes.len() - 3;
+        bytes[index] ^= 1;
+        std::fs::write(&path, bytes).unwrap();
+        assert!(AuditLog::open(&path, 8).is_err());
     }
 }

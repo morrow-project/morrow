@@ -192,9 +192,10 @@ impl Morrow {
                 max_background_tasks: config.quotas.max_transient_subscriptions,
             });
         let policy = Arc::new(crate::tenancy::PolicyStore::default());
-        let audit = Arc::new(std::sync::Mutex::new(
-            crate::tenancy::AuditLog::with_capacity(10_000)?,
-        ));
+        let audit = Arc::new(std::sync::Mutex::new(crate::tenancy::AuditLog::open(
+            config.wal_dir.join("audit.log"),
+            10_000,
+        )?));
         for (index, (subject, client)) in config.auth.clients.iter().enumerate() {
             let role_name = format!("static-client-{index}");
             let mut permissions = std::collections::BTreeSet::new();
