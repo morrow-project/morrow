@@ -120,7 +120,11 @@ async fn scheduled_publish_waits_for_committed_delivery_time() {
     subscriber.subscribe("orders/*", "sid1").await;
     subscriber.ping_roundtrip().await;
     publisher
-        .publish_hpub("orders/created", &[("Morrow-Scheduled-At", "2000")], b"hello")
+        .publish_hpub(
+            "orders/created",
+            &[("Morrow-Scheduled-At", "2000")],
+            b"hello",
+        )
         .await;
 
     scenario.tick_redelivery().await;

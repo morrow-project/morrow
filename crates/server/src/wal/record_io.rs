@@ -258,7 +258,10 @@ pub(super) fn decode_dead_letter(body: &[u8]) -> Result<DeadLetterRecord> {
     serde_json::from_slice(body).context("decoding dead-letter record")
 }
 pub(super) fn decode_dead_letter_purge(body: &[u8]) -> Result<DeadLetterPurgeRecord> {
-    let mut cursor = Cursor { bytes: body, pos: 0 };
+    let mut cursor = Cursor {
+        bytes: body,
+        pos: 0,
+    };
     let record = DeadLetterPurgeRecord { id: cursor.u64()? };
     cursor.finish()?;
     Ok(record)

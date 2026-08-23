@@ -1,5 +1,5 @@
-use super::*;
 use super::delivery_index::scheduled_at_ms;
+use super::*;
 
 impl Morrow {
     pub fn open(config: Config) -> Result<Self> {
@@ -274,7 +274,9 @@ impl Morrow {
         let messages = inner.messages.values().cloned().collect::<Vec<_>>();
         let consumers = inner.replayed_consumers();
         let dead_letters = inner.dead_letters.values().cloned().collect::<Vec<_>>();
-        self.wal.checkpoint(messages, consumers, dead_letters).await?;
+        self.wal
+            .checkpoint(messages, consumers, dead_letters)
+            .await?;
         self.wal.flush().await?;
         Ok(())
     }
@@ -345,7 +347,12 @@ impl Morrow {
         let scheduled_due_lag_ms = inner
             .scheduled_deliveries
             .peek()
-            .map(|entry| self.hooks.clock.now_ms().saturating_sub(entry.0.scheduled_at_ms))
+            .map(|entry| {
+                self.hooks
+                    .clock
+                    .now_ms()
+                    .saturating_sub(entry.0.scheduled_at_ms)
+            })
             .unwrap_or_default();
         let dead_letter_records = inner.dead_letters.len();
         let compaction_candidates = inner.superseded_since_compaction;
@@ -397,20 +404,30 @@ impl Morrow {
         ));
         metrics.push_str("# HELP morrow_scheduled_delivery_depth Current scheduled messages.\n");
         metrics.push_str("# TYPE morrow_scheduled_delivery_depth gauge\n");
-        metrics.push_str(&format!("morrow_scheduled_delivery_depth {scheduled_depth}\n"));
+        metrics.push_str(&format!(
+            "morrow_scheduled_delivery_depth {scheduled_depth}\n"
+        ));
         metrics.push_str("# HELP morrow_scheduled_delivery_due_lag_ms Age of the oldest due scheduled message.\n");
         metrics.push_str("# TYPE morrow_scheduled_delivery_due_lag_ms gauge\n");
-        metrics.push_str(&format!("morrow_scheduled_delivery_due_lag_ms {scheduled_due_lag_ms}\n"));
+        metrics.push_str(&format!(
+            "morrow_scheduled_delivery_due_lag_ms {scheduled_due_lag_ms}\n"
+        ));
         metrics.push_str("# HELP morrow_retry_exhausted_total Dead-letter terminal records recovered by the broker.\n");
         metrics.push_str("# TYPE morrow_retry_exhausted_total gauge\n");
-        metrics.push_str(&format!("morrow_retry_exhausted_total {dead_letter_records}\n"));
+        metrics.push_str(&format!(
+            "morrow_retry_exhausted_total {dead_letter_records}\n"
+        ));
         metrics.push_str("# HELP morrow_dead_letter_writes_total Durable dead-letter writes.\n");
         metrics.push_str("# TYPE morrow_dead_letter_writes_total counter\n");
         metrics.push_str(&format!(
             "morrow_dead_letter_writes_total {}\n",
-            self.metrics.dead_letter_writes_total.load(Ordering::Relaxed)
+            self.metrics
+                .dead_letter_writes_total
+                .load(Ordering::Relaxed)
         ));
-        metrics.push_str("# HELP morrow_dead_letter_replay_outcomes_total Dead-letter replay outcomes.\n");
+        metrics.push_str(
+            "# HELP morrow_dead_letter_replay_outcomes_total Dead-letter replay outcomes.\n",
+        );
         metrics.push_str("# TYPE morrow_dead_letter_replay_outcomes_total counter\n");
         metrics.push_str(&format!(
             "morrow_dead_letter_replay_outcomes_total {}\n",

@@ -80,9 +80,7 @@ async fn exhausted_pull_delivery_is_written_once_to_dead_letters() {
     let mut scenario = Scenario::new();
     let mut consumer = TestClient::connect_pull(scenario.broker(), "puller", 25).await;
     consumer
-        .write_line(
-            "CONSUMER CREATE worker orders/* @earliest retry=1:fixed:0:1000:0:dead_letter",
-        )
+        .write_line("CONSUMER CREATE worker orders/* @earliest retry=1:fixed:0:1000:0:dead_letter")
         .await;
     assert_eq!(consumer.read_frame().await, "C-OK CREATE worker\r\n");
     let mut publisher = scenario.connect_durable("publisher", 25).await;
@@ -106,7 +104,10 @@ async fn exhausted_pull_delivery_is_written_once_to_dead_letters() {
     assert_eq!(dead_letter.attempt_count, 1);
     assert!(dead_letter.payload.is_empty());
     let state_consumer = inner.consumers.get(&dead_letter.consumer_id).unwrap();
-    assert_eq!(state_consumer.cursors.committed_offset("orders", 0), Some(1));
+    assert_eq!(
+        state_consumer.cursors.committed_offset("orders", 0),
+        Some(1)
+    );
     drop(inner);
     consumer.disconnect().await;
     publisher.disconnect().await;

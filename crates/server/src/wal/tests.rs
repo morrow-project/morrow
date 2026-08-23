@@ -228,7 +228,8 @@ fn checkpoint_removes_covered_segments() {
         acked: HashSet::new(),
     };
 
-    wal.checkpoint(vec![first, second], vec![replayed], Vec::new()).unwrap();
+    wal.checkpoint(vec![first, second], vec![replayed], Vec::new())
+        .unwrap();
 
     assert!(wal.sealed_segments.is_empty());
     assert_eq!(segmented_paths(dir.path()).unwrap().len(), 1);

@@ -23,7 +23,10 @@ impl DurableBrokerState {
     pub(super) fn activate_due_scheduled(&mut self, now: u64, limit: usize) -> usize {
         let mut activated = 0;
         while activated < limit {
-            let Some(entry) = self.scheduled_deliveries.peek().map(|entry| entry.0.clone())
+            let Some(entry) = self
+                .scheduled_deliveries
+                .peek()
+                .map(|entry| entry.0.clone())
             else {
                 break;
             };
@@ -37,7 +40,11 @@ impl DurableBrokerState {
                 .and_then(scheduled_at_ms)
                 .is_some_and(|scheduled_at_ms| scheduled_at_ms == entry.scheduled_at_ms)
             {
-                if let Some(subject) = self.messages.get(&entry.seq).map(|message| message.subject.clone()) {
+                if let Some(subject) = self
+                    .messages
+                    .get(&entry.seq)
+                    .map(|message| message.subject.clone())
+                {
                     self.mark_subject_ready(&subject);
                     activated += 1;
                 }
@@ -69,7 +76,8 @@ impl DurableBrokerState {
 
     pub(super) fn next_lease_deadline(&mut self) -> Option<u64> {
         self.discard_stale_deadlines();
-        let lease_deadline = self.lease_deadlines
+        let lease_deadline = self
+            .lease_deadlines
             .peek()
             .map(|deadline| deadline.0.deadline_ms);
         let scheduled_deadline = self
@@ -129,8 +137,9 @@ impl DurableBrokerState {
                                 source_offset: message.offset,
                                 reason: "delivery_attempts_exhausted".into(),
                                 attempt_count: lease.attempt,
-                                first_delivery_ms: deadline.deadline_ms
-                                    .saturating_sub(self.consumers[&deadline.consumer_id].record.ack_timeout_ms),
+                                first_delivery_ms: deadline.deadline_ms.saturating_sub(
+                                    self.consumers[&deadline.consumer_id].record.ack_timeout_ms,
+                                ),
                                 last_delivery_ms: deadline.deadline_ms,
                                 payload: message.payload.clone(),
                             };
@@ -142,21 +151,14 @@ impl DurableBrokerState {
                     | protocol::RetryTerminalAction::Retain
                     | protocol::RetryTerminalAction::Pause => {}
                 }
-                self.wal.append_ack(
-                    deadline.seq,
-                    &deadline.consumer_id,
-                    lease.delivery_id,
-                )?;
+                self.wal
+                    .append_ack(deadline.seq, &deadline.consumer_id, lease.delivery_id)?;
                 let acknowledged_cursors = message.as_ref().and_then(|message| {
                     if message.offset.is_some() {
                         let consumer = self.consumers.get(&deadline.consumer_id)?;
                         let mut cursors = consumer.cursors.clone();
                         cursors
-                            .acknowledge(
-                                message,
-                                &consumer.record.filter_subject,
-                                &self.messages,
-                            )
+                            .acknowledge(message, &consumer.record.filter_subject, &self.messages)
                             .ok()?;
                         Some(cursors)
                     } else {

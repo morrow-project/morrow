@@ -143,9 +143,22 @@ impl RetryPolicy {
             RetryBackoff::Fixed => 1,
             RetryBackoff::Exponential => 1u64 << exponent,
         };
-        self.initial_delay_ms
+        let delay = self
+            .initial_delay_ms
             .saturating_mul(multiplier)
-            .min(self.max_delay_ms)
+            .min(self.max_delay_ms);
+        if self.jitter_percent == 0 || delay == 0 {
+            return delay;
+        }
+        let spread = delay.saturating_mul(self.jitter_percent as u64) / 100;
+        let range = spread.saturating_mul(2).saturating_add(1);
+        let offset = ((attempt as u64)
+            .wrapping_mul(1_664_525)
+            .wrapping_add(1_013_904_223)
+            % range) as i128
+            - spread as i128;
+        let jittered = delay as i128 + offset;
+        jittered.clamp(0, self.max_delay_ms as i128) as u64
     }
 }
 

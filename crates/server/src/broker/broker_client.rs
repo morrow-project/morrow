@@ -44,8 +44,14 @@ impl Morrow {
                     start,
                     retry_policy,
                 } => {
-                    self.create_pull_consumer(connection_id, name, filter_subject, start, retry_policy)
-                        .await
+                    self.create_pull_consumer(
+                        connection_id,
+                        name,
+                        filter_subject,
+                        start,
+                        retry_policy,
+                    )
+                    .await
                 }
                 Command::ConsumerDelete { name } => {
                     self.delete_pull_consumer(connection_id, name).await

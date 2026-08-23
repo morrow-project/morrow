@@ -75,7 +75,9 @@ async fn one_redelivery_tick_expires_at_most_the_work_limit() {
     }
 
     assert_eq!(
-        inner.expire_due_leases(1, MAX_EXPIRED_LEASES_PER_TICK).unwrap(),
+        inner
+            .expire_due_leases(1, MAX_EXPIRED_LEASES_PER_TICK)
+            .unwrap(),
         MAX_EXPIRED_LEASES_PER_TICK
     );
     assert_eq!(inner.consumers[consumer_id].in_flight.len(), 500);

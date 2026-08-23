@@ -160,8 +160,7 @@ impl Morrow {
                     Some(record) => {
                         let body = serde_json::to_vec(&record)
                             .context("serializing HTTP dead-letter record")?;
-                        write_http_response(&mut stream, "200 OK", "application/json", &body)
-                            .await
+                        write_http_response(&mut stream, "200 OK", "application/json", &body).await
                     }
                     None => write_http_not_found(&mut stream).await,
                 };
@@ -207,7 +206,8 @@ impl Morrow {
             }
             "/streams" | "/api/v1/streams" => self.write_streams_response(&mut stream).await,
             "/dead-letters" | "/api/v1/dead-letters" => {
-                self.write_dead_letters_response(&mut stream, parse_page(query)).await
+                self.write_dead_letters_response(&mut stream, parse_page(query))
+                    .await
             }
             "/wal" | "/api/v1/storage" => self.write_wal_response(&mut stream).await,
             "/middleware" | "/api/v1/middleware" => {

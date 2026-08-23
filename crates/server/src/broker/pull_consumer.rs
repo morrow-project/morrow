@@ -392,7 +392,10 @@ impl Morrow {
                         .and_then(|consumer| consumer.in_flight.get(&seq))
                         .filter(|lease| lease.delivery_id == delivery_id)
                         .ok_or_else(|| BrokerError::msg("stale or unknown delivery identity"))?;
-                    (lease.attempt, inner.consumers[&consumer_id].record.retry_policy.clone())
+                    (
+                        lease.attempt,
+                        inner.consumers[&consumer_id].record.retry_policy.clone(),
+                    )
                 };
                 let requested_delay = if delay_ms == 0 {
                     policy.delay_ms(attempt.saturating_add(1))

@@ -1,5 +1,5 @@
-use super::*;
 use super::delivery_index::scheduled_at_ms;
+use super::*;
 
 impl DurableBrokerState {
     pub(super) fn prepare_durable_deliveries(

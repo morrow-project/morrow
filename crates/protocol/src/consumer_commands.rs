@@ -48,8 +48,7 @@ fn parse_retry_policy(value: &str) -> Result<RetryPolicy, ProtocolError> {
         .collect::<Vec<_>>();
     if fields.len() != 6 {
         return Err(ProtocolError(
-            "retry policy requires attempts:backoff:initial_ms:max_ms:jitter_percent:action"
-                .into(),
+            "retry policy requires attempts:backoff:initial_ms:max_ms:jitter_percent:action".into(),
         ));
     }
     let max_attempts = fields[0]
@@ -58,7 +57,11 @@ fn parse_retry_policy(value: &str) -> Result<RetryPolicy, ProtocolError> {
     let backoff = match fields[1] {
         "fixed" => RetryBackoff::Fixed,
         "exponential" => RetryBackoff::Exponential,
-        _ => return Err(ProtocolError("retry backoff must be fixed or exponential".into())),
+        _ => {
+            return Err(ProtocolError(
+                "retry backoff must be fixed or exponential".into(),
+            ));
+        }
     };
     let initial_delay_ms = fields[2]
         .parse()
