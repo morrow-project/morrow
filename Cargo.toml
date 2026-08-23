@@ -28,6 +28,7 @@ protocol = { path = "crates/protocol" }
 server = { path = "crates/server" }
 connector = { path = "crates/connector" }
 crc32fast = { version = "1.5.0", default-features = false, features = ["std"] }
+sha2 = { version = "0.10.9", default-features = false }
 ed25519-dalek = { version = "2.2.0", default-features = false, features = ["alloc"] }
 getrandom = { version = "0.4.3", default-features = false, features = ["std"] }
 openraft = { version = "0.9.25", default-features = false, features = ["generic-snapshot-data", "serde", "storage-v2"] }

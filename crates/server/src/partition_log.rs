@@ -2,6 +2,7 @@ use crate::{
     error::Result,
     stream::{PartitionId, RetentionPolicy, StreamCatalog, StreamDefinition, StreamId},
 };
+use std::io::{Cursor, Read};
 use std::{collections::HashMap, path::Path};
 
 mod codec;
@@ -15,6 +16,25 @@ pub const DEFAULT_NAMESPACE: &str = "default";
 
 pub(crate) fn committed_envelope_checksum(envelope: &MessageEnvelope) -> Result<u32> {
     codec::envelope_checksum(envelope)
+}
+
+pub(crate) fn read_segment_offset(bytes: &[u8], target: u64) -> Result<Option<MessageEnvelope>> {
+    let mut cursor = Cursor::new(bytes);
+    let mut header = vec![0; codec::SEGMENT_HEADER.len()];
+    cursor.read_exact(&mut header)?;
+    crate::broker_ensure!(
+        header == codec::SEGMENT_HEADER,
+        "remote partition segment header is invalid"
+    );
+    while let Some((envelope, _)) = codec::read_batch(&mut cursor)? {
+        if envelope.offset == target {
+            return Ok(Some(envelope));
+        }
+        if envelope.offset > target {
+            break;
+        }
+    }
+    Ok(None)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]

@@ -1,5 +1,54 @@
 use super::*;
 
+impl Morrow {
+    /// Capture durable broker metadata for a backup recovery point. Payloads and
+    /// segment bytes remain in the partition/WAL files; this snapshot contains
+    /// only positions, group state, and non-secret cluster identity metadata.
+    pub async fn backup_checkpoint(&self) -> crate::backup::BackupCheckpoint {
+        let inner = self.inner.lock().await;
+        let mut consumer_cursors = BTreeMap::new();
+        for (consumer_id, consumer) in &inner.consumers {
+            let cursors = consumer
+                .cursors
+                .partitions
+                .values()
+                .map(|cursor| {
+                    (
+                        format!("{}/{}", cursor.stream, cursor.partition),
+                        cursor.committed_offset,
+                    )
+                })
+                .collect();
+            consumer_cursors.insert(consumer_id.clone(), cursors);
+        }
+        let recovery_point = inner.messages.keys().copied().max().unwrap_or_default();
+        drop(inner);
+
+        let consumer_groups = self
+            .groups
+            .lock()
+            .await
+            .iter()
+            .map(|(name, coordinator)| (name.clone(), coordinator.record()))
+            .collect();
+        let mut cluster_metadata = BTreeMap::new();
+        if let Some(cluster) = &self.config.cluster {
+            cluster_metadata.insert("node_id".to_string(), cluster.node_id.to_string());
+            cluster_metadata.insert("node_count".to_string(), cluster.nodes.len().to_string());
+        } else {
+            cluster_metadata.insert("mode".to_string(), "standalone".to_string());
+        }
+
+        crate::backup::BackupCheckpoint {
+            recovery_point,
+            consumer_cursors,
+            consumer_groups,
+            cluster_metadata,
+            connector_checkpoints: BTreeMap::new(),
+        }
+    }
+}
+
 impl ConnectionState {
     pub(super) fn response(
         &self,
