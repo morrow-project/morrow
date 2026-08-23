@@ -165,6 +165,7 @@ async fn http_metrics_endpoint_is_authenticated_and_bounded() {
     assert!(response.contains("morrow_in_flight_deliveries 0\n"));
     assert!(response.contains("# TYPE morrow_publish_latency_us histogram\n"));
     assert!(response.contains("morrow_publish_latency_us_bucket{le=\"+Inf\"} 0\n"));
+    assert!(response.contains("morrow_middleware_executions_total 0\n"));
     assert!(response.contains("morrow_wal_rotations_total 0\n"));
     assert!(response.contains("morrow_cluster_partitions 0\n"));
     assert!(response.contains("morrow_cluster_ready 1\n"));

@@ -1,7 +1,10 @@
 use super::{host::*, types::*};
 use protocol::subject::SubjectTrie;
 use std::{
-    sync::{Arc, RwLock},
+    sync::{
+        Arc, RwLock,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 use wasmtime::{
@@ -49,6 +52,15 @@ pub struct MiddlewareRuntime {
     engine: Engine,
     registry: Arc<RwLock<Registry>>,
     _ticker_lifetime: Arc<()>,
+    metrics: Arc<MiddlewareMetrics>,
+}
+
+#[derive(Default)]
+struct MiddlewareMetrics {
+    executions_total: AtomicU64,
+    drops_total: AtomicU64,
+    rejects_total: AtomicU64,
+    failures_total: AtomicU64,
 }
 
 impl MiddlewareRuntime {
@@ -92,6 +104,7 @@ impl MiddlewareRuntime {
                 previous: None,
             })),
             _ticker_lifetime: ticker_lifetime,
+            metrics: Arc::new(MiddlewareMetrics::default()),
         })
     }
 
@@ -155,6 +168,15 @@ impl MiddlewareRuntime {
         self.registry.read().unwrap().current.id
     }
 
+    pub fn metrics_snapshot(&self) -> (u64, u64, u64, u64) {
+        (
+            self.metrics.executions_total.load(Ordering::Relaxed),
+            self.metrics.drops_total.load(Ordering::Relaxed),
+            self.metrics.rejects_total.load(Ordering::Relaxed),
+            self.metrics.failures_total.load(Ordering::Relaxed),
+        )
+    }
+
     pub fn process(
         &self,
         stage: MiddlewareStage,
@@ -180,9 +202,21 @@ impl MiddlewareRuntime {
             }
             match self.execute(middleware, stage, message, InstantiationPath::Prepared) {
                 Ok((decision, updated, mut secondary)) => {
+                    self.metrics
+                        .executions_total
+                        .fetch_add(1, Ordering::Relaxed);
                     message = updated;
                     emitted.append(&mut secondary);
                     if decision != MiddlewareDecision::Continue {
+                        match decision {
+                            MiddlewareDecision::Drop => {
+                                self.metrics.drops_total.fetch_add(1, Ordering::Relaxed);
+                            }
+                            MiddlewareDecision::Reject => {
+                                self.metrics.rejects_total.fetch_add(1, Ordering::Relaxed);
+                            }
+                            MiddlewareDecision::Continue => {}
+                        }
                         return Ok(MiddlewareOutcome {
                             generation: generation.id,
                             decision,
@@ -192,6 +226,7 @@ impl MiddlewareRuntime {
                     }
                 }
                 Err(failure) => {
+                    self.metrics.failures_total.fetch_add(1, Ordering::Relaxed);
                     message = failure.message;
                     return self.failure(
                         middleware.manifest.failure_policy,

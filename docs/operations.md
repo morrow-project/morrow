@@ -57,6 +57,9 @@ usage, readiness, and resource-quota rejections. It deliberately does not
 include subjects, client IDs, message IDs, payloads, credentials, or other
 unbounded user values.
 
+Middleware execution, drop, reject, and failure counters are included in the
+same endpoint.
+
 The same administrative resources are available under the versioned
 `/api/v1/` namespace: `/api/v1/cluster`, `/api/v1/connections`,
 `/api/v1/quotas`, `/api/v1/subscriptions`, `/api/v1/streams`,

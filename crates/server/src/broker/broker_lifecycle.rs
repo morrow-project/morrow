@@ -436,6 +436,8 @@ impl Morrow {
             .as_ref()
             .map(|routes| routes.connected.len())
             .unwrap_or_default();
+        let (middleware_executions, middleware_drops, middleware_rejects, middleware_failures) =
+            self.middleware.metrics_snapshot();
         metrics.push_str("# HELP morrow_route_peers_connected Current connected route peers.\n");
         metrics.push_str("# TYPE morrow_route_peers_connected gauge\n");
         metrics.push_str(&format!(
@@ -446,6 +448,27 @@ impl Morrow {
         metrics.push_str(&format!(
             "morrow_middleware_generation {}\n",
             self.middleware.current_generation()
+        ));
+        metrics.push_str("# HELP morrow_middleware_executions_total Middleware executions.\n");
+        metrics.push_str("# TYPE morrow_middleware_executions_total counter\n");
+        metrics.push_str(&format!(
+            "morrow_middleware_executions_total {middleware_executions}\n"
+        ));
+        metrics.push_str("# HELP morrow_middleware_drops_total Middleware drops.\n");
+        metrics.push_str("# TYPE morrow_middleware_drops_total counter\n");
+        metrics.push_str(&format!(
+            "morrow_middleware_drops_total {middleware_drops}\n"
+        ));
+        metrics.push_str("# HELP morrow_middleware_rejects_total Middleware rejects.\n");
+        metrics.push_str("# TYPE morrow_middleware_rejects_total counter\n");
+        metrics.push_str(&format!(
+            "morrow_middleware_rejects_total {middleware_rejects}\n"
+        ));
+        metrics
+            .push_str("# HELP morrow_middleware_failures_total Middleware execution failures.\n");
+        metrics.push_str("# TYPE morrow_middleware_failures_total counter\n");
+        metrics.push_str(&format!(
+            "morrow_middleware_failures_total {middleware_failures}\n"
         ));
         metrics.push_str(
             "# HELP morrow_cluster_ready Whether the broker is ready to serve traffic.\n",
