@@ -198,6 +198,30 @@ impl PolicyStore {
         }
     }
 
+    pub fn snapshot_for_scope(&self, scope: &ResourceScope) -> PolicySnapshot {
+        let state = self.state.read().expect("policy lock poisoned");
+        let bindings = state
+            .bindings
+            .iter()
+            .filter(|binding| &binding.scope == scope)
+            .cloned()
+            .collect::<Vec<_>>();
+        let roles = bindings
+            .iter()
+            .filter_map(|binding| {
+                state
+                    .roles
+                    .get(&binding.role)
+                    .map(|role| (role.name.clone(), role.clone()))
+            })
+            .collect();
+        PolicySnapshot {
+            generation: state.generation,
+            roles,
+            bindings,
+        }
+    }
+
     pub fn replace(&self, snapshot: PolicySnapshot) -> Result<()> {
         for role in snapshot.roles.values() {
             validate_role(role)?;
@@ -347,6 +371,14 @@ impl AuditLog {
         &self.records
     }
 
+    pub fn records_for_tenant(&self, tenant: &TenantId) -> Vec<AuditRecord> {
+        self.records
+            .iter()
+            .filter(|record| record.event.tenant.as_ref() == Some(tenant))
+            .cloned()
+            .collect()
+    }
+
     pub fn verify(&self) -> Result<()> {
         verify_audit_records(&self.records)
     }
@@ -452,6 +484,51 @@ mod tests {
                 .authorize("client-a", &scope(), Permission::Publish, 0)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn scoped_policy_and_audit_exports_do_not_cross_tenants() {
+        let store = PolicyStore::default();
+        store
+            .upsert_role(Role {
+                name: "publisher".to_string(),
+                permissions: [Permission::Publish].into_iter().collect(),
+            })
+            .unwrap();
+        let tenant_a = scope();
+        let tenant_b = ResourceScope {
+            tenant: TenantId::new("tenant-b").unwrap(),
+            namespace: NamespaceId::new("orders").unwrap(),
+        };
+        for (subject, scoped) in [("a", tenant_a.clone()), ("b", tenant_b.clone())] {
+            store
+                .bind(RoleBinding {
+                    subject: subject.to_string(),
+                    scope: scoped,
+                    role: "publisher".to_string(),
+                    expires_at_ms: None,
+                })
+                .unwrap();
+        }
+        assert_eq!(store.snapshot_for_scope(&tenant_a).bindings.len(), 1);
+        assert_eq!(store.snapshot_for_scope(&tenant_a).bindings[0].subject, "a");
+        let mut audit = AuditLog::with_capacity(8).unwrap();
+        for tenant in [&tenant_a.tenant, &tenant_b.tenant] {
+            audit
+                .append(AuditEvent {
+                    sequence: 0,
+                    timestamp_ms: 1,
+                    actor: "operator".into(),
+                    tenant: Some(tenant.clone()),
+                    action: "policy.update".into(),
+                    resource: "orders".into(),
+                    outcome: "success".into(),
+                    details: BTreeMap::new(),
+                })
+                .unwrap();
+        }
+        assert_eq!(audit.records_for_tenant(&tenant_a.tenant).len(), 1);
+        assert_eq!(audit.records_for_tenant(&tenant_b.tenant).len(), 1);
     }
 
     #[test]

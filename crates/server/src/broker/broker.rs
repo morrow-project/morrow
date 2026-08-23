@@ -62,6 +62,23 @@ impl Morrow {
         self.policy.snapshot()
     }
 
+    pub fn policy_snapshot_for_scope(
+        &self,
+        scope: &crate::tenancy::ResourceScope,
+    ) -> crate::tenancy::PolicySnapshot {
+        self.policy.snapshot_for_scope(scope)
+    }
+
+    pub fn audit_records_for_tenant(
+        &self,
+        tenant: &crate::tenancy::TenantId,
+    ) -> Vec<crate::tenancy::AuditRecord> {
+        self.audit
+            .lock()
+            .expect("audit log lock poisoned")
+            .records_for_tenant(tenant)
+    }
+
     pub fn replace_policy_snapshot(&self, snapshot: crate::tenancy::PolicySnapshot) -> Result<()> {
         let generation = snapshot.generation;
         self.policy.replace(snapshot)?;
