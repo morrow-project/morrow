@@ -40,6 +40,10 @@ struct Cancellation {
 }
 
 impl PullWaiterRegistry {
+    pub(super) fn len(&self) -> usize {
+        self.state.lock().unwrap().waiters.len()
+    }
+
     pub(super) fn register(
         &self,
         connection_id: u64,

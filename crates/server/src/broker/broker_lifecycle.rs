@@ -287,7 +287,18 @@ impl Morrow {
             .wal
             .status(inner.messages.len(), inner.consumers.len());
         let consumers = inner.consumers.len();
+        let pending_deliveries = inner
+            .consumers
+            .values()
+            .map(|consumer| consumer.pending.len())
+            .sum::<usize>();
+        let in_flight_deliveries = inner
+            .consumers
+            .values()
+            .map(|consumer| consumer.in_flight.len())
+            .sum::<usize>();
         drop(inner);
+        let pull_waiters = self.pull_waiters.len();
 
         let quotas = self.quotas.snapshot();
         let cluster = self.cluster_response().await;
@@ -304,6 +315,17 @@ impl Morrow {
         metrics.push_str("# HELP morrow_durable_consumers Current durable consumers.\n");
         metrics.push_str("# TYPE morrow_durable_consumers gauge\n");
         metrics.push_str(&format!("morrow_durable_consumers {consumers}\n"));
+        metrics.push_str("# HELP morrow_pull_waiters Current blocked pull requests.\n");
+        metrics.push_str("# TYPE morrow_pull_waiters gauge\n");
+        metrics.push_str(&format!("morrow_pull_waiters {pull_waiters}\n"));
+        metrics.push_str("# HELP morrow_pending_deliveries Current pending deliveries.\n");
+        metrics.push_str("# TYPE morrow_pending_deliveries gauge\n");
+        metrics.push_str(&format!("morrow_pending_deliveries {pending_deliveries}\n"));
+        metrics.push_str("# HELP morrow_in_flight_deliveries Current in-flight deliveries.\n");
+        metrics.push_str("# TYPE morrow_in_flight_deliveries gauge\n");
+        metrics.push_str(&format!(
+            "morrow_in_flight_deliveries {in_flight_deliveries}\n"
+        ));
         metrics.push_str("# HELP morrow_publishes_total Publish commands received.\n");
         metrics.push_str("# TYPE morrow_publishes_total counter\n");
         metrics.push_str(&format!(
