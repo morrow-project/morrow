@@ -114,6 +114,10 @@ async fn dynamic_policy_revocation_fences_an_authenticated_client_without_restar
     publisher
         .expect_err_contains("tenant permission denied")
         .await;
+    let audit = scenario.broker().audit_records();
+    assert_eq!(audit.last().unwrap().event.outcome, "denied");
+    assert_eq!(audit.last().unwrap().event.action, "publish");
+    scenario.broker().verify_audit_log().unwrap();
 }
 
 #[tokio::test]
