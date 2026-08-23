@@ -132,6 +132,8 @@ async fn http_metrics_endpoint_is_authenticated_and_bounded() {
     assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
     assert!(response.contains("content-type: text/plain; version=0.0.4"));
     assert!(response.contains("morrow_connections 0\n"));
+    assert!(response.contains("morrow_publishes_total 0\n"));
+    assert!(response.contains("morrow_delivery_attempts_total 0\n"));
     assert!(response.contains("morrow_cluster_ready 1\n"));
     assert!(!response.contains("subject="));
     assert!(!response.contains("client_id="));

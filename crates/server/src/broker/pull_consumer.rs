@@ -390,6 +390,7 @@ impl Morrow {
                     .ok_or_else(|| BrokerError::msg("NACK deadline overflow"))?;
                 self.update_pull_lease(&consumer_id, seq, delivery_id, deadline)
                     .await?;
+                self.metrics.nacks_total.fetch_add(1, Ordering::Relaxed);
                 "NACK"
             }
             PullControl::Extend(extension_ms) => {

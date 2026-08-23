@@ -177,6 +177,7 @@ impl Morrow {
             cluster_applied_index: Arc::new(AtomicU64::new(0)),
             cluster_delta_gate: Arc::new(Mutex::new(())),
             cluster_application_metrics: Arc::new(ClusterApplicationMetrics::default()),
+            metrics: Arc::new(BrokerMetrics::default()),
             redelivery_notify: Arc::new(Notify::new()),
             pull_waiters: PullWaiterRegistry::default(),
             compaction_running: Arc::new(AtomicBool::new(false)),
@@ -303,6 +304,44 @@ impl Morrow {
         metrics.push_str("# HELP morrow_durable_consumers Current durable consumers.\n");
         metrics.push_str("# TYPE morrow_durable_consumers gauge\n");
         metrics.push_str(&format!("morrow_durable_consumers {consumers}\n"));
+        metrics.push_str("# HELP morrow_publishes_total Publish commands received.\n");
+        metrics.push_str("# TYPE morrow_publishes_total counter\n");
+        metrics.push_str(&format!(
+            "morrow_publishes_total {}\n",
+            self.metrics.publishes_total.load(Ordering::Relaxed)
+        ));
+        metrics.push_str("# HELP morrow_published_bytes_total Published payload bytes.\n");
+        metrics.push_str("# TYPE morrow_published_bytes_total counter\n");
+        metrics.push_str(&format!(
+            "morrow_published_bytes_total {}\n",
+            self.metrics.published_bytes_total.load(Ordering::Relaxed)
+        ));
+        metrics.push_str(
+            "# HELP morrow_delivery_attempts_total Delivery attempts sent to consumers.\n",
+        );
+        metrics.push_str("# TYPE morrow_delivery_attempts_total counter\n");
+        metrics.push_str(&format!(
+            "morrow_delivery_attempts_total {}\n",
+            self.metrics.delivery_attempts_total.load(Ordering::Relaxed)
+        ));
+        metrics.push_str("# HELP morrow_acknowledgements_total Valid acknowledgements.\n");
+        metrics.push_str("# TYPE morrow_acknowledgements_total counter\n");
+        metrics.push_str(&format!(
+            "morrow_acknowledgements_total {}\n",
+            self.metrics.acknowledgements_total.load(Ordering::Relaxed)
+        ));
+        metrics.push_str("# HELP morrow_nacks_total Negative acknowledgements.\n");
+        metrics.push_str("# TYPE morrow_nacks_total counter\n");
+        metrics.push_str(&format!(
+            "morrow_nacks_total {}\n",
+            self.metrics.nacks_total.load(Ordering::Relaxed)
+        ));
+        metrics.push_str("# HELP morrow_redeliveries_total Lease-expiry redeliveries.\n");
+        metrics.push_str("# TYPE morrow_redeliveries_total counter\n");
+        metrics.push_str(&format!(
+            "morrow_redeliveries_total {}\n",
+            self.metrics.redeliveries_total.load(Ordering::Relaxed)
+        ));
         metrics.push_str("# HELP morrow_wal_bytes Total WAL bytes.\n");
         metrics.push_str("# TYPE morrow_wal_bytes gauge\n");
         metrics.push_str(&format!("morrow_wal_bytes {}\n", wal.total_wal_bytes));

@@ -174,6 +174,16 @@ pub(super) struct ClusterApplicationMetrics {
     pub(super) full_reconciliations: AtomicU64,
 }
 
+#[derive(Debug, Default)]
+pub(super) struct BrokerMetrics {
+    pub(super) publishes_total: AtomicU64,
+    pub(super) published_bytes_total: AtomicU64,
+    pub(super) delivery_attempts_total: AtomicU64,
+    pub(super) acknowledgements_total: AtomicU64,
+    pub(super) nacks_total: AtomicU64,
+    pub(super) redeliveries_total: AtomicU64,
+}
+
 #[derive(Debug, serde::Serialize)]
 pub(super) struct ClusterStateApplicationResponse {
     pub(super) delta_applications: u64,

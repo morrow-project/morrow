@@ -58,6 +58,10 @@ impl Morrow {
         payload: Vec<u8>,
         producer_ack: Option<protocol::ProducerAckRequest>,
     ) -> Result<()> {
+        self.metrics.publishes_total.fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .published_bytes_total
+            .fetch_add(payload.len() as u64, Ordering::Relaxed);
         self.publish_with_depth(
             publisher_id,
             subject_name,
@@ -459,6 +463,9 @@ impl Morrow {
         drop(inner);
         self.wal.flush_due().await?;
         if valid {
+            self.metrics
+                .acknowledgements_total
+                .fetch_add(1, Ordering::Relaxed);
             self.pull_waiters.notify_consumer(&ack.consumer_id);
         }
         if let Some(record) = acknowledged_record {
@@ -523,6 +530,9 @@ impl Morrow {
         self.redelivery_notify.notify_one();
         self.wal.flush_due().await?;
 
+        self.metrics
+            .delivery_attempts_total
+            .fetch_add(deliveries.len() as u64, Ordering::Relaxed);
         for delivery in deliveries {
             let _ = delivery.sender.send(delivery.frame).await;
         }

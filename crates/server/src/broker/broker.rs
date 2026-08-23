@@ -18,6 +18,7 @@ pub struct Morrow {
     pub(super) cluster_applied_index: Arc<AtomicU64>,
     pub(super) cluster_delta_gate: Arc<Mutex<()>>,
     pub(super) cluster_application_metrics: Arc<ClusterApplicationMetrics>,
+    pub(super) metrics: Arc<BrokerMetrics>,
     pub(super) redelivery_notify: Arc<Notify>,
     pub(super) pull_waiters: PullWaiterRegistry,
     pub(super) compaction_running: Arc<AtomicBool>,

@@ -37,6 +37,9 @@ impl Morrow {
             inner.expire_due_leases(now, MAX_EXPIRED_LEASES_PER_TICK)
         };
         if expired > 0 {
+            self.metrics
+                .redeliveries_total
+                .fetch_add(expired as u64, Ordering::Relaxed);
             self.pull_waiters.notify_all();
         }
         self.deliver_pending().await
