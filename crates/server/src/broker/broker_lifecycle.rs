@@ -183,6 +183,27 @@ impl Morrow {
             }
         };
         let quotas = Arc::new(crate::quota::QuotaRuntime::new(&config.quotas));
+        let policy = Arc::new(crate::tenancy::PolicyStore::default());
+        let default_scope = crate::tenancy::ResourceScope {
+            tenant: crate::tenancy::TenantId::new("default")?,
+            namespace: crate::tenancy::NamespaceId::new("default")?,
+        };
+        for (index, (subject, _client)) in config.auth.clients.iter().enumerate() {
+            let role_name = format!("static-client-{index}");
+            let mut permissions = std::collections::BTreeSet::new();
+            permissions.insert(crate::tenancy::Permission::Publish);
+            permissions.insert(crate::tenancy::Permission::Subscribe);
+            policy.upsert_role(crate::tenancy::Role {
+                name: role_name.clone(),
+                permissions,
+            })?;
+            policy.bind(crate::tenancy::RoleBinding {
+                subject: subject.clone(),
+                scope: default_scope.clone(),
+                role: role_name,
+                expires_at_ms: None,
+            })?;
+        }
         let route_mesh = RouteMesh::from_config(&config, quotas.clone())?;
         let wal = WalRuntime::new(wal);
         Ok(Self {
@@ -221,6 +242,7 @@ impl Morrow {
             tls_acceptor,
             admin_tls_acceptor,
             quotas,
+            policy,
             cluster: Arc::new(Mutex::new(cluster)),
             cluster_applied_index: Arc::new(AtomicU64::new(0)),
             cluster_delta_gate: Arc::new(Mutex::new(())),

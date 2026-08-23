@@ -101,6 +101,22 @@ async fn omitted_permissions_allow_authenticated_publish_and_subscribe() {
 }
 
 #[tokio::test]
+async fn dynamic_policy_revocation_fences_an_authenticated_client_without_restart() {
+    let scenario = auth_scenario(vec![auth_client("publisher1", [8; 32], None, None)]);
+    let mut publisher = connect_authenticated(&scenario, "publisher1", [8; 32]).await;
+    let policy = scenario.broker().policy_store();
+    let scope = crate::tenancy::ResourceScope {
+        tenant: crate::tenancy::TenantId::new("default").unwrap(),
+        namespace: crate::tenancy::NamespaceId::new("default").unwrap(),
+    };
+    policy.revoke("publisher1", &scope, None);
+    publisher.publish("orders/created", b"revoked").await;
+    publisher
+        .expect_err_contains("tenant permission denied")
+        .await;
+}
+
+#[tokio::test]
 async fn publish_and_subscribe_patterns_authorize_matching_subjects() {
     let scenario = auth_scenario(vec![
         auth_client("subscriber1", [7; 32], None, Some(vec!["orders/**"])),

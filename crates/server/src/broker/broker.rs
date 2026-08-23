@@ -17,6 +17,7 @@ pub struct Morrow {
     pub(super) tls_acceptor: Option<TlsAcceptor>,
     pub(super) admin_tls_acceptor: Option<TlsAcceptor>,
     pub(super) quotas: Arc<crate::quota::QuotaRuntime>,
+    pub(super) policy: Arc<crate::tenancy::PolicyStore>,
     pub(super) cluster: Arc<Mutex<Option<ClusterRuntime>>>,
     pub(super) cluster_applied_index: Arc<AtomicU64>,
     pub(super) cluster_delta_gate: Arc<Mutex<()>>,

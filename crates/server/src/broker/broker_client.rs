@@ -507,19 +507,23 @@ impl Morrow {
         let client_id = client
             .durable_id
             .as_deref()
-            .ok_or_else(|| BrokerError::msg("authenticated client is missing durable identity"))?;
+            .ok_or_else(|| BrokerError::msg("authenticated client is missing durable identity"))?
+            .to_string();
         if is_inbox_subscription(subject_name) {
             crate::broker_ensure!(
-                inbox_belongs_to(subject_name, client_id),
+                inbox_belongs_to(subject_name, &client_id),
                 "inbox subscribe not authorized"
             );
             return Ok(());
         }
+        drop(connections);
+        self.authorize_policy(connection_id, crate::tenancy::Permission::Subscribe)
+            .await?;
         let auth_client = self
             .config
             .auth
             .clients
-            .get(client_id)
+            .get(&client_id)
             .ok_or_else(|| BrokerError::msg("unknown authenticated client"))?;
         let Some(permissions) = &auth_client.permissions else {
             return Ok(());

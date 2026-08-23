@@ -1,6 +1,33 @@
 use super::*;
 
 impl Morrow {
+    pub fn policy_store(&self) -> Arc<crate::tenancy::PolicyStore> {
+        self.policy.clone()
+    }
+
+    pub(super) async fn authorize_policy(
+        &self,
+        connection_id: u64,
+        permission: crate::tenancy::Permission,
+    ) -> Result<()> {
+        if !self.config.auth.enabled {
+            return Ok(());
+        }
+        let subject = self
+            .connections
+            .lock()
+            .await
+            .clients
+            .get(&connection_id)
+            .and_then(|client| client.durable_id.clone())
+            .ok_or_else(|| BrokerError::msg("authenticated client is missing durable identity"))?;
+        let scope = crate::tenancy::ResourceScope {
+            tenant: crate::tenancy::TenantId::new("default")?,
+            namespace: crate::tenancy::NamespaceId::new("default")?,
+        };
+        self.policy.authorize(&subject, &scope, permission, 0)
+    }
+
     pub(super) async fn authorize_publish(
         &self,
         connection_id: u64,
@@ -37,19 +64,23 @@ impl Morrow {
         let client_id = client
             .durable_id
             .as_deref()
-            .ok_or_else(|| BrokerError::msg("authenticated client is missing durable identity"))?;
+            .ok_or_else(|| BrokerError::msg("authenticated client is missing durable identity"))?
+            .to_string();
         if is_inbox_publish(subject_name) {
             crate::broker_ensure!(
-                inbox_belongs_to(subject_name, client_id),
+                inbox_belongs_to(subject_name, &client_id),
                 "inbox publish not authorized"
             );
             return Ok(());
         }
+        drop(connections);
+        self.authorize_policy(connection_id, crate::tenancy::Permission::Publish)
+            .await?;
         let auth_client = self
             .config
             .auth
             .clients
-            .get(client_id)
+            .get(&client_id)
             .ok_or_else(|| BrokerError::msg("unknown authenticated client"))?;
         let Some(permissions) = &auth_client.permissions else {
             return Ok(());
