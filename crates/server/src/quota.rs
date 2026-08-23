@@ -2,6 +2,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
 };
+use std::{collections::HashMap, sync::Mutex};
 
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
@@ -37,6 +38,143 @@ pub(crate) struct QuotaUsage {
     pub(crate) used: usize,
     pub(crate) limit: usize,
     pub(crate) rejections: u64,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct TenantQuotaLimits {
+    pub(crate) max_connections: usize,
+    pub(crate) max_memory_bytes: u64,
+    pub(crate) max_disk_bytes: u64,
+    pub(crate) max_tasks: usize,
+    pub(crate) max_background_tasks: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default, serde::Serialize)]
+pub(crate) struct TenantQuotaUsage {
+    pub(crate) connections: usize,
+    pub(crate) memory_bytes: u64,
+    pub(crate) disk_bytes: u64,
+    pub(crate) tasks: usize,
+    pub(crate) background_tasks: usize,
+}
+
+#[derive(Clone)]
+pub(crate) struct TenantQuotaRuntime {
+    limits: TenantQuotaLimits,
+    usage: Arc<Mutex<HashMap<String, TenantQuotaUsage>>>,
+}
+
+impl TenantQuotaRuntime {
+    pub(crate) fn new(limits: TenantQuotaLimits) -> Self {
+        Self {
+            limits,
+            usage: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    pub(crate) fn try_connection(&self, tenant: &str) -> bool {
+        let mut usage = self.usage.lock().expect("tenant quota lock poisoned");
+        let entry = usage.entry(tenant.to_string()).or_default();
+        if entry.connections >= self.limits.max_connections {
+            return false;
+        }
+        entry.connections += 1;
+        true
+    }
+
+    pub(crate) fn release_connection(&self, tenant: &str) {
+        let mut usage = self.usage.lock().expect("tenant quota lock poisoned");
+        if let Some(entry) = usage.get_mut(tenant) {
+            entry.connections = entry.connections.saturating_sub(1);
+        }
+    }
+
+    pub(crate) fn try_reserve(&self, tenant: &str, request: TenantQuotaUsage) -> bool {
+        let mut usage = self.usage.lock().expect("tenant quota lock poisoned");
+        let entry = usage.entry(tenant.to_string()).or_default();
+        let fits = entry.connections.saturating_add(request.connections)
+            <= self.limits.max_connections
+            && entry.memory_bytes.saturating_add(request.memory_bytes)
+                <= self.limits.max_memory_bytes
+            && entry.disk_bytes.saturating_add(request.disk_bytes) <= self.limits.max_disk_bytes
+            && entry.tasks.saturating_add(request.tasks) <= self.limits.max_tasks
+            && entry
+                .background_tasks
+                .saturating_add(request.background_tasks)
+                <= self.limits.max_background_tasks;
+        if fits {
+            entry.connections += request.connections;
+            entry.memory_bytes += request.memory_bytes;
+            entry.disk_bytes += request.disk_bytes;
+            entry.tasks += request.tasks;
+            entry.background_tasks += request.background_tasks;
+        }
+        fits
+    }
+
+    pub(crate) fn release(&self, tenant: &str, request: TenantQuotaUsage) {
+        let mut usage = self.usage.lock().expect("tenant quota lock poisoned");
+        if let Some(entry) = usage.get_mut(tenant) {
+            entry.connections = entry.connections.saturating_sub(request.connections);
+            entry.memory_bytes = entry.memory_bytes.saturating_sub(request.memory_bytes);
+            entry.disk_bytes = entry.disk_bytes.saturating_sub(request.disk_bytes);
+            entry.tasks = entry.tasks.saturating_sub(request.tasks);
+            entry.background_tasks = entry
+                .background_tasks
+                .saturating_sub(request.background_tasks);
+        }
+    }
+
+    pub(crate) fn snapshot(&self) -> HashMap<String, TenantQuotaUsage> {
+        self.usage
+            .lock()
+            .expect("tenant quota lock poisoned")
+            .clone()
+    }
+}
+
+#[cfg(test)]
+mod tenant_tests {
+    use super::*;
+
+    #[test]
+    fn tenant_limits_bound_all_resource_dimensions() {
+        let quotas = TenantQuotaRuntime::new(TenantQuotaLimits {
+            max_connections: 1,
+            max_memory_bytes: 10,
+            max_disk_bytes: 20,
+            max_tasks: 2,
+            max_background_tasks: 1,
+        });
+        assert!(quotas.try_connection("tenant-a"));
+        assert!(!quotas.try_connection("tenant-a"));
+        assert!(quotas.try_reserve(
+            "tenant-a",
+            TenantQuotaUsage {
+                memory_bytes: 10,
+                disk_bytes: 20,
+                tasks: 2,
+                background_tasks: 1,
+                ..Default::default()
+            }
+        ));
+        assert!(!quotas.try_reserve(
+            "tenant-a",
+            TenantQuotaUsage {
+                memory_bytes: 1,
+                ..Default::default()
+            }
+        ));
+        assert!(quotas.try_reserve(
+            "tenant-b",
+            TenantQuotaUsage {
+                connections: 1,
+                ..Default::default()
+            }
+        ));
+        quotas.release_connection("tenant-a");
+        assert!(quotas.try_connection("tenant-a"));
+    }
 }
 
 impl QuotaRuntime {

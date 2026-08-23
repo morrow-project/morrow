@@ -8,6 +8,7 @@ name = "morrow-server"
 path = "src/main.rs"
 
 [dependencies]
+aws-lc-rs.workspace = true
 crc32fast.workspace = true
 openraft.workspace = true
 opentelemetry.workspace = true

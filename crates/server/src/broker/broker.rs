@@ -17,7 +17,9 @@ pub struct Morrow {
     pub(super) tls_acceptor: Option<TlsAcceptor>,
     pub(super) admin_tls_acceptor: Option<TlsAcceptor>,
     pub(super) quotas: Arc<crate::quota::QuotaRuntime>,
+    pub(super) tenant_quotas: crate::quota::TenantQuotaRuntime,
     pub(super) policy: Arc<crate::tenancy::PolicyStore>,
+    pub(super) audit: Arc<std::sync::Mutex<crate::tenancy::AuditLog>>,
     pub(super) cluster: Arc<Mutex<Option<ClusterRuntime>>>,
     pub(super) cluster_applied_index: Arc<AtomicU64>,
     pub(super) cluster_delta_gate: Arc<Mutex<()>>,
@@ -35,5 +37,17 @@ pub struct Morrow {
 impl Morrow {
     pub fn middleware_runtime(&self) -> MiddlewareRuntime {
         self.middleware.clone()
+    }
+
+    pub fn audit_records(&self) -> Vec<crate::tenancy::AuditRecord> {
+        self.audit
+            .lock()
+            .expect("audit log lock poisoned")
+            .records()
+            .to_vec()
+    }
+
+    pub fn verify_audit_log(&self) -> Result<()> {
+        self.audit.lock().expect("audit log lock poisoned").verify()
     }
 }

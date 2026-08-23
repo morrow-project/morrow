@@ -495,6 +495,25 @@ impl Morrow {
         connection_id: u64,
         subject_name: &str,
     ) -> Result<()> {
+        let result = self
+            .check_subscribe_authorization(connection_id, subject_name)
+            .await;
+        if let Err(err) = &result {
+            self.record_authorization_denial(
+                connection_id,
+                "subscribe",
+                subject_name,
+                &err.to_string(),
+            );
+        }
+        result
+    }
+
+    async fn check_subscribe_authorization(
+        &self,
+        connection_id: u64,
+        subject_name: &str,
+    ) -> Result<()> {
         if !self.config.auth.enabled {
             return Ok(());
         }

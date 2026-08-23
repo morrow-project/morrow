@@ -183,7 +183,18 @@ impl Morrow {
             }
         };
         let quotas = Arc::new(crate::quota::QuotaRuntime::new(&config.quotas));
+        let tenant_quotas =
+            crate::quota::TenantQuotaRuntime::new(crate::quota::TenantQuotaLimits {
+                max_connections: config.quotas.max_connections,
+                max_memory_bytes: config.quotas.max_outbound_bytes_per_connection as u64,
+                max_disk_bytes: u64::MAX,
+                max_tasks: config.quotas.max_durable_consumers,
+                max_background_tasks: config.quotas.max_transient_subscriptions,
+            });
         let policy = Arc::new(crate::tenancy::PolicyStore::default());
+        let audit = Arc::new(std::sync::Mutex::new(
+            crate::tenancy::AuditLog::with_capacity(10_000)?,
+        ));
         let default_scope = crate::tenancy::ResourceScope {
             tenant: crate::tenancy::TenantId::new("default")?,
             namespace: crate::tenancy::NamespaceId::new("default")?,
@@ -242,7 +253,9 @@ impl Morrow {
             tls_acceptor,
             admin_tls_acceptor,
             quotas,
+            tenant_quotas,
             policy,
+            audit,
             cluster: Arc::new(Mutex::new(cluster)),
             cluster_applied_index: Arc::new(AtomicU64::new(0)),
             cluster_delta_gate: Arc::new(Mutex::new(())),
@@ -951,7 +964,18 @@ impl Morrow {
     }
 
     pub(super) fn spawn_accepted(&self, stream: TcpStream) {
+        const DEFAULT_TENANT: &str = "default";
+        if !self.tenant_quotas.try_connection(DEFAULT_TENANT) {
+            tokio::spawn(async move {
+                let mut stream = stream;
+                let _ = stream
+                    .write_all(&protocol::err("tenant connection quota exceeded"))
+                    .await;
+            });
+            return;
+        }
         let Some(permit) = self.quotas.try_client() else {
+            self.tenant_quotas.release_connection(DEFAULT_TENANT);
             tokio::spawn(async move {
                 let mut stream = stream;
                 let _ = stream
@@ -966,6 +990,7 @@ impl Morrow {
             if let Err(err) = broker.handle_accepted(stream).await {
                 error!(error = ?err, "client error");
             }
+            broker.tenant_quotas.release_connection(DEFAULT_TENANT);
         });
     }
 

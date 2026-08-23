@@ -25,7 +25,35 @@ impl Morrow {
             tenant: crate::tenancy::TenantId::new("default")?,
             namespace: crate::tenancy::NamespaceId::new("default")?,
         };
-        self.policy.authorize(&subject, &scope, permission, 0)
+        self.policy
+            .authorize(&subject, &scope, permission, self.hooks.clock.now_ms())
+    }
+
+    pub(super) fn record_authorization_denial(
+        &self,
+        connection_id: u64,
+        action: &str,
+        resource: &str,
+        reason: &str,
+    ) {
+        let mut details = std::collections::BTreeMap::new();
+        details.insert("connection_id".to_string(), connection_id.to_string());
+        details.insert("reason".to_string(), reason.to_string());
+        let event = crate::tenancy::AuditEvent {
+            sequence: 0,
+            timestamp_ms: self.hooks.clock.now_ms(),
+            actor: format!("connection:{connection_id}"),
+            tenant: crate::tenancy::TenantId::new("default").ok(),
+            action: action.to_string(),
+            resource: resource.to_string(),
+            outcome: "denied".to_string(),
+            details,
+        };
+        let _ = self
+            .audit
+            .lock()
+            .expect("audit log lock poisoned")
+            .append(event);
     }
 
     pub(super) async fn authorize_publish(
@@ -37,6 +65,12 @@ impl Morrow {
             .check_publish_authorization(connection_id, subject_name)
             .await;
         if let Err(err) = &result {
+            self.record_authorization_denial(
+                connection_id,
+                "publish",
+                subject_name,
+                &err.to_string(),
+            );
             warn!(
                 connection_id,
                 subject = %subject_name,

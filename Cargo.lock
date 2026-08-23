@@ -1699,6 +1699,7 @@ dependencies = [
 name = "server"
 version = "0.1.3"
 dependencies = [
+ "aws-lc-rs",
  "broker-pem",
  "crc32fast",
  "ed25519-dalek",
