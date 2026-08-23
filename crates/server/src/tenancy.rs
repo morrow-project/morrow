@@ -235,10 +235,19 @@ pub struct AuditRecord {
     pub hash: String,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct AuditLog {
     records: Vec<AuditRecord>,
     max_records: usize,
+}
+
+impl Default for AuditLog {
+    fn default() -> Self {
+        Self {
+            records: Vec::new(),
+            max_records: 10_000,
+        }
+    }
 }
 
 impl AuditLog {
