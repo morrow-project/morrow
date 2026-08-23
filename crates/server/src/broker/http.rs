@@ -18,6 +18,13 @@ pub(super) fn http_request_path(request_line: &str) -> Option<&str> {
     Some(path)
 }
 
+pub(super) fn http_query_parameter<'a>(query: &'a str, name: &str) -> Option<&'a str> {
+    query.split('&').find_map(|parameter| {
+        let (key, value) = parameter.split_once('=')?;
+        (key == name).then_some(value)
+    })
+}
+
 pub(super) fn http_authorized(request: &[u8], token: &str) -> bool {
     let Ok(request) = std::str::from_utf8(request) else {
         return false;

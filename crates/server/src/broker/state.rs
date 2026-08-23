@@ -257,6 +257,8 @@ pub(super) struct ClusterPeerResponse {
 #[derive(Debug, serde::Serialize)]
 pub(super) struct ConnectionsResponse {
     pub(super) count: usize,
+    pub(super) total_count: usize,
+    pub(super) next_offset: Option<usize>,
     pub(super) connections: Vec<ConnectionResponse>,
 }
 

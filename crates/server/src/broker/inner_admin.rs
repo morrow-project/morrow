@@ -6,6 +6,16 @@ impl ConnectionState {
         durable_counts: &HashMap<u64, usize>,
         transient_counts: &HashMap<u64, usize>,
     ) -> ConnectionsResponse {
+        self.response_page(durable_counts, transient_counts, 0, usize::MAX)
+    }
+
+    pub(super) fn response_page(
+        &self,
+        durable_counts: &HashMap<u64, usize>,
+        transient_counts: &HashMap<u64, usize>,
+        offset: usize,
+        limit: usize,
+    ) -> ConnectionsResponse {
         let mut connections = self
             .clients
             .iter()
@@ -28,9 +38,18 @@ impl ConnectionState {
             })
             .collect::<Vec<_>>();
         connections.sort_by_key(|connection| connection.id);
+        let total_count = connections.len();
+        let page = connections
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .collect::<Vec<_>>();
+        let next_offset = (offset + page.len() < total_count).then_some(offset + page.len());
         ConnectionsResponse {
-            count: connections.len(),
-            connections,
+            count: page.len(),
+            total_count,
+            next_offset,
+            connections: page,
         }
     }
 }
@@ -240,6 +259,13 @@ impl TransientState {
 
 impl Morrow {
     pub(super) async fn connections_response(&self) -> ConnectionsResponse {
+        self.connections_response_page(None).await
+    }
+
+    pub(super) async fn connections_response_page(
+        &self,
+        page: Option<(usize, usize)>,
+    ) -> ConnectionsResponse {
         let durable_counts = {
             let inner = self.inner.lock().await;
             let mut counts = HashMap::new();
@@ -262,10 +288,13 @@ impl Morrow {
             }
             counts
         };
-        self.connections
-            .lock()
-            .await
-            .response(&durable_counts, &transient_counts)
+        let connections = self.connections.lock().await;
+        match page {
+            Some((offset, limit)) => {
+                connections.response_page(&durable_counts, &transient_counts, offset, limit)
+            }
+            None => connections.response(&durable_counts, &transient_counts),
+        }
     }
 
     pub(super) async fn subscriptions_response(&self) -> SubscriptionsResponse {

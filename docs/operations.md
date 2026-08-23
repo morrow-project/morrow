@@ -61,6 +61,10 @@ The same administrative resources are available under the versioned
 `/api/v1/storage`, and `/api/v1/metrics`. The health endpoints are available
 as `/api/v1/health/live` and `/api/v1/health/ready`.
 
+High-cardinality connection listings can be paged with
+`/api/v1/connections?limit=100&offset=0`. The server clamps the page size to
+1,000 and returns `total_count` plus `next_offset` when more results remain.
+
 When `http_listen` is configured, set an admin token and protect the listener.
 The JSON endpoints include `/cluster`, `/connections`, `/subscriptions`,
 `/streams`, `/wal`, and `/quotas`.

@@ -23,6 +23,25 @@ async fn http_connections_endpoint_reports_live_client_metadata() {
     assert!(response.contains("\"subscriptions\":1"));
     assert!(response.contains("\"transient_subscriptions\":1"));
 }
+
+#[tokio::test]
+async fn versioned_connections_endpoint_supports_bounded_pagination() {
+    let scenario = Scenario::new();
+    let _first = scenario.connect_durable("client1", 25).await;
+    let _second = scenario.connect_durable("client2", 25).await;
+
+    let first_page = http_request(scenario.broker(), "/api/v1/connections?limit=1").await;
+    let second_page = http_request(scenario.broker(), "/api/v1/connections?limit=1&offset=1").await;
+
+    assert!(first_page.contains("\"count\":1"));
+    assert!(first_page.contains("\"total_count\":2"));
+    assert!(first_page.contains("\"next_offset\":1"));
+    assert!(first_page.contains("\"id\":1"));
+    assert!(second_page.contains("\"count\":1"));
+    assert!(second_page.contains("\"total_count\":2"));
+    assert!(second_page.contains("\"next_offset\":null"));
+    assert!(second_page.contains("\"id\":2"));
+}
 #[tokio::test]
 async fn http_subscriptions_endpoint_reports_durable_and_transient_state() {
     let scenario = Scenario::new();

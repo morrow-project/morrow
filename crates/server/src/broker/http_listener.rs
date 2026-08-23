@@ -101,9 +101,12 @@ impl Morrow {
             .and_then(|line| std::str::from_utf8(line).ok())
             .map(str::trim_end)
             .unwrap_or("");
-        let Some(path) = http_request_path(request_line) else {
+        let Some(request_target) = http_request_path(request_line) else {
             return write_http_not_found(&mut stream).await;
         };
+        let (path, query) = request_target
+            .split_once('?')
+            .unwrap_or((request_target, ""));
 
         if matches!(path, "/health/live" | "/api/v1/health/live") {
             return write_http_response(
@@ -134,8 +137,10 @@ impl Morrow {
         }
         match path {
             "/cluster" | "/api/v1/cluster" => self.write_cluster_response(&mut stream).await,
-            "/connections" | "/api/v1/connections" => {
-                self.write_connections_response(&mut stream).await
+            "/connections" => self.write_connections_response(&mut stream, None).await,
+            "/api/v1/connections" => {
+                self.write_connections_response(&mut stream, Some(parse_page(query)))
+                    .await
             }
             "/quotas" | "/api/v1/quotas" => self.write_quotas_response(&mut stream).await,
             "/subscriptions" | "/api/v1/subscriptions" => {
@@ -157,8 +162,9 @@ impl Morrow {
     async fn write_connections_response<W: AsyncWrite + Unpin>(
         &self,
         stream: &mut W,
+        page: Option<(usize, usize)>,
     ) -> Result<()> {
-        let body = serde_json::to_vec(&self.connections_response().await)
+        let body = serde_json::to_vec(&self.connections_response_page(page).await)
             .context("serializing HTTP connections response")?;
         write_http_response(stream, "200 OK", "application/json", &body).await
     }
@@ -194,4 +200,14 @@ impl Morrow {
         let body = self.metrics_response().await;
         write_http_text_response(stream, "200 OK", &body).await
     }
+}
+
+fn parse_page(query: &str) -> (usize, usize) {
+    let offset = http_query_parameter(query, "offset")
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0);
+    let limit = http_query_parameter(query, "limit")
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(100);
+    (offset, limit.clamp(1, 1_000))
 }
