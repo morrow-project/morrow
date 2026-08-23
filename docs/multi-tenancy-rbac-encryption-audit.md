@@ -38,3 +38,20 @@ The current default bootstrap maps unauthenticated connection admission to the
 tenant scope through every protocol/API, connector, middleware, storage, and
 cluster endpoint remain required integration work before multi-tenant mode is
 advertised as complete.
+
+Break-glass access is explicitly out of band: an operator must use a separate
+identity, a tenant-scoped policy snapshot, and an audited change window. The
+broker provides no implicit administrator backdoor. Recovery restores the
+encrypted object chain, loads every referenced KMS key version, verifies the
+audit chain, and only then re-enables tenant traffic.
+
+## Isolation matrix
+
+| Surface | Boundary enforced before work | Cross-tenant behavior |
+| --- | --- | --- |
+| PUB/SUB protocol | Dynamic permission plus tenant/namespace subject prefix | Deny before middleware, storage, or cluster scheduling |
+| Durable consumers | Subscription authorization and scoped subject | No consumer state is created |
+| Metrics | Aggregate-only counters with no tenant labels | No names or resource existence are exposed |
+| Middleware/connector ingress | Authorization precedes ingress execution | Deny before plugin/connector invocation |
+| Backup/object storage | Object-key AAD and encrypted artifact adapter | Wrong context fails AEAD authentication |
+| Policy/audit administration | Monotonic snapshots and append-only chain | Unauthorized changes are denied and recorded |
