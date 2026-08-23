@@ -412,6 +412,20 @@ impl Morrow {
             "morrow_wal_truncations_total {}\n",
             wal.truncations
         ));
+        metrics.push_str("# HELP morrow_wal_last_fsync_duration_us Last WAL fsync duration.\n");
+        metrics.push_str("# TYPE morrow_wal_last_fsync_duration_us gauge\n");
+        metrics.push_str(&format!(
+            "morrow_wal_last_fsync_duration_us {}\n",
+            wal.last_fsync_duration_ms.saturating_mul(1_000)
+        ));
+        metrics.push_str(
+            "# HELP morrow_wal_last_checkpoint_duration_us Last WAL checkpoint duration.\n",
+        );
+        metrics.push_str("# TYPE morrow_wal_last_checkpoint_duration_us gauge\n");
+        metrics.push_str(&format!(
+            "morrow_wal_last_checkpoint_duration_us {}\n",
+            wal.last_checkpoint_duration_ms.saturating_mul(1_000)
+        ));
         metrics.push_str(
             "# HELP morrow_compaction_candidates Current superseded records awaiting compaction.\n",
         );
@@ -431,6 +445,21 @@ impl Morrow {
         metrics.push_str("# HELP morrow_cluster_peers Current configured cluster peers.\n");
         metrics.push_str("# TYPE morrow_cluster_peers gauge\n");
         metrics.push_str(&format!("morrow_cluster_peers {}\n", cluster.peers.len()));
+        metrics
+            .push_str("# HELP morrow_cluster_delta_applications_total Applied cluster deltas.\n");
+        metrics.push_str("# TYPE morrow_cluster_delta_applications_total counter\n");
+        metrics.push_str(&format!(
+            "morrow_cluster_delta_applications_total {}\n",
+            cluster.state_application.delta_applications
+        ));
+        metrics.push_str(
+            "# HELP morrow_cluster_full_reconciliations_total Full cluster reconciliations.\n",
+        );
+        metrics.push_str("# TYPE morrow_cluster_full_reconciliations_total counter\n");
+        metrics.push_str(&format!(
+            "morrow_cluster_full_reconciliations_total {}\n",
+            cluster.state_application.full_reconciliations
+        ));
         let connected_routes = cluster
             .routes
             .as_ref()
