@@ -38,6 +38,10 @@ pub(super) fn auth_config_with_permissions(
                     AuthClientConfig {
                         public_key: client.public_key_hex().to_ascii_lowercase(),
                         permissions: Some(AuthPermissions { publish, subscribe }),
+                        tenant: "default".to_string(),
+                        namespace: "default".to_string(),
+                        expires_at_ms: None,
+                        external_subject: None,
                     },
                 )
             })
@@ -491,6 +495,10 @@ impl Harness {
                         AuthClientConfig {
                             public_key: client.public_key_hex().to_ascii_lowercase(),
                             permissions: None,
+                            tenant: "default".to_string(),
+                            namespace: "default".to_string(),
+                            expires_at_ms: None,
+                            external_subject: None,
                         },
                     )
                 })

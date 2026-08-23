@@ -107,6 +107,10 @@ async fn secure_secret_permissions_are_used_for_tls_authentication() {
                 AuthClientConfig {
                     public_key: auth.public_key_hex(),
                     permissions: None,
+                    tenant: "default".to_string(),
+                    namespace: "default".to_string(),
+                    expires_at_ms: None,
+                    external_subject: None,
                 },
             )]),
         },

@@ -277,6 +277,12 @@ impl Morrow {
                 .clients
                 .get(&auth.client_id)
                 .ok_or_else(|| BrokerError::msg("unknown client_id"))?;
+            if let Some(expires_at_ms) = public_key.expires_at_ms {
+                crate::broker_ensure!(
+                    self.hooks.clock.now_ms() < expires_at_ms,
+                    "client credential has expired"
+                );
+            }
             let client_id = auth::verify(auth, nonce, &public_key.public_key)?;
             if let Some(durable_id) = durable_id {
                 crate::broker_ensure!(
@@ -536,8 +542,12 @@ impl Morrow {
             return Ok(());
         }
         drop(connections);
-        self.authorize_policy(connection_id, crate::tenancy::Permission::Subscribe)
-            .await?;
+        self.authorize_policy(
+            connection_id,
+            crate::tenancy::Permission::Subscribe,
+            Some(subject_name),
+        )
+        .await?;
         let auth_client = self
             .config
             .auth

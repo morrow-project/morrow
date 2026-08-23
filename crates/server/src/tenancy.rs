@@ -68,6 +68,16 @@ pub struct ResourceScope {
     pub namespace: NamespaceId,
 }
 
+impl ResourceScope {
+    pub fn subject_prefix(&self) -> String {
+        format!("{}.{}.", self.tenant.as_str(), self.namespace.as_str())
+    }
+
+    pub fn contains_subject(&self, subject: &str) -> bool {
+        subject.starts_with(&self.subject_prefix())
+    }
+}
+
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
 )]
@@ -213,7 +223,13 @@ fn validate_role(role: &Role) -> Result<()> {
 }
 
 fn validate_binding(binding: &RoleBinding) -> Result<()> {
-    validate_identifier(&binding.subject, "policy subject")
+    crate::broker_ensure!(
+        !binding.subject.is_empty()
+            && binding.subject.len() <= MAX_IDENTIFIER_BYTES
+            && !binding.subject.chars().any(char::is_whitespace),
+        "policy subject must be non-empty, bounded, and contain no whitespace"
+    );
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

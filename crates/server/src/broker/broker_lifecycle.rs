@@ -195,11 +195,7 @@ impl Morrow {
         let audit = Arc::new(std::sync::Mutex::new(
             crate::tenancy::AuditLog::with_capacity(10_000)?,
         ));
-        let default_scope = crate::tenancy::ResourceScope {
-            tenant: crate::tenancy::TenantId::new("default")?,
-            namespace: crate::tenancy::NamespaceId::new("default")?,
-        };
-        for (index, (subject, _client)) in config.auth.clients.iter().enumerate() {
+        for (index, (subject, client)) in config.auth.clients.iter().enumerate() {
             let role_name = format!("static-client-{index}");
             let mut permissions = std::collections::BTreeSet::new();
             permissions.insert(crate::tenancy::Permission::Publish);
@@ -208,9 +204,16 @@ impl Morrow {
                 name: role_name.clone(),
                 permissions,
             })?;
+            let scope = crate::tenancy::ResourceScope {
+                tenant: crate::tenancy::TenantId::new(client.tenant.clone())?,
+                namespace: crate::tenancy::NamespaceId::new(client.namespace.clone())?,
+            };
             policy.bind(crate::tenancy::RoleBinding {
-                subject: subject.clone(),
-                scope: default_scope.clone(),
+                subject: client
+                    .external_subject
+                    .clone()
+                    .unwrap_or_else(|| subject.clone()),
+                scope,
                 role: role_name,
                 expires_at_ms: None,
             })?;

@@ -73,6 +73,10 @@ pub struct AuthConfig {
 pub struct AuthClientConfig {
     pub public_key: String,
     pub permissions: Option<AuthPermissions>,
+    pub tenant: String,
+    pub namespace: String,
+    pub expires_at_ms: Option<u64>,
+    pub external_subject: Option<String>,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthPermissions {
@@ -329,11 +333,38 @@ fn get_auth_config(value: &serde_json::Value) -> Result<AuthConfig> {
                         )
                     })?;
                 let permissions = get_auth_permissions(value)?;
+                let tenant = get_string(value, "tenant")?
+                    .unwrap_or("default")
+                    .to_string();
+                let namespace = get_string(value, "namespace")?
+                    .unwrap_or("default")
+                    .to_string();
+                let expires_at_ms = value
+                    .get("expires_at_ms")
+                    .and_then(serde_json::Value::as_u64);
+                if value.get("expires_at_ms").is_some() && expires_at_ms.is_none() {
+                    return Err(BrokerError::msg(
+                        "config field auth.clients[].expires_at_ms must be an unsigned integer",
+                    ));
+                }
+                let external_subject = get_string(value, "external_subject")?.map(str::to_string);
+                if let Some(subject) = &external_subject {
+                    crate::broker_ensure!(
+                        !subject.is_empty() && !subject.chars().any(char::is_whitespace),
+                        "config field auth.clients[].external_subject must be non-empty"
+                    );
+                }
+                crate::tenancy::TenantId::new(tenant.clone())?;
+                crate::tenancy::NamespaceId::new(namespace.clone())?;
                 clients.insert(
                     client_id.to_string(),
                     AuthClientConfig {
                         public_key: public_key.to_ascii_lowercase(),
                         permissions,
+                        tenant,
+                        namespace,
+                        expires_at_ms,
+                        external_subject,
                     },
                 );
             }

@@ -9,6 +9,7 @@ impl Morrow {
         &self,
         connection_id: u64,
         permission: crate::tenancy::Permission,
+        resource: Option<&str>,
     ) -> Result<()> {
         if !self.config.auth.enabled {
             return Ok(());
@@ -21,12 +22,40 @@ impl Morrow {
             .get(&connection_id)
             .and_then(|client| client.durable_id.clone())
             .ok_or_else(|| BrokerError::msg("authenticated client is missing durable identity"))?;
+        let client_config = self
+            .config
+            .auth
+            .clients
+            .get(&subject)
+            .ok_or_else(|| BrokerError::msg("unknown authenticated client"))?;
         let scope = crate::tenancy::ResourceScope {
-            tenant: crate::tenancy::TenantId::new("default")?,
-            namespace: crate::tenancy::NamespaceId::new("default")?,
+            tenant: crate::tenancy::TenantId::new(client_config.tenant.clone())?,
+            namespace: crate::tenancy::NamespaceId::new(client_config.namespace.clone())?,
         };
-        self.policy
-            .authorize(&subject, &scope, permission, self.hooks.clock.now_ms())
+        let policy_subject = client_config
+            .external_subject
+            .as_deref()
+            .unwrap_or(&subject);
+        let scoped_mode = self
+            .config
+            .auth
+            .clients
+            .values()
+            .any(|client| client.tenant != "default" || client.namespace != "default");
+        if scoped_mode {
+            if let Some(resource) = resource {
+                crate::broker_ensure!(
+                    scope.contains_subject(resource),
+                    "resource is outside authenticated tenant namespace"
+                );
+            }
+        }
+        self.policy.authorize(
+            policy_subject,
+            &scope,
+            permission,
+            self.hooks.clock.now_ms(),
+        )
     }
 
     pub(super) fn record_audit_event(&self, event: crate::tenancy::AuditEvent) {
@@ -112,8 +141,12 @@ impl Morrow {
             return Ok(());
         }
         drop(connections);
-        self.authorize_policy(connection_id, crate::tenancy::Permission::Publish)
-            .await?;
+        self.authorize_policy(
+            connection_id,
+            crate::tenancy::Permission::Publish,
+            Some(subject_name),
+        )
+        .await?;
         let auth_client = self
             .config
             .auth
