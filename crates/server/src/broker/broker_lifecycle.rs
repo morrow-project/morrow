@@ -8,16 +8,22 @@ impl Morrow {
 
     pub(crate) fn open_with_hooks(config: Config, hooks: BrokerHooks) -> Result<Self> {
         config.validate()?;
-        let (mut wal, mut replay) = Wal::open(
+        let encryption = config.storage_encryption()?;
+        let (mut wal, mut replay) = Wal::open_with_encryption(
             &config.wal_dir,
             config.fsync_interval(),
             config.wal_segment_bytes,
+            encryption.clone(),
         )?;
         if let Some(cluster) = &config.cluster {
             wal.namespace_delivery_ids(cluster.node_id);
         }
-        let (partition_logs, mut envelopes) =
-            PartitionLogSet::open(&config.wal_dir, &config.streams, config.wal_segment_bytes)?;
+        let (partition_logs, mut envelopes) = PartitionLogSet::open_with_encryption(
+            &config.wal_dir,
+            &config.streams,
+            config.wal_segment_bytes,
+            encryption,
+        )?;
         partition_logs.enforce_retention(&mut envelopes, &config.streams, hooks.clock.now_ms())?;
         let mut envelope_seqs = envelopes
             .iter()
@@ -183,6 +189,42 @@ impl Morrow {
             }
         };
         let quotas = Arc::new(crate::quota::QuotaRuntime::new(&config.quotas));
+        let tenant_quotas =
+            crate::quota::TenantQuotaRuntime::new(crate::quota::TenantQuotaLimits {
+                max_connections: config.quotas.max_connections,
+                max_memory_bytes: config.quotas.max_outbound_bytes_per_connection as u64,
+                max_disk_bytes: u64::MAX,
+                max_tasks: config.quotas.max_durable_consumers,
+                max_background_tasks: config.quotas.max_transient_subscriptions,
+            });
+        let policy = Arc::new(crate::tenancy::PolicyStore::default());
+        let audit = Arc::new(std::sync::Mutex::new(crate::tenancy::AuditLog::open(
+            config.wal_dir.join("audit.log"),
+            10_000,
+        )?));
+        for (index, (subject, client)) in config.auth.clients.iter().enumerate() {
+            let role_name = format!("static-client-{index}");
+            let mut permissions = std::collections::BTreeSet::new();
+            permissions.insert(crate::tenancy::Permission::Publish);
+            permissions.insert(crate::tenancy::Permission::Subscribe);
+            policy.upsert_role(crate::tenancy::Role {
+                name: role_name.clone(),
+                permissions,
+            })?;
+            let scope = crate::tenancy::ResourceScope {
+                tenant: crate::tenancy::TenantId::new(client.tenant.clone())?,
+                namespace: crate::tenancy::NamespaceId::new(client.namespace.clone())?,
+            };
+            policy.bind(crate::tenancy::RoleBinding {
+                subject: client
+                    .external_subject
+                    .clone()
+                    .unwrap_or_else(|| subject.clone()),
+                scope,
+                role: role_name,
+                expires_at_ms: None,
+            })?;
+        }
         let route_mesh = RouteMesh::from_config(&config, quotas.clone())?;
         let wal = WalRuntime::new(wal);
         Ok(Self {
@@ -221,6 +263,9 @@ impl Morrow {
             tls_acceptor,
             admin_tls_acceptor,
             quotas,
+            tenant_quotas,
+            policy,
+            audit,
             cluster: Arc::new(Mutex::new(cluster)),
             cluster_applied_index: Arc::new(AtomicU64::new(0)),
             cluster_delta_gate: Arc::new(Mutex::new(())),
@@ -434,6 +479,15 @@ impl Morrow {
         let pull_waiters = self.pull_waiters.len();
 
         let quotas = self.quotas.snapshot();
+        let tenant_quota_usage = self.tenant_quotas.snapshot();
+        let tenant_connections = tenant_quota_usage
+            .values()
+            .map(|usage| usage.connections)
+            .sum::<usize>();
+        let tenant_memory_bytes = tenant_quota_usage
+            .values()
+            .map(|usage| usage.memory_bytes)
+            .sum::<u64>();
         let cluster = self.cluster_response().await;
         let streams = self.streams_response().await;
         let retained_messages = streams
@@ -777,6 +831,19 @@ impl Morrow {
             "morrow_quota_rejections_total{{resource=\"outbound\"}} {}\n",
             quotas.outbound_rejections
         ));
+        metrics.push_str("# HELP morrow_tenants Current tenants with quota usage.\n");
+        metrics.push_str("# TYPE morrow_tenants gauge\n");
+        metrics.push_str(&format!("morrow_tenants {}\n", tenant_quota_usage.len()));
+        metrics.push_str("# HELP morrow_tenant_connections Current tenant-scoped connections.\n");
+        metrics.push_str("# TYPE morrow_tenant_connections gauge\n");
+        metrics.push_str(&format!("morrow_tenant_connections {tenant_connections}\n"));
+        metrics.push_str(
+            "# HELP morrow_tenant_memory_bytes Current tenant-scoped memory reservations.\n",
+        );
+        metrics.push_str("# TYPE morrow_tenant_memory_bytes gauge\n");
+        metrics.push_str(&format!(
+            "morrow_tenant_memory_bytes {tenant_memory_bytes}\n"
+        ));
         metrics
     }
 
@@ -929,7 +996,18 @@ impl Morrow {
     }
 
     pub(super) fn spawn_accepted(&self, stream: TcpStream) {
+        const DEFAULT_TENANT: &str = "default";
+        if !self.tenant_quotas.try_connection(DEFAULT_TENANT) {
+            tokio::spawn(async move {
+                let mut stream = stream;
+                let _ = stream
+                    .write_all(&protocol::err("tenant connection quota exceeded"))
+                    .await;
+            });
+            return;
+        }
         let Some(permit) = self.quotas.try_client() else {
+            self.tenant_quotas.release_connection(DEFAULT_TENANT);
             tokio::spawn(async move {
                 let mut stream = stream;
                 let _ = stream
@@ -944,6 +1022,7 @@ impl Morrow {
             if let Err(err) = broker.handle_accepted(stream).await {
                 error!(error = ?err, "client error");
             }
+            broker.tenant_quotas.release_connection(DEFAULT_TENANT);
         });
     }
 

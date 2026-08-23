@@ -2,7 +2,7 @@ use super::*;
 use crate::stream::{
     PartitionFallback, PartitioningPolicy, PartitioningStrategy, RetentionPolicy, StoragePolicy,
 };
-use std::{fs::OpenOptions, io::Write};
+use std::{fs::OpenOptions, io::Write, sync::Arc};
 use tempfile::TempDir;
 
 fn definition(partitions: u32) -> StreamDefinition {
@@ -42,6 +42,39 @@ fn request<'a>(
         leader_epoch: 3,
         legacy_seq: None,
     }
+}
+
+#[test]
+fn encrypted_partition_logs_replay_and_load_payloads_after_restart() {
+    let dir = TempDir::new().unwrap();
+    let catalog = catalog(1);
+    let provider = Arc::new(crate::encryption::MemoryKeyProvider::default());
+    provider.insert(crate::encryption::KeyVersion::new(1), [6u8; 32]);
+    let keys = Arc::new(
+        crate::encryption::KeyRing::new(provider, crate::encryption::KeyVersion::new(1)).unwrap(),
+    );
+    let (logs, _) =
+        PartitionLogSet::open_with_encryption(dir.path(), &catalog, 4096, Some(keys.clone()))
+            .unwrap();
+    logs.append(request(&catalog.definitions()[0], None, &[]))
+        .unwrap();
+    logs.flush().unwrap();
+    let segment = dir
+        .path()
+        .join("streams/orders/partition-00000/00000000000000000001.plog");
+    let raw = std::fs::read(segment).unwrap();
+    assert!(!raw.windows(b"hello".len()).any(|window| window == b"hello"));
+    drop(logs);
+    let (reopened, _) =
+        PartitionLogSet::open_with_encryption(dir.path(), &catalog, 4096, Some(keys)).unwrap();
+    assert_eq!(
+        reopened
+            .load_envelope("orders", PartitionId(0), 0)
+            .unwrap()
+            .unwrap()
+            .payload,
+        b"hello"
+    );
 }
 
 fn request_for_subject<'a>(stream: &'a StreamDefinition, subject: &'a str) -> AppendRequest<'a> {

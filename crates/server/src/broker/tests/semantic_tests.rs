@@ -10,6 +10,10 @@ async fn auth_enabled_generates_fresh_nonce_per_connection() {
         crate::config::AuthClientConfig {
             public_key: "abcd".into(),
             permissions: None,
+            tenant: "default".to_string(),
+            namespace: "default".to_string(),
+            expires_at_ms: None,
+            external_subject: None,
         },
     );
     let broker = Morrow::open(config).unwrap();

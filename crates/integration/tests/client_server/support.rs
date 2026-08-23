@@ -38,6 +38,10 @@ pub(super) fn auth_config_with_permissions(
                     AuthClientConfig {
                         public_key: client.public_key_hex().to_ascii_lowercase(),
                         permissions: Some(AuthPermissions { publish, subscribe }),
+                        tenant: "default".to_string(),
+                        namespace: "default".to_string(),
+                        expires_at_ms: None,
+                        external_subject: None,
                     },
                 )
             })
@@ -148,6 +152,8 @@ impl ClusterHarness {
                 admin_tls: secure.then(tls_config),
                 quotas: Default::default(),
                 wal_dir: dir.path().join("wal"),
+                encryption_key_dir: None,
+                encryption_active_key_version: 1,
                 wal_segment_bytes: server::wal::DEFAULT_WAL_SEGMENT_BYTES,
                 fsync_interval_ms: 1,
                 max_payload,
@@ -491,6 +497,10 @@ impl Harness {
                         AuthClientConfig {
                             public_key: client.public_key_hex().to_ascii_lowercase(),
                             permissions: None,
+                            tenant: "default".to_string(),
+                            namespace: "default".to_string(),
+                            expires_at_ms: None,
+                            external_subject: None,
                         },
                     )
                 })
@@ -511,6 +521,8 @@ impl Harness {
             admin_tls: None,
             quotas: Default::default(),
             wal_dir: wal_dir.path().to_path_buf(),
+            encryption_key_dir: None,
+            encryption_active_key_version: 1,
             wal_segment_bytes: server::wal::DEFAULT_WAL_SEGMENT_BYTES,
             fsync_interval_ms: 1,
             max_payload,

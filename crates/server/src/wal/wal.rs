@@ -25,6 +25,15 @@ impl Wal {
         fsync_interval: Duration,
         segment_bytes: u64,
     ) -> Result<(Self, Replay)> {
+        Self::open_with_encryption(dir, fsync_interval, segment_bytes, None)
+    }
+
+    pub fn open_with_encryption(
+        dir: impl AsRef<Path>,
+        fsync_interval: Duration,
+        segment_bytes: u64,
+        encryption: Option<Arc<crate::encryption::KeyRing>>,
+    ) -> Result<(Self, Replay)> {
         let dir = dir.as_ref();
         crate::broker_ensure!(
             segment_bytes > 0,
@@ -32,7 +41,7 @@ impl Wal {
         );
         std::fs::create_dir_all(dir)
             .with_context(|| format!("creating WAL directory {}", dir.display()))?;
-        let output = replay_dir(dir)?;
+        let output = replay_dir(dir, encryption.clone())?;
         let file = OpenOptions::new()
             .create(true)
             .read(true)
@@ -60,6 +69,7 @@ impl Wal {
             fsync_interval,
             last_sync: Instant::now(),
             metrics,
+            encryption,
         };
         Ok((wal, output.replay))
     }
@@ -239,21 +249,34 @@ impl Wal {
         let mut checkpoint_bytes = SEGMENT_HEADER_LEN;
         {
             let mut file = create_segment(&tmp)?;
-            checkpoint_bytes += write_compact_state(&mut file, messages, consumers)?;
+            checkpoint_bytes +=
+                write_compact_state(&mut file, messages, consumers, self.encryption.as_ref())?;
             for record in dead_letters {
                 let body = dead_letter_body(&record)?;
-                write_record_to(&mut file, KIND_DEAD_LETTER, &body)?;
-                checkpoint_bytes += record_size(&body)?;
+                checkpoint_bytes += write_protected_record_to(
+                    &mut file,
+                    KIND_DEAD_LETTER,
+                    &body,
+                    self.encryption.as_ref(),
+                )?;
             }
             for record in producer_sequences {
                 let body = producer_sequence_body(&record)?;
-                write_record_to(&mut file, KIND_PRODUCER_SEQUENCE, &body)?;
-                checkpoint_bytes += record_size(&body)?;
+                checkpoint_bytes += write_protected_record_to(
+                    &mut file,
+                    KIND_PRODUCER_SEQUENCE,
+                    &body,
+                    self.encryption.as_ref(),
+                )?;
             }
             for record in groups {
                 let body = group_state_body(&record)?;
-                write_record_to(&mut file, KIND_GROUP_STATE, &body)?;
-                checkpoint_bytes += record_size(&body)?;
+                checkpoint_bytes += write_protected_record_to(
+                    &mut file,
+                    KIND_GROUP_STATE,
+                    &body,
+                    self.encryption.as_ref(),
+                )?;
             }
             file.flush()?;
             file.sync_data()?;
@@ -321,9 +344,10 @@ impl Wal {
     }
 
     pub(super) fn append_record(&mut self, kind: u8, body: &[u8]) -> Result<()> {
-        let bytes = record_size(body)?;
+        let protected = protect_body(kind, body, self.encryption.as_ref())?;
+        let bytes = record_size(&protected)?;
         self.rotate_if_needed(bytes)?;
-        write_record_to(&mut self.file, kind, body)
+        write_record_to(&mut self.file, kind, &protected)
             .with_context(|| format!("appending WAL record to {}", self.active_path.display()))?;
         self.active_bytes += bytes;
         Ok(())
@@ -383,20 +407,19 @@ pub(super) fn write_compact_state(
     file: &mut File,
     messages: impl IntoIterator<Item = PublishRecord>,
     consumers: impl IntoIterator<Item = ReplayedConsumer>,
+    encryption: Option<&Arc<crate::encryption::KeyRing>>,
 ) -> Result<u64> {
     let mut bytes = 0;
     for consumer in consumers {
         let body = consumer_upsert_body(&consumer.record)?;
-        write_record_to(file, KIND_CONSUMER_UPSERT, &body)?;
-        bytes += record_size(&body)?;
+        bytes += write_protected_record_to(file, KIND_CONSUMER_UPSERT, &body, encryption)?;
         let consumer_id = consumer.record.consumer_id.clone();
         if let Some(cursors) = consumer.cursors {
             let body = consumer_cursor_body(&ConsumerCursorRecord {
                 consumer_id: consumer_id.clone(),
                 cursors,
             })?;
-            write_record_to(file, KIND_CONSUMER_CURSOR, &body)?;
-            bytes += record_size(&body)?;
+            bytes += write_protected_record_to(file, KIND_CONSUMER_CURSOR, &body, encryption)?;
         }
         for acked in consumer.acked {
             let body = ack_body(&AckRecord {
@@ -404,8 +427,7 @@ pub(super) fn write_compact_state(
                 consumer_id: consumer_id.clone(),
                 delivery_id: 0,
             })?;
-            write_record_to(file, KIND_ACK, &body)?;
-            bytes += record_size(&body)?;
+            bytes += write_protected_record_to(file, KIND_ACK, &body, encryption)?;
         }
         for pending in consumer.pending {
             let body = delivery_attempt_body(&DeliveryAttemptRecord {
@@ -416,8 +438,7 @@ pub(super) fn write_compact_state(
                 attempt: 0,
                 retry_waiting: false,
             })?;
-            write_record_to(file, KIND_DELIVERY_ATTEMPT, &body)?;
-            bytes += record_size(&body)?;
+            bytes += write_protected_record_to(file, KIND_DELIVERY_ATTEMPT, &body, encryption)?;
         }
         for (seq, next_attempt) in consumer.pending_attempts {
             let body = delivery_attempt_body(&DeliveryAttemptRecord {
@@ -428,13 +449,11 @@ pub(super) fn write_compact_state(
                 attempt: next_attempt.saturating_sub(1),
                 retry_waiting: false,
             })?;
-            write_record_to(file, KIND_DELIVERY_ATTEMPT, &body)?;
-            bytes += record_size(&body)?;
+            bytes += write_protected_record_to(file, KIND_DELIVERY_ATTEMPT, &body, encryption)?;
         }
         for attempt in consumer.in_flight.into_values() {
             let body = delivery_attempt_body(&attempt)?;
-            write_record_to(file, KIND_DELIVERY_ATTEMPT, &body)?;
-            bytes += record_size(&body)?;
+            bytes += write_protected_record_to(file, KIND_DELIVERY_ATTEMPT, &body, encryption)?;
         }
     }
     for message in messages {
@@ -451,8 +470,7 @@ pub(super) fn write_compact_state(
             ),
             _ => (KIND_PUBLISH, publish_body(&message)?),
         };
-        write_record_to(file, kind, &body)?;
-        bytes += record_size(&body)?;
+        bytes += write_protected_record_to(file, kind, &body, encryption)?;
     }
     Ok(bytes)
 }

@@ -321,3 +321,37 @@ fn consumer_group_metadata_and_offsets_are_consensus_managed() {
         record.snapshot.committed_offsets
     );
 }
+
+#[test]
+fn policy_replacements_are_monotonic_and_consensus_managed() {
+    let mut state = DurableState::new(nodes());
+    let snapshot = crate::tenancy::PolicySnapshot {
+        generation: 4,
+        roles: [(
+            "publisher".to_string(),
+            crate::tenancy::Role {
+                name: "publisher".to_string(),
+                permissions: [crate::tenancy::Permission::Publish].into_iter().collect(),
+            },
+        )]
+        .into_iter()
+        .collect(),
+        bindings: Vec::new(),
+    };
+    assert_eq!(
+        state.apply_command(BrokerCommand::PolicyReplace {
+            snapshot: snapshot.clone(),
+        }),
+        BrokerResponse::PolicyReplace { generation: 4 }
+    );
+    assert_eq!(state.policy, Some(snapshot.clone()));
+    assert_eq!(
+        state.apply_command(BrokerCommand::PolicyReplace {
+            snapshot: crate::tenancy::PolicySnapshot {
+                generation: 3,
+                ..snapshot
+            },
+        }),
+        BrokerResponse::Noop
+    );
+}

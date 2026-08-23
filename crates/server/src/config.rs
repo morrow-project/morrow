@@ -21,6 +21,8 @@ pub struct Config {
     pub admin_tls: Option<TlsConfig>,
     pub quotas: ResourceQuotaConfig,
     pub wal_dir: PathBuf,
+    pub encryption_key_dir: Option<PathBuf>,
+    pub encryption_active_key_version: u32,
     pub wal_segment_bytes: u64,
     pub fsync_interval_ms: u64,
     pub max_payload: usize,
@@ -73,6 +75,10 @@ pub struct AuthConfig {
 pub struct AuthClientConfig {
     pub public_key: String,
     pub permissions: Option<AuthPermissions>,
+    pub tenant: String,
+    pub namespace: String,
+    pub expires_at_ms: Option<u64>,
+    pub external_subject: Option<String>,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthPermissions {
@@ -160,6 +166,11 @@ impl Config {
         let admin_tls = get_named_tls_config(value, "admin_tls")?;
         let quotas = get_resource_quotas(value)?;
         let wal_dir = PathBuf::from(get_string(value, "wal_dir")?.unwrap_or("./morrow-wal"));
+        let encryption_key_dir = get_string(value, "encryption_key_dir")?.map(PathBuf::from);
+        let encryption_active_key_version = get_u64(value, "encryption_active_key_version")?
+            .unwrap_or(1)
+            .try_into()
+            .context("config field encryption_active_key_version is too large")?;
         let wal_segment_bytes =
             get_u64(value, "wal_segment_bytes")?.unwrap_or(crate::wal::DEFAULT_WAL_SEGMENT_BYTES);
         let fsync_interval_ms = get_u64(value, "fsync_interval_ms")?.unwrap_or(5);
@@ -189,6 +200,8 @@ impl Config {
             admin_tls,
             quotas,
             wal_dir,
+            encryption_key_dir,
+            encryption_active_key_version,
             wal_segment_bytes,
             fsync_interval_ms,
             max_payload: max_payload
@@ -214,6 +227,17 @@ impl Config {
 
     pub fn fsync_interval(&self) -> Duration {
         Duration::from_millis(self.fsync_interval_ms)
+    }
+
+    pub fn storage_encryption(&self) -> Result<Option<std::sync::Arc<crate::encryption::KeyRing>>> {
+        let Some(directory) = &self.encryption_key_dir else {
+            return Ok(None);
+        };
+        let provider = std::sync::Arc::new(crate::encryption::FileKeyProvider::new(directory));
+        Ok(Some(std::sync::Arc::new(crate::encryption::KeyRing::new(
+            provider,
+            crate::encryption::KeyVersion::new(self.encryption_active_key_version),
+        )?)))
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -329,11 +353,38 @@ fn get_auth_config(value: &serde_json::Value) -> Result<AuthConfig> {
                         )
                     })?;
                 let permissions = get_auth_permissions(value)?;
+                let tenant = get_string(value, "tenant")?
+                    .unwrap_or("default")
+                    .to_string();
+                let namespace = get_string(value, "namespace")?
+                    .unwrap_or("default")
+                    .to_string();
+                let expires_at_ms = value
+                    .get("expires_at_ms")
+                    .and_then(serde_json::Value::as_u64);
+                if value.get("expires_at_ms").is_some() && expires_at_ms.is_none() {
+                    return Err(BrokerError::msg(
+                        "config field auth.clients[].expires_at_ms must be an unsigned integer",
+                    ));
+                }
+                let external_subject = get_string(value, "external_subject")?.map(str::to_string);
+                if let Some(subject) = &external_subject {
+                    crate::broker_ensure!(
+                        !subject.is_empty() && !subject.chars().any(char::is_whitespace),
+                        "config field auth.clients[].external_subject must be non-empty"
+                    );
+                }
+                crate::tenancy::TenantId::new(tenant.clone())?;
+                crate::tenancy::NamespaceId::new(namespace.clone())?;
                 clients.insert(
                     client_id.to_string(),
                     AuthClientConfig {
                         public_key: public_key.to_ascii_lowercase(),
                         permissions,
+                        tenant,
+                        namespace,
+                        expires_at_ms,
+                        external_subject,
                     },
                 );
             }

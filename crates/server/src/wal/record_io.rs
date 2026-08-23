@@ -103,6 +103,50 @@ pub(super) fn write_record_to(file: &mut File, kind: u8, body: &[u8]) -> Result<
     file.write_all(&hasher.finalize().to_le_bytes())?;
     Ok(())
 }
+
+pub(super) fn protect_body(
+    kind: u8,
+    body: &[u8],
+    encryption: Option<&std::sync::Arc<crate::encryption::KeyRing>>,
+) -> Result<Vec<u8>> {
+    let Some(encryption) = encryption else {
+        return Ok(body.to_vec());
+    };
+    let envelope = encryption.encrypt(body, &[b'W', b'A', b'L', kind])?;
+    let mut encoded = ENCRYPTED_BODY_MAGIC.to_vec();
+    encoded.extend(
+        serde_json::to_vec(&envelope)
+            .map_err(|error| crate::error::BrokerError::msg(error.to_string()))?,
+    );
+    Ok(encoded)
+}
+
+pub(super) fn unprotect_body(
+    kind: u8,
+    body: &[u8],
+    encryption: Option<&std::sync::Arc<crate::encryption::KeyRing>>,
+) -> Result<Vec<u8>> {
+    if !body.starts_with(ENCRYPTED_BODY_MAGIC) {
+        return Ok(body.to_vec());
+    }
+    let encryption = encryption
+        .ok_or_else(|| crate::error::BrokerError::msg("encrypted WAL requires a key provider"))?;
+    let envelope: crate::encryption::EncryptedBlob =
+        serde_json::from_slice(&body[ENCRYPTED_BODY_MAGIC.len()..])
+            .map_err(|error| crate::error::BrokerError::msg(error.to_string()))?;
+    encryption.decrypt(&envelope, &[b'W', b'A', b'L', kind])
+}
+
+pub(super) fn write_protected_record_to(
+    file: &mut File,
+    kind: u8,
+    body: &[u8],
+    encryption: Option<&std::sync::Arc<crate::encryption::KeyRing>>,
+) -> Result<u64> {
+    let protected = protect_body(kind, body, encryption)?;
+    write_record_to(file, kind, &protected)?;
+    record_size(&protected)
+}
 pub(super) fn read_record(file: &mut File) -> io::Result<Option<(u8, Vec<u8>, u64)>> {
     let mut len_bytes = [0; 4];
     match file.read_exact(&mut len_bytes) {

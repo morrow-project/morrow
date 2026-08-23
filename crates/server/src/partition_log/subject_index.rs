@@ -1,9 +1,11 @@
 use super::*;
+use crate::encryption::KeyRing;
 use crate::error::ResultExt;
 use protocol::subject;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::OpenOptions;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 const SUBJECT_INDEX_EXTENSION: &str = "sidx";
 const SUBJECT_INDEX_VERSION: u32 = 1;
@@ -19,6 +21,7 @@ pub(super) struct SubjectSegment {
     record_count: usize,
     source_checksum: u64,
     index: Option<SubjectIndexFile>,
+    encryption: Option<Arc<KeyRing>>,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -31,7 +34,11 @@ struct SubjectIndexFile {
 }
 
 impl SubjectSegment {
-    pub(super) fn new(path: PathBuf, records: Vec<(String, u64)>) -> Self {
+    pub(super) fn new(
+        path: PathBuf,
+        records: Vec<(String, u64)>,
+        encryption: Option<Arc<KeyRing>>,
+    ) -> Self {
         let source_checksum = records_checksum(&records);
         let record_count = records.len();
         Self {
@@ -40,6 +47,7 @@ impl SubjectSegment {
             record_count,
             source_checksum,
             index: None,
+            encryption,
         }
     }
 
@@ -85,7 +93,7 @@ impl SubjectSegment {
         {
             return Ok(query);
         }
-        scan_segment(&self.path, filter)
+        scan_segment(&self.path, filter, self.encryption.as_ref())
     }
 
     fn release_records(&mut self) {
@@ -136,11 +144,15 @@ fn scan_offsets(records: &[(String, u64)], filter: &str) -> Vec<u64> {
         .collect()
 }
 
-fn scan_segment(path: &Path, filter: &str) -> Result<SubjectIndexQuery> {
+fn scan_segment(
+    path: &Path,
+    filter: &str,
+    encryption: Option<&Arc<KeyRing>>,
+) -> Result<SubjectIndexQuery> {
     let mut file = OpenOptions::new().read(true).open(path)?;
     super::codec::validate_segment_header(&mut file, path)?;
     let mut offsets = Vec::new();
-    while let Some((envelope, _)) = super::codec::read_batch(&mut file)? {
+    while let Some((envelope, _)) = super::codec::read_batch_with_key(&mut file, encryption)? {
         if subject::matches(filter, &envelope.subject) {
             offsets.push(envelope.offset);
         }

@@ -88,6 +88,9 @@ pub enum BrokerCommand {
         group: String,
         record: crate::consumer_group::GroupRecord,
     },
+    PolicyReplace {
+        snapshot: crate::tenancy::PolicySnapshot,
+    },
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BrokerResponse {
@@ -103,6 +106,9 @@ pub enum BrokerResponse {
     ConsumerUpsert,
     ConsumerDelete,
     GroupUpsert,
+    PolicyReplace {
+        generation: u64,
+    },
     Noop,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -129,6 +135,8 @@ pub struct DurableState {
     pub next_partition_offsets: HashMap<String, u64>,
     #[serde(default)]
     pub partition_commits: HashMap<String, PartitionCommitMetadata>,
+    #[serde(default)]
+    pub policy: Option<crate::tenancy::PolicySnapshot>,
     pub last_applied: Option<LogId<u64>>,
     pub last_membership: StoredMembership<u64, BasicNode>,
 }
@@ -161,6 +169,7 @@ impl DurableState {
             groups: HashMap::new(),
             next_partition_offsets: HashMap::new(),
             partition_commits: HashMap::new(),
+            policy: None,
             last_applied: None,
             last_membership: StoredMembership::new(None, membership),
         }
@@ -186,6 +195,18 @@ impl DurableState {
                 } else {
                     BrokerResponse::Noop
                 }
+            }
+            BrokerCommand::PolicyReplace { snapshot } => {
+                if self
+                    .policy
+                    .as_ref()
+                    .is_some_and(|current| snapshot.generation < current.generation)
+                {
+                    return BrokerResponse::Noop;
+                }
+                let generation = snapshot.generation;
+                self.policy = Some(snapshot);
+                BrokerResponse::PolicyReplace { generation }
             }
             BrokerCommand::PartitionCommit {
                 stream,

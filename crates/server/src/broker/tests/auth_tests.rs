@@ -101,6 +101,84 @@ async fn omitted_permissions_allow_authenticated_publish_and_subscribe() {
 }
 
 #[tokio::test]
+async fn dynamic_policy_revocation_fences_an_authenticated_client_without_restart() {
+    let scenario = auth_scenario(vec![auth_client("publisher1", [8; 32], None, None)]);
+    let mut publisher = connect_authenticated(&scenario, "publisher1", [8; 32]).await;
+    let policy = scenario.broker().policy_store();
+    let scope = crate::tenancy::ResourceScope {
+        tenant: crate::tenancy::TenantId::new("default").unwrap(),
+        namespace: crate::tenancy::NamespaceId::new("default").unwrap(),
+    };
+    policy.revoke("publisher1", &scope, None);
+    publisher.publish("orders/created", b"revoked").await;
+    publisher
+        .expect_err_contains("tenant permission denied")
+        .await;
+    let audit = scenario.broker().audit_records();
+    assert_eq!(audit.last().unwrap().event.outcome, "denied");
+    assert_eq!(audit.last().unwrap().event.action, "publish");
+    scenario.broker().verify_audit_log().unwrap();
+}
+
+#[tokio::test]
+async fn scoped_tenants_cannot_publish_outside_their_namespace() {
+    let scenario = auth_scenario(vec![auth_client_scoped(
+        "publisher-a",
+        [10; 32],
+        Some(vec!["tenant-a.orders.*"]),
+        None,
+        "tenant-a",
+        "orders",
+    )]);
+    let mut publisher = connect_authenticated(&scenario, "publisher-a", [10; 32]).await;
+    publisher
+        .publish("tenant-b.orders.created", b"cross-tenant")
+        .await;
+    publisher
+        .expect_err_contains("outside authenticated tenant namespace")
+        .await;
+    assert!(
+        scenario
+            .broker()
+            .audit_records()
+            .iter()
+            .any(|record| record.event.outcome == "denied")
+    );
+}
+
+#[tokio::test]
+async fn expired_public_key_credentials_are_rejected_at_connect() {
+    let (client_id, mut client_config) = auth_client("expired", [11; 32], None, None);
+    client_config.expires_at_ms = Some(0);
+    let scenario = auth_scenario(vec![(client_id, client_config)]);
+    let (mut client, info) = TestClient::connect_with_info(scenario.broker()).await;
+    client
+        .write_line(&connect_payload(&info, "expired", [11; 32], None))
+        .await;
+    client.expect_err_contains("credential has expired").await;
+}
+
+#[tokio::test]
+async fn external_identity_mapping_is_used_for_dynamic_policy() {
+    let (client_id, mut client_config) = auth_client("mapped", [12; 32], None, None);
+    client_config.external_subject = Some("idp/alice".to_string());
+    let scenario = auth_scenario(vec![(client_id, client_config)]);
+    let mut publisher = connect_authenticated(&scenario, "mapped", [12; 32]).await;
+    let scope = crate::tenancy::ResourceScope {
+        tenant: crate::tenancy::TenantId::new("default").unwrap(),
+        namespace: crate::tenancy::NamespaceId::new("default").unwrap(),
+    };
+    scenario
+        .broker()
+        .policy_store()
+        .revoke("idp/alice", &scope, None);
+    publisher.publish("orders/created", b"mapped-revoked").await;
+    publisher
+        .expect_err_contains("tenant permission denied")
+        .await;
+}
+
+#[tokio::test]
 async fn publish_and_subscribe_patterns_authorize_matching_subjects() {
     let scenario = auth_scenario(vec![
         auth_client("subscriber1", [7; 32], None, Some(vec!["orders/**"])),
@@ -425,6 +503,17 @@ fn auth_client(
     publish: Option<Vec<&str>>,
     subscribe: Option<Vec<&str>>,
 ) -> (String, AuthClientConfig) {
+    auth_client_scoped(client_id, seed, publish, subscribe, "default", "default")
+}
+
+fn auth_client_scoped(
+    client_id: &str,
+    seed: [u8; 32],
+    publish: Option<Vec<&str>>,
+    subscribe: Option<Vec<&str>>,
+    tenant: &str,
+    namespace: &str,
+) -> (String, AuthClientConfig) {
     let signing_key = SigningKey::from_bytes(&seed);
     let permissions = match (publish, subscribe) {
         (None, None) => None,
@@ -438,6 +527,10 @@ fn auth_client(
         AuthClientConfig {
             public_key: hex(signing_key.verifying_key().as_bytes()),
             permissions,
+            tenant: tenant.to_string(),
+            namespace: namespace.to_string(),
+            expires_at_ms: None,
+            external_subject: None,
         },
     )
 }

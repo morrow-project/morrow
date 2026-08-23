@@ -25,6 +25,15 @@ impl PartitionLogSet {
         catalog: &StreamCatalog,
         segment_bytes: u64,
     ) -> Result<(Self, Vec<MessageEnvelope>)> {
+        Self::open_with_encryption(wal_dir, catalog, segment_bytes, None)
+    }
+
+    pub fn open_with_encryption(
+        wal_dir: &Path,
+        catalog: &StreamCatalog,
+        segment_bytes: u64,
+        encryption: Option<std::sync::Arc<crate::encryption::KeyRing>>,
+    ) -> Result<(Self, Vec<MessageEnvelope>)> {
         let root = wal_dir.join("streams");
         std::fs::create_dir_all(&root)
             .with_context(|| format!("creating stream data directory {}", root.display()))?;
@@ -47,12 +56,18 @@ impl PartitionLogSet {
                 .chunks(chunk_size)
                 .map(|chunk| {
                     let root = &root;
+                    let encryption = encryption.clone();
                     scope.spawn(move || -> Result<Vec<_>> {
                         chunk
                             .iter()
                             .map(|(stream, partition)| {
-                                let (log, replay, repaired) =
-                                    PartitionLog::open(root, stream, *partition, segment_bytes)?;
+                                let (log, replay, repaired) = PartitionLog::open(
+                                    root,
+                                    stream,
+                                    *partition,
+                                    segment_bytes,
+                                    encryption.clone(),
+                                )?;
                                 Ok((stream.clone(), *partition, log, replay, repaired))
                             })
                             .collect()

@@ -5,6 +5,7 @@
 //! manifest after every checksum has been verified.
 
 use crate::{
+    encryption::KeyRing,
     error::{BrokerError, Result, ResultExt},
     stream::StreamDefinition,
 };
@@ -32,6 +33,8 @@ pub struct BackupObject {
     pub sha256: String,
     #[serde(default)]
     pub sealed: bool,
+    #[serde(default)]
+    pub key_version: Option<crate::encryption::KeyVersion>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -69,6 +72,83 @@ pub trait ObjectStore: Send + Sync {
     fn get(&self, key: &str) -> Result<Vec<u8>>;
     fn delete(&self, key: &str) -> Result<()>;
     fn list(&self, prefix: &str) -> Result<Vec<String>>;
+    fn encryption_key_version(&self) -> Option<crate::encryption::KeyVersion> {
+        None
+    }
+}
+
+impl<S> ObjectStore for Arc<S>
+where
+    S: ObjectStore,
+{
+    fn put_immutable(&self, key: &str, bytes: &[u8], sha256: &str) -> Result<()> {
+        self.as_ref().put_immutable(key, bytes, sha256)
+    }
+    fn get(&self, key: &str) -> Result<Vec<u8>> {
+        self.as_ref().get(key)
+    }
+    fn delete(&self, key: &str) -> Result<()> {
+        self.as_ref().delete(key)
+    }
+    fn list(&self, prefix: &str) -> Result<Vec<String>> {
+        self.as_ref().list(prefix)
+    }
+    fn encryption_key_version(&self) -> Option<crate::encryption::KeyVersion> {
+        self.as_ref().encryption_key_version()
+    }
+}
+
+/// Object-store adapter that encrypts backup artifacts before they leave the
+/// broker. The object key is authenticated as AAD, while the manifest-facing
+/// API continues to use plaintext checksums and bytes.
+pub struct EncryptedObjectStore<S> {
+    inner: S,
+    keys: Arc<KeyRing>,
+}
+
+impl<S> EncryptedObjectStore<S> {
+    pub fn new(inner: S, keys: Arc<KeyRing>) -> Self {
+        Self { inner, keys }
+    }
+}
+
+impl<S> ObjectStore for EncryptedObjectStore<S>
+where
+    S: ObjectStore,
+{
+    fn put_immutable(&self, key: &str, bytes: &[u8], expected_sha256: &str) -> Result<()> {
+        verify_checksum(bytes, expected_sha256)?;
+        if let Ok(existing) = self.get(key) {
+            crate::broker_ensure!(
+                existing == bytes,
+                "immutable object key already contains different data"
+            );
+            return Ok(());
+        }
+        let envelope = self.keys.encrypt(bytes, key.as_bytes())?;
+        let encoded =
+            serde_json::to_vec(&envelope).map_err(|error| BrokerError::msg(error.to_string()))?;
+        let encrypted_sha = sha256(&encoded);
+        self.inner.put_immutable(key, &encoded, &encrypted_sha)
+    }
+
+    fn get(&self, key: &str) -> Result<Vec<u8>> {
+        let encoded = self.inner.get(key)?;
+        let envelope = serde_json::from_slice(&encoded).map_err(|error| {
+            BrokerError::msg(format!("invalid encrypted backup object: {error}"))
+        })?;
+        self.keys.decrypt(&envelope, key.as_bytes())
+    }
+
+    fn delete(&self, key: &str) -> Result<()> {
+        self.inner.delete(key)
+    }
+    fn list(&self, prefix: &str) -> Result<Vec<String>> {
+        self.inner.list(prefix)
+    }
+    fn encryption_key_version(&self) -> Option<crate::encryption::KeyVersion> {
+        Some(self.keys.active_version())
+    }
 }
 
 #[derive(Debug, Default)]
@@ -223,6 +303,10 @@ impl<S: ObjectStore> ObjectStore for RetryingObjectStore<S> {
     fn list(&self, prefix: &str) -> Result<Vec<String>> {
         self.retry(|store| store.list(prefix))
     }
+
+    fn encryption_key_version(&self) -> Option<crate::encryption::KeyVersion> {
+        self.inner.encryption_key_version()
+    }
 }
 
 pub fn sha256(bytes: &[u8]) -> String {
@@ -303,6 +387,7 @@ impl<S: ObjectStore + 'static> BackupEngine<S> {
                 bytes: bytes.len() as u64,
                 sha256: digest,
                 sealed,
+                key_version: self.store.encryption_key_version(),
             });
         }
         let manifest = BackupManifest {
@@ -359,6 +444,7 @@ impl<S: ObjectStore + 'static> BackupEngine<S> {
                 bytes: bytes.len() as u64,
                 sha256: digest,
                 sealed,
+                key_version: self.store.encryption_key_version(),
             });
         }
         let manifest = BackupManifest {
@@ -872,9 +958,35 @@ impl<S: ObjectStore + 'static> TieredPartitionReader<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::encryption::{KeyVersion, MemoryKeyProvider};
     use std::fmt::Write;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::tempdir;
+
+    #[test]
+    fn encrypted_object_store_keeps_backup_payloads_confidential_and_rotatable() {
+        let provider = Arc::new(MemoryKeyProvider::default());
+        provider.insert(KeyVersion::new(1), [7u8; 32]);
+        provider.insert(KeyVersion::new(2), [8u8; 32]);
+        let keys = Arc::new(crate::encryption::KeyRing::new(provider, KeyVersion::new(1)).unwrap());
+        let raw = Arc::new(MemoryObjectStore::default());
+        let encrypted = EncryptedObjectStore::new(raw.clone(), keys.clone());
+        let payload = b"backup secret";
+        encrypted
+            .put_immutable("backups/a/object", payload, &sha256(payload))
+            .unwrap();
+        assert_eq!(encrypted.get("backups/a/object").unwrap(), payload);
+        assert!(
+            !String::from_utf8_lossy(&raw.get("backups/a/object").unwrap())
+                .contains("backup secret")
+        );
+        keys.rotate(KeyVersion::new(2)).unwrap();
+        encrypted
+            .put_immutable("backups/a/new", payload, &sha256(payload))
+            .unwrap();
+        assert_eq!(encrypted.get("backups/a/new").unwrap(), payload);
+        assert_eq!(encrypted.get("backups/a/object").unwrap(), payload);
+    }
 
     struct FlakyStore {
         inner: MemoryObjectStore,

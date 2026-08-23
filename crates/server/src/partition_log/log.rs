@@ -50,6 +50,7 @@ pub(super) struct PartitionLog {
     retained_bytes: u64,
     deleted_messages: u64,
     deleted_bytes: u64,
+    encryption: Option<std::sync::Arc<crate::encryption::KeyRing>>,
 }
 
 impl PartitionLog {
@@ -58,6 +59,7 @@ impl PartitionLog {
         stream: &StreamId,
         partition: PartitionId,
         segment_bytes: u64,
+        encryption: Option<std::sync::Arc<crate::encryption::KeyRing>>,
     ) -> Result<(Self, Vec<MessageEnvelope>, u64)> {
         let dir = root
             .join(stream.as_str())
@@ -92,10 +94,11 @@ impl PartitionLog {
                 &mut envelopes,
                 &mut retention_records,
                 &mut retained_bytes,
+                encryption.as_ref(),
             )?;
             truncations += repaired;
             if repaired > 0 || !path.with_extension(INDEX_EXTENSION).exists() {
-                rebuild_index(path, stream, partition)?;
+                rebuild_index(path, stream, partition, encryption.as_ref())?;
             }
             let subjects = envelopes[first_record..]
                 .iter()
@@ -116,7 +119,7 @@ impl PartitionLog {
             if active {
                 active_subjects = subjects;
             } else {
-                let mut segment = SubjectSegment::new(path.clone(), subjects);
+                let mut segment = SubjectSegment::new(path.clone(), subjects, encryption.clone());
                 subject_index_cache_bytes += segment.rebuild(
                     MAX_PARTITION_INDEX_CACHE_BYTES.saturating_sub(subject_index_cache_bytes),
                 )?;
@@ -161,6 +164,7 @@ impl PartitionLog {
                 retained_bytes,
                 deleted_messages: 0,
                 deleted_bytes: 0,
+                encryption,
             },
             envelopes,
             truncations,
@@ -189,7 +193,10 @@ impl PartitionLog {
             envelope.offset == self.next_offset,
             "partition-log append creates an offset gap"
         );
-        let batch = encode_batch_with_len(&envelope)?;
+        let batch = match &self.encryption {
+            Some(encryption) => encode_encrypted_batch_with_len(&envelope, encryption)?,
+            None => encode_batch_with_len(&envelope)?,
+        };
         if self.active_bytes > SEGMENT_HEADER_LEN
             && self.active_bytes.saturating_add(batch.len) > self.segment_bytes
         {
@@ -257,15 +264,20 @@ impl PartitionLog {
             .last()
             .map_or(0, |record| record.offset.saturating_add(1))
             .max(next_offset_floor.unwrap_or_default());
-        stage_rewrite(&self.dir, records, next_offset)?;
+        stage_rewrite(&self.dir, records, next_offset, self.encryption.as_ref())?;
         install_pending_rewrite(&self.dir)?;
         let root = self
             .dir
             .parent()
             .and_then(Path::parent)
             .ok_or_else(|| BrokerError::msg("partition log has no stream root"))?;
-        let (mut replacement, _, _) =
-            PartitionLog::open(root, &self.stream, self.partition, self.segment_bytes)?;
+        let (mut replacement, _, _) = PartitionLog::open(
+            root,
+            &self.stream,
+            self.partition,
+            self.segment_bytes,
+            self.encryption.clone(),
+        )?;
         replacement.deleted_messages = self.deleted_messages;
         replacement.deleted_bytes = self.deleted_bytes;
         *self = replacement;
@@ -279,7 +291,7 @@ impl PartitionLog {
         let sealed_ranges = self.segment_ranges.len().saturating_sub(1);
         for range_index in 0..sealed_ranges {
             let path = self.segment_ranges[range_index].path.clone();
-            let records = read_segment_records(&path)?;
+            let records = read_segment_records(&path, self.encryption.as_ref())?;
             let retained = records
                 .iter()
                 .filter(|record| visible_offsets.contains(&record.offset))
@@ -289,9 +301,14 @@ impl PartitionLog {
                 continue;
             }
 
-            stage_segment_compaction(&self.dir, &path, &retained)?;
+            stage_segment_compaction(&self.dir, &path, &retained, self.encryption.as_ref())?;
             install_pending_segment_compaction(&self.dir)?;
-            rebuild_index(&path, &self.stream, self.partition)?;
+            rebuild_index(
+                &path,
+                &self.stream,
+                self.partition,
+                self.encryption.as_ref(),
+            )?;
 
             let retained_offsets = retained
                 .iter()
@@ -347,6 +364,7 @@ impl PartitionLog {
                             .iter()
                             .map(|record| (record.subject.clone(), record.offset))
                             .collect(),
+                        self.encryption.clone(),
                     );
                     segment.rebuild(0)?;
                 }
@@ -411,6 +429,7 @@ impl PartitionLog {
         let mut sealed = SubjectSegment::new(
             segment_path(&self.dir, self.segment_id),
             std::mem::take(&mut self.active_subjects),
+            self.encryption.clone(),
         );
         self.subject_index_cache_bytes += sealed.rebuild(
             MAX_PARTITION_INDEX_CACHE_BYTES.saturating_sub(self.subject_index_cache_bytes),
@@ -455,7 +474,9 @@ impl PartitionLog {
             if let Some(position) = indexed_position(&range.sparse_index, offset) {
                 range.reader.seek(SeekFrom::Start(position))?;
             }
-            while let Some((envelope, _)) = read_batch(&mut range.reader)? {
+            while let Some((envelope, _)) =
+                read_batch_with_key(&mut range.reader, self.encryption.as_ref())?
+            {
                 if envelope.offset == offset {
                     return Ok(Some(envelope));
                 }
@@ -473,7 +494,7 @@ impl PartitionLog {
         records: &[MessageEnvelope],
         next_offset: u64,
     ) -> Result<()> {
-        stage_rewrite(&self.dir, records, next_offset)
+        stage_rewrite(&self.dir, records, next_offset, self.encryption.as_ref())
     }
 }
 
@@ -483,24 +504,36 @@ fn open_segment_reader(path: &Path) -> Result<File> {
     Ok(file)
 }
 
-fn read_segment_records(path: &Path) -> Result<Vec<MessageEnvelope>> {
+fn read_segment_records(
+    path: &Path,
+    encryption: Option<&std::sync::Arc<crate::encryption::KeyRing>>,
+) -> Result<Vec<MessageEnvelope>> {
     let mut file = OpenOptions::new().read(true).open(path)?;
     validate_segment_header(&mut file, path)?;
     let mut records = Vec::new();
-    while let Some((record, _)) = read_batch(&mut file)? {
+    while let Some((record, _)) = read_batch_with_key(&mut file, encryption)? {
         records.push(record);
     }
     Ok(records)
 }
 
-fn stage_segment_compaction(dir: &Path, path: &Path, records: &[MessageEnvelope]) -> Result<()> {
+fn stage_segment_compaction(
+    dir: &Path,
+    path: &Path,
+    records: &[MessageEnvelope],
+    encryption: Option<&std::sync::Arc<crate::encryption::KeyRing>>,
+) -> Result<()> {
     let tmp = dir.join(COMPACTION_TMP_FILE);
     if tmp.exists() {
         std::fs::remove_file(&tmp)?;
     }
     let mut file = create_segment(&tmp)?;
     for record in records {
-        file.write_all(&encode_batch(record)?)?;
+        let batch = match encryption {
+            Some(encryption) => encode_encrypted_batch_with_len(record, encryption)?,
+            None => encode_batch_with_len(record)?,
+        };
+        file.write_all(&batch.bytes)?;
     }
     file.flush()?;
     file.sync_data()?;
@@ -586,7 +619,12 @@ fn persist_retention_offset(dir: &Path, next_offset: u64) -> Result<()> {
     Ok(())
 }
 
-fn stage_rewrite(dir: &Path, records: &[MessageEnvelope], next_offset: u64) -> Result<()> {
+fn stage_rewrite(
+    dir: &Path,
+    records: &[MessageEnvelope],
+    next_offset: u64,
+    encryption: Option<&std::sync::Arc<crate::encryption::KeyRing>>,
+) -> Result<()> {
     crate::broker_ensure!(
         records
             .windows(2)
@@ -605,7 +643,11 @@ fn stage_rewrite(dir: &Path, records: &[MessageEnvelope], next_offset: u64) -> R
     }
     let mut file = create_segment(&tmp)?;
     for record in records {
-        file.write_all(&encode_batch(record)?)?;
+        let batch = match encryption {
+            Some(encryption) => encode_encrypted_batch_with_len(record, encryption)?,
+            None => encode_batch_with_len(record)?,
+        };
+        file.write_all(&batch.bytes)?;
     }
     file.flush()?;
     file.sync_data()?;
@@ -664,6 +706,7 @@ fn replay_segment(
     envelopes: &mut Vec<MessageEnvelope>,
     retention_records: &mut VecDeque<RetentionRecord>,
     retained_bytes: &mut u64,
+    encryption: Option<&std::sync::Arc<crate::encryption::KeyRing>>,
 ) -> Result<u64> {
     let mut file = OpenOptions::new().read(true).write(active).open(path)?;
     validate_segment_header(&mut file, path)?;
@@ -671,7 +714,7 @@ fn replay_segment(
     let mut boundary = SEGMENT_HEADER_LEN;
     loop {
         let before = boundary;
-        match read_batch(&mut file) {
+        match read_batch_with_key(&mut file, encryption) {
             Ok(Some((mut envelope, bytes))) => {
                 crate::broker_ensure!(
                     envelope.stream == *stream && envelope.partition == partition,
@@ -708,14 +751,19 @@ fn replay_segment(
     }
 }
 
-fn rebuild_index(path: &Path, stream: &StreamId, partition: PartitionId) -> Result<()> {
+fn rebuild_index(
+    path: &Path,
+    stream: &StreamId,
+    partition: PartitionId,
+    encryption: Option<&std::sync::Arc<crate::encryption::KeyRing>>,
+) -> Result<()> {
     let index_path = path.with_extension(INDEX_EXTENSION);
     let tmp_path = path.with_extension("idx.tmp");
     let mut source = OpenOptions::new().read(true).open(path)?;
     validate_segment_header(&mut source, path)?;
     let mut index = File::create(&tmp_path)?;
     let mut position = SEGMENT_HEADER_LEN;
-    while let Some((envelope, bytes)) = read_batch(&mut source)? {
+    while let Some((envelope, bytes)) = read_batch_with_key(&mut source, encryption)? {
         if envelope.stream == *stream
             && envelope.partition == partition
             && envelope.offset % INDEX_STRIDE == 0
