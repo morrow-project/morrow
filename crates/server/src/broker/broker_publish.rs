@@ -58,6 +58,12 @@ impl Morrow {
         payload: Vec<u8>,
         producer_ack: Option<protocol::ProducerAckRequest>,
     ) -> Result<()> {
+        let span = tracing::info_span!(
+            "morrow.publish",
+            publisher_id,
+            payload_bytes = payload.len(),
+            recursion_depth = 0usize,
+        );
         let started = Instant::now();
         self.metrics.publishes_total.fetch_add(1, Ordering::Relaxed);
         self.metrics
@@ -74,6 +80,7 @@ impl Morrow {
                 producer_ack,
                 0,
             )
+            .instrument(span)
             .await;
         self.metrics.publish_latency_us.observe(started.elapsed());
         result
@@ -519,19 +526,22 @@ impl Morrow {
     }
 
     pub(super) async fn deliver_pending(&self) -> Result<()> {
+        let span = tracing::info_span!("morrow.delivery.prepare");
         let started = Instant::now();
-        let deliveries = {
+        let deliveries = async {
             let connections = ConnectionState {
                 clients: self.connections.lock().await.clients.clone(),
             };
             let mut inner = self.inner.lock().await;
-            inner.prepare_durable_deliveries(
+            Ok::<_, BrokerError>(inner.prepare_durable_deliveries(
                 &connections,
                 &self.partition_logs,
                 &self.middleware,
                 self.hooks.clock.now_ms(),
-            )?
-        };
+            )?)
+        }
+        .instrument(span)
+        .await?;
         self.redelivery_notify.notify_one();
         self.wal.flush_due().await?;
 

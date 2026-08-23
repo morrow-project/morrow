@@ -65,6 +65,11 @@ as `/api/v1/health/live` and `/api/v1/health/ready`.
 intentionally a bounded summary; middleware payloads and credentials are not
 included.
 
+The server emits exporter-neutral `tracing` spans named `morrow.publish` and
+`morrow.delivery.prepare`, carrying only bounded identifiers and payload sizes.
+An OpenTelemetry-compatible tracing subscriber can export these spans; the
+binary currently does not install an OTLP exporter by default.
+
 High-cardinality connection listings can be paged with
 `/api/v1/connections?limit=100&offset=0`. The server clamps the page size to
 1,000 and returns `total_count` plus `next_offset` when more results remain.
