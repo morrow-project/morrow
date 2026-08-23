@@ -72,4 +72,29 @@ impl Morrow {
         });
         Ok(())
     }
+
+    pub async fn replace_policy_snapshot_replicated(
+        &self,
+        snapshot: crate::tenancy::PolicySnapshot,
+    ) -> Result<()> {
+        let Some(cluster) = self.cluster_runtime().await else {
+            return self.replace_policy_snapshot(snapshot);
+        };
+        let generation = snapshot.generation;
+        let response = self
+            .cluster_write(
+                &cluster,
+                crate::raft::BrokerCommand::PolicyReplace { snapshot },
+            )
+            .await?;
+        crate::broker_ensure!(
+            matches!(
+                response,
+                crate::raft::BrokerResponse::PolicyReplace { generation: applied }
+                    if applied == generation
+            ),
+            "cluster rejected policy replacement"
+        );
+        Ok(())
+    }
 }

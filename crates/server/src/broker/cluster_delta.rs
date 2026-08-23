@@ -59,6 +59,10 @@ impl Morrow {
         command: BrokerCommand,
         response: &BrokerResponse,
     ) -> Result<()> {
+        let policy = match &command {
+            BrokerCommand::PolicyReplace { snapshot } => Some(snapshot.clone()),
+            _ => None,
+        };
         let group = match &command {
             BrokerCommand::GroupUpsert { group, record } => Some((group.clone(), record.clone())),
             _ => None,
@@ -73,6 +77,22 @@ impl Morrow {
                 crate::consumer_group::GroupCoordinator::from_replicated_record(record)
                     .with_context(|| "applying replicated consumer-group state".to_string())?,
             );
+        }
+        if let (Some(snapshot), BrokerResponse::PolicyReplace { .. }) = (policy, response) {
+            let generation = snapshot.generation;
+            self.policy.replace(snapshot)?;
+            self.record_audit_event(crate::tenancy::AuditEvent {
+                sequence: 0,
+                timestamp_ms: self.hooks.clock.now_ms(),
+                actor: "cluster".to_string(),
+                tenant: None,
+                action: "policy.replace".to_string(),
+                resource: "cluster/policy".to_string(),
+                outcome: "replicated".to_string(),
+                details: [("generation".to_string(), generation.to_string())]
+                    .into_iter()
+                    .collect(),
+            });
         }
         Ok(())
     }
