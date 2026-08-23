@@ -1,5 +1,6 @@
 use super::*;
 use std::collections::BTreeMap;
+use std::io::Write;
 
 fn record(offset: u64) -> ConnectorRecord {
     ConnectorRecord {
@@ -78,6 +79,35 @@ fn append_database_deduplicates_replayed_offsets_after_process_restart() {
         .write_batch(&batch)
         .unwrap();
     assert_eq!(std::fs::read_to_string(path).unwrap().lines().count(), 1);
+}
+
+#[test]
+fn append_database_recovers_from_index_tail_and_torn_record() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("database.jsonl");
+    let batch = ConnectorBatch {
+        generation: 4,
+        records: vec![record(7), record(8)],
+    };
+    AppendDatabaseSink::open("database", 4, &path)
+        .unwrap()
+        .write_batch(&batch)
+        .unwrap();
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(br#"{"stream":"orders"}"#)
+        .unwrap();
+
+    let mut restarted = AppendDatabaseSink::open("database", 4, &path).unwrap();
+    restarted
+        .write_batch(&ConnectorBatch {
+            generation: 4,
+            records: vec![record(8), record(9)],
+        })
+        .unwrap();
+    assert_eq!(std::fs::read_to_string(path).unwrap().lines().count(), 3);
 }
 
 struct OutageSink {
