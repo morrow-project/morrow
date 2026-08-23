@@ -82,8 +82,9 @@ material.
 
 The server emits exporter-neutral `tracing` spans named `morrow.publish`,
 `morrow.delivery.prepare`, `morrow.partition.read`, `morrow.partition.write`,
-`morrow.partition.flush`, `morrow.raft.rpc`, and `morrow.route.forward`, plus
-`morrow.command` for client command boundaries and `morrow.middleware` for
+`morrow.partition.flush`, `morrow.cluster.commit`, `morrow.raft.rpc`, and
+`morrow.route.forward`, plus `morrow.command` for client command boundaries and
+`morrow.middleware` for
 middleware stage/generation boundaries. A valid W3C `traceparent` publish
 header is extracted as the OpenTelemetry parent context and recorded as bounded
 span context metadata. Spans carry no payloads, credentials, subjects, or

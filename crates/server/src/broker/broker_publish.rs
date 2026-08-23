@@ -317,7 +317,10 @@ impl Morrow {
                 legacy_seq: seq,
             };
             let fsync = ack.is_none_or(|ack| ack.level == protocol::AckLevel::HighDurability);
-            let envelope = cluster.replicate_partition(envelope, fsync).await?;
+            let envelope = cluster
+                .replicate_partition(envelope, fsync)
+                .instrument(tracing::info_span!("morrow.cluster.commit"))
+                .await?;
             cluster.enforce_retention(self.hooks.clock.now_ms())?;
             self.apply_cluster_partition(envelope.clone()).await?;
             let _storage_operation = self.storage_gate.read().await;
@@ -476,6 +479,12 @@ impl Morrow {
     }
 
     pub(super) async fn ack(&self, ack: AckSubject) -> Result<bool> {
+        async { self.ack_inner(ack).await }
+            .instrument(tracing::info_span!("morrow.acknowledgement"))
+            .await
+    }
+
+    async fn ack_inner(&self, ack: AckSubject) -> Result<bool> {
         let mut inner = self.inner.lock().await;
         let mut should_cleanup = false;
         let mut acknowledged_record = None;
