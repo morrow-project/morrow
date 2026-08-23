@@ -88,6 +88,12 @@ pub struct DurableMessage {
     pub delivery_id: u64,
     pub payload: Vec<u8>,
 }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupAssignment {
+    pub group: String,
+    pub generation: u64,
+    pub partitions: Vec<u32>,
+}
 #[derive(Debug, Clone)]
 pub struct ClientAuth {
     client_id: String,
@@ -114,6 +120,12 @@ pub enum ServerFrame {
         bytes: usize,
     },
     DurableMessage(DurableMessage),
+    GroupOk {
+        operation: String,
+        group: Option<String>,
+        generation: Option<u64>,
+        partitions: Vec<u32>,
+    },
     Pong,
     Ok,
     Err(String),

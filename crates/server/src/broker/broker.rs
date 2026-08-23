@@ -11,6 +11,7 @@ pub struct Morrow {
     pub(super) connections: Arc<Mutex<ConnectionState>>,
     pub(super) transient: Arc<Mutex<TransientState>>,
     pub(super) groups: Arc<Mutex<HashMap<String, GroupCoordinator>>>,
+    pub(super) group_sessions: Arc<Mutex<HashMap<u64, GroupMemberSession>>>,
     pub(super) next_connection_id: Arc<AtomicU64>,
     pub(super) config: Config,
     pub(super) tls_acceptor: Option<TlsAcceptor>,

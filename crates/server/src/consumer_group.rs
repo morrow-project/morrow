@@ -7,18 +7,22 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AssignmentStrategy {
     Range,
     RoundRobin,
     Sticky,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct GroupConfig {
     pub heartbeat_timeout_ms: u64,
     pub rebalance_timeout_ms: u64,
     pub strategy: AssignmentStrategy,
+    pub max_members: usize,
+    pub max_partitions: u32,
 }
 
 impl Default for GroupConfig {
@@ -27,32 +31,34 @@ impl Default for GroupConfig {
             heartbeat_timeout_ms: 30_000,
             rebalance_timeout_ms: 60_000,
             strategy: AssignmentStrategy::Sticky,
+            max_members: 10_000,
+            max_partitions: 10_000,
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Member {
     pub id: String,
     pub instance_id: Option<String>,
     pub last_heartbeat_ms: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Assignment {
     pub generation: u64,
     pub member_id: String,
     pub partitions: Vec<u32>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Rebalance {
     pub generation: u64,
     pub moved_partitions: Vec<u32>,
     pub deadline_ms: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GroupSnapshot {
     pub generation: u64,
     pub members: Vec<Member>,
@@ -61,12 +67,21 @@ pub struct GroupSnapshot {
     pub rebalance: Option<Rebalance>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct GroupRecord {
+    pub partitions: u32,
+    pub config: GroupConfig,
+    pub snapshot: GroupSnapshot,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GroupError {
     UnknownMember,
     StaleGeneration { expected: u64, actual: u64 },
     MemberAlreadyExists,
     InvalidTimeout,
+    PartitionCountCannotDecrease,
+    QuotaExceeded,
 }
 
 impl std::fmt::Display for GroupError {
@@ -83,6 +98,10 @@ impl std::fmt::Display for GroupError {
             Self::InvalidTimeout => {
                 f.write_str("consumer-group timeouts must be greater than zero")
             }
+            Self::PartitionCountCannotDecrease => {
+                f.write_str("consumer-group partition count cannot decrease")
+            }
+            Self::QuotaExceeded => f.write_str("consumer-group quota exceeded"),
         }
     }
 }
@@ -106,6 +125,9 @@ impl GroupCoordinator {
         if config.heartbeat_timeout_ms == 0 || config.rebalance_timeout_ms == 0 {
             return Err(GroupError::InvalidTimeout);
         }
+        if partitions == 0 || partitions > config.max_partitions || config.max_members == 0 {
+            return Err(GroupError::QuotaExceeded);
+        }
         Ok(Self {
             config,
             partitions,
@@ -125,9 +147,13 @@ impl GroupCoordinator {
         now_ms: u64,
     ) -> Result<u64, GroupError> {
         let member_id = member_id.into();
-        if self.members.contains_key(&member_id) {
-            return Err(GroupError::MemberAlreadyExists);
+        if !self.members.contains_key(&member_id) && self.members.len() >= self.config.max_members {
+            return Err(GroupError::QuotaExceeded);
         }
+        // Rejoining the same member id fences the old session and starts a
+        // fresh generation. This is the static-membership rolling-restart
+        // path as well as the recovery path after a lost connection.
+        self.members.remove(&member_id);
         self.members.insert(
             member_id.clone(),
             Member {
@@ -138,6 +164,24 @@ impl GroupCoordinator {
         );
         self.rebalance(now_ms);
         Ok(self.generation)
+    }
+
+    pub fn partition_count(&self) -> u32 {
+        self.partitions
+    }
+
+    pub fn expand_partitions(&mut self, partitions: u32, now_ms: u64) -> Result<(), GroupError> {
+        if partitions < self.partitions {
+            return Err(GroupError::PartitionCountCannotDecrease);
+        }
+        if partitions > self.config.max_partitions {
+            return Err(GroupError::QuotaExceeded);
+        }
+        if partitions > self.partitions {
+            self.partitions = partitions;
+            self.rebalance(now_ms);
+        }
+        Ok(())
     }
 
     pub fn heartbeat(
@@ -152,7 +196,23 @@ impl GroupCoordinator {
             .get_mut(member_id)
             .ok_or(GroupError::UnknownMember)?;
         member.last_heartbeat_ms = now_ms;
+        if self
+            .rebalance
+            .as_ref()
+            .is_some_and(|rebalance| rebalance.generation == generation)
+        {
+            self.rebalance = None;
+        }
         Ok(())
+    }
+
+    pub fn refresh_member(&mut self, member_id: &str, now_ms: u64) -> Result<u64, GroupError> {
+        let member = self
+            .members
+            .get_mut(member_id)
+            .ok_or(GroupError::UnknownMember)?;
+        member.last_heartbeat_ms = now_ms;
+        Ok(self.generation)
     }
 
     pub fn leave(
@@ -216,6 +276,18 @@ impl GroupCoordinator {
         Ok(true)
     }
 
+    pub fn assigned_partitions(
+        &self,
+        member_id: &str,
+        generation: u64,
+    ) -> Result<BTreeSet<u32>, GroupError> {
+        self.check_generation(generation)?;
+        self.assignments
+            .get(member_id)
+            .cloned()
+            .ok_or(GroupError::UnknownMember)
+    }
+
     pub fn snapshot(&self) -> GroupSnapshot {
         let mut assignments = self
             .assignments
@@ -234,6 +306,78 @@ impl GroupCoordinator {
             committed_offsets: self.committed_offsets.clone(),
             rebalance: self.rebalance.clone(),
         }
+    }
+
+    pub fn record(&self) -> GroupRecord {
+        GroupRecord {
+            partitions: self.partitions,
+            config: self.config.clone(),
+            snapshot: self.snapshot(),
+        }
+    }
+
+    pub fn from_record(record: GroupRecord) -> Result<Self, GroupError> {
+        Self::from_record_internal(record, true)
+    }
+
+    pub fn from_replicated_record(record: GroupRecord) -> Result<Self, GroupError> {
+        Self::from_record_internal(record, false)
+    }
+
+    fn from_record_internal(record: GroupRecord, recovery_fence: bool) -> Result<Self, GroupError> {
+        let mut assignments = BTreeMap::new();
+        for assignment in &record.snapshot.assignments {
+            assignments.insert(
+                assignment.member_id.clone(),
+                assignment.partitions.iter().copied().collect(),
+            );
+        }
+        for member in &record.snapshot.members {
+            assignments.entry(member.id.clone()).or_default();
+        }
+        if record.config.heartbeat_timeout_ms == 0
+            || record.config.rebalance_timeout_ms == 0
+            || record.config.max_members == 0
+            || record.partitions == 0
+            || record.partitions > record.config.max_partitions
+        {
+            return Err(GroupError::InvalidTimeout);
+        }
+        let members = record
+            .snapshot
+            .members
+            .iter()
+            .cloned()
+            .map(|member| (member.id.clone(), member))
+            .collect::<BTreeMap<_, _>>();
+        Ok(Self {
+            config: record.config,
+            partitions: record.partitions,
+            // Membership is ephemeral. Bump the generation on process
+            // recovery, but preserve it when applying a live Raft delta.
+            generation: if recovery_fence {
+                record.snapshot.generation.saturating_add(1)
+            } else {
+                record.snapshot.generation
+            },
+            members: if recovery_fence {
+                BTreeMap::new()
+            } else {
+                members
+            },
+            previous_assignments: assignments.clone(),
+            assignments: if recovery_fence {
+                BTreeMap::new()
+            } else {
+                assignments
+            },
+            committed_offsets: record.snapshot.committed_offsets,
+            rebalance: if recovery_fence {
+                None
+            } else {
+                record.snapshot.rebalance
+            },
+        })
     }
 
     fn check_generation(&self, generation: u64) -> Result<(), GroupError> {
@@ -384,5 +528,85 @@ mod tests {
         assert_eq!(coordinator.expire(10), vec!["a"]);
         assert_eq!(coordinator.snapshot().members[0].id, "b");
         assert_ne!(coordinator.snapshot().generation, generation);
+    }
+
+    #[test]
+    fn deterministic_strategies_are_complete_and_unique() {
+        for strategy in [
+            AssignmentStrategy::Range,
+            AssignmentStrategy::RoundRobin,
+            AssignmentStrategy::Sticky,
+        ] {
+            let mut first = GroupCoordinator::new(
+                17,
+                GroupConfig {
+                    strategy,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            for (index, member) in ["a", "b", "c", "d"].into_iter().enumerate() {
+                first.join(member, None, index as u64).unwrap();
+            }
+            let snapshot = first.snapshot();
+            let assigned = snapshot
+                .assignments
+                .iter()
+                .flat_map(|assignment| assignment.partitions.iter())
+                .copied()
+                .collect::<BTreeSet<_>>();
+            assert_eq!(assigned, (0..17).collect());
+
+            let mut second = GroupCoordinator::new(
+                17,
+                GroupConfig {
+                    strategy,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            for member in ["a", "b", "c", "d"] {
+                second.join(member, None, 0).unwrap();
+            }
+            assert_eq!(snapshot.assignments, second.snapshot().assignments);
+        }
+    }
+
+    #[test]
+    fn partition_expansion_preserves_offsets_and_fences_old_generation() {
+        let mut coordinator = GroupCoordinator::new(2, Default::default()).unwrap();
+        let generation = coordinator.join("a", None, 0).unwrap();
+        coordinator.commit("a", generation, 0, 7).unwrap();
+        coordinator.expand_partitions(4, 1).unwrap();
+        assert_eq!(coordinator.partition_count(), 4);
+        assert_eq!(coordinator.snapshot().committed_offsets.get(&0), Some(&7));
+        assert!(matches!(
+            coordinator.commit("a", generation, 0, 8),
+            Err(GroupError::StaleGeneration { .. })
+        ));
+    }
+
+    #[test]
+    #[ignore = "manual high-cardinality coordinator benchmark"]
+    fn benchmark_thousand_groups_and_ten_thousand_members() {
+        let started = std::time::Instant::now();
+        let mut groups = Vec::with_capacity(1_000);
+        for group_index in 0..1_000 {
+            let mut group = GroupCoordinator::new(10, Default::default()).unwrap();
+            for member_index in 0..10 {
+                group
+                    .join(format!("member-{group_index}-{member_index}"), None, 0)
+                    .unwrap();
+            }
+            groups.push(group);
+        }
+        assert_eq!(
+            groups
+                .iter()
+                .map(|group| group.snapshot().members.len())
+                .sum::<usize>(),
+            10_000
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
     }
 }

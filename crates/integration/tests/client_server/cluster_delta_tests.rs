@@ -77,6 +77,54 @@ async fn follower_applies_committed_consumer_and_partition_deltas() {
     harness.shutdown().await;
 }
 
+#[tokio::test]
+async fn follower_applies_consumer_group_generation_and_assignment() {
+    let harness = ClusterHarness::start_three_routed().await;
+    let leader = harness.wait_for_leader().await;
+    let leader_node = harness
+        .nodes
+        .iter()
+        .find(|node| node.node_id == leader)
+        .unwrap();
+    let follower = harness
+        .nodes
+        .iter()
+        .find(|node| node.node_id != leader)
+        .unwrap();
+    let mut member = Client::connect(leader_node.client_addr, harness.max_payload)
+        .await
+        .unwrap();
+    member.read_info().await.unwrap();
+    member
+        .connect_durable("group-cluster-member", false, 5_000, 16)
+        .await
+        .unwrap();
+    let assignment = member
+        .group_join(
+            "cluster-worker",
+            "member-a",
+            3,
+            client::protocol::GroupAssignmentStrategy::RoundRobin,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(assignment.partitions, vec![0, 1, 2]);
+
+    let state = wait_for_admin(follower.http_addr, "/groups", |value| {
+        value.as_array().is_some_and(|groups| {
+            groups.iter().any(|entry| {
+                entry[0] == "cluster-worker"
+                    && entry[1]["generation"] == assignment.generation
+                    && entry[1]["assignments"][0]["partitions"] == serde_json::json!([0, 1, 2])
+            })
+        })
+    })
+    .await;
+    assert_eq!(state.as_array().unwrap().len(), 1);
+    harness.shutdown().await;
+}
+
 async fn wait_for_admin(
     addr: SocketAddr,
     path: &str,

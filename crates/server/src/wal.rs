@@ -23,6 +23,7 @@ const KIND_CONSUMER_DELETE: u8 = 7;
 const KIND_DEAD_LETTER: u8 = 8;
 const KIND_DEAD_LETTER_PURGE: u8 = 9;
 const KIND_PRODUCER_SEQUENCE: u8 = 10;
+const KIND_GROUP_STATE: u8 = 11;
 pub const DEFAULT_WAL_SEGMENT_BYTES: u64 = 64 * 1024 * 1024;
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct PublishRecord {
@@ -132,6 +133,7 @@ pub struct ProducerSequenceRecord {
     pub fingerprint: u64,
     pub record: PublishRecord,
 }
+pub type GroupStateRecord = (String, crate::consumer_group::GroupRecord);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PartitionAppendRecord {
     pub seq: u64,
@@ -176,6 +178,7 @@ pub struct Replay {
     pub consumers: HashMap<String, ReplayedConsumer>,
     pub dead_letters: HashMap<u64, DeadLetterRecord>,
     pub producer_sequences: HashMap<(String, u64, u64), ProducerSequenceRecord>,
+    pub groups: HashMap<String, crate::consumer_group::GroupRecord>,
     pub next_seq: u64,
     pub next_delivery_id: u64,
     pub duration_ms: u64,

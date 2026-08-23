@@ -192,6 +192,17 @@ impl Wal {
         self.append_record(KIND_PRODUCER_SEQUENCE, &producer_sequence_body(record)?)
     }
 
+    pub fn append_group_state(
+        &mut self,
+        group: &str,
+        record: &crate::consumer_group::GroupRecord,
+    ) -> Result<()> {
+        self.append_record(
+            KIND_GROUP_STATE,
+            &group_state_body(&(group.to_string(), record.clone()))?,
+        )
+    }
+
     pub fn flush_due(&mut self) -> Result<()> {
         if self.last_sync.elapsed() >= self.fsync_interval {
             self.flush()?;
@@ -218,6 +229,7 @@ impl Wal {
         consumers: impl IntoIterator<Item = ReplayedConsumer>,
         dead_letters: impl IntoIterator<Item = DeadLetterRecord>,
         producer_sequences: impl IntoIterator<Item = ProducerSequenceRecord>,
+        groups: impl IntoIterator<Item = GroupStateRecord>,
     ) -> Result<()> {
         let started = Instant::now();
         self.flush()?;
@@ -236,6 +248,11 @@ impl Wal {
             for record in producer_sequences {
                 let body = producer_sequence_body(&record)?;
                 write_record_to(&mut file, KIND_PRODUCER_SEQUENCE, &body)?;
+                checkpoint_bytes += record_size(&body)?;
+            }
+            for record in groups {
+                let body = group_state_body(&record)?;
+                write_record_to(&mut file, KIND_GROUP_STATE, &body)?;
                 checkpoint_bytes += record_size(&body)?;
             }
             file.flush()?;

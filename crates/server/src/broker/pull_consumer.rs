@@ -189,6 +189,9 @@ impl Morrow {
         );
         let (consumer_id, _, max_in_flight) =
             self.pull_consumer_context(connection_id, &name).await?;
+        let group_partitions = self
+            .group_partitions_for_fetch(connection_id, &name)
+            .await?;
         let filter_subject = self
             .inner
             .lock()
@@ -239,6 +242,7 @@ impl Morrow {
                     max_messages,
                     max_bytes,
                     encoded_delivery_bytes,
+                    group_partitions.as_ref(),
                 )
                 .await?;
             if !batch.deliveries.is_empty() || waiter.is_none() {
@@ -292,6 +296,7 @@ impl Morrow {
         max_messages: usize,
         max_bytes: usize,
         max_encoded_bytes: usize,
+        allowed_partitions: Option<&BTreeSet<u32>>,
     ) -> Result<PullBatch> {
         let mut prepared = Vec::new();
         let mut bytes = 0usize;
@@ -306,6 +311,7 @@ impl Morrow {
                     consumer_id,
                     &self.partition_logs,
                     self.hooks.clock.now_ms(),
+                    allowed_partitions,
                 )
             };
             let Some((seq, attempt, deadline_ms, metadata)) = candidate else {

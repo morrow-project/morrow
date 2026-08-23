@@ -275,6 +275,36 @@ async fn parses_pull_batch_and_durable_message_frames() {
 }
 
 #[tokio::test]
+async fn parses_group_assignment_frames() {
+    let (_writer, reader) = tokio::io::duplex(64);
+    let mut reader = BufReader::new(Box::new(reader) as Box<dyn ClientStream>);
+    assert_eq!(
+        parse_frame(&mut reader, "G-OK JOIN worker 7 0,2", 1024)
+            .await
+            .unwrap()
+            .unwrap(),
+        ServerFrame::GroupOk {
+            operation: "JOIN".into(),
+            group: Some("worker".into()),
+            generation: Some(7),
+            partitions: vec![0, 2],
+        }
+    );
+    assert_eq!(
+        parse_frame(&mut reader, "G-OK COMMIT", 1024)
+            .await
+            .unwrap()
+            .unwrap(),
+        ServerFrame::GroupOk {
+            operation: "COMMIT".into(),
+            group: None,
+            generation: None,
+            partitions: Vec::new(),
+        }
+    );
+}
+
+#[tokio::test]
 async fn rejects_oversized_pull_delivery_before_allocating_body() {
     let (_writer, reader) = tokio::io::duplex(64);
     let mut reader = BufReader::new(Box::new(reader) as Box<dyn ClientStream>);

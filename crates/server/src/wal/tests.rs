@@ -228,8 +228,14 @@ fn checkpoint_removes_covered_segments() {
         acked: HashSet::new(),
     };
 
-    wal.checkpoint(vec![first, second], vec![replayed], Vec::new(), Vec::new())
-        .unwrap();
+    wal.checkpoint(
+        vec![first, second],
+        vec![replayed],
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    )
+    .unwrap();
 
     assert!(wal.sealed_segments.is_empty());
     assert_eq!(segmented_paths(dir.path()).unwrap().len(), 1);
@@ -305,6 +311,29 @@ fn clustered_delivery_ids_are_namespaced_by_node() {
     wal.namespace_delivery_ids(7);
     let attempt = wal.append_delivery_attempt(1, "consumer", 10, 1).unwrap();
     assert_eq!(attempt.delivery_id >> 48, 7);
+}
+
+#[test]
+fn group_state_replays_committed_offsets_and_fences_members() {
+    let dir = TestDir::new();
+    let mut coordinator =
+        crate::consumer_group::GroupCoordinator::new(2, Default::default()).unwrap();
+    let generation = coordinator.join("worker", None, 0).unwrap();
+    coordinator.commit("worker", generation, 0, 42).unwrap();
+    let record = coordinator.record();
+    let (mut wal, _) = open_wal(dir.path());
+    wal.append_group_state("orders", &record).unwrap();
+    wal.flush().unwrap();
+    drop(wal);
+
+    let (_wal, replay) = open_wal(dir.path());
+    let recovered = crate::consumer_group::GroupCoordinator::from_record(
+        replay.groups.get("orders").cloned().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(recovered.snapshot().committed_offsets.get(&0), Some(&42));
+    assert!(recovered.snapshot().members.is_empty());
+    assert_ne!(recovered.snapshot().generation, generation);
 }
 
 fn open_wal(dir: &Path) -> (Wal, Replay) {

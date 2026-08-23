@@ -190,6 +190,13 @@ pub(super) struct ConnectionState {
     pub(super) clients: HashMap<u64, Client>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct GroupMemberSession {
+    pub(super) group: String,
+    pub(super) member: String,
+    pub(super) generation: u64,
+}
+
 pub(super) struct TransientState {
     pub(super) subscriptions: HashMap<(u64, String), TransientSubscription>,
     pub(super) interest_index: subject::SubjectTrie<(u64, String)>,

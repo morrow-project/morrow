@@ -176,6 +176,128 @@ impl Client {
         self.write_line(&format!("UNSUB {sid}")).await
     }
 
+    pub async fn group_join(
+        &mut self,
+        group: &str,
+        member: &str,
+        partitions: u32,
+        strategy: protocol::GroupAssignmentStrategy,
+        instance_id: Option<&str>,
+    ) -> Result<GroupAssignment> {
+        let strategy = match strategy {
+            protocol::GroupAssignmentStrategy::Range => "range",
+            protocol::GroupAssignmentStrategy::RoundRobin => "round_robin",
+            protocol::GroupAssignmentStrategy::Sticky => "sticky",
+        };
+        let suffix = instance_id.map(|id| format!(" {id}")).unwrap_or_default();
+        self.write_line(&format!(
+            "GROUP JOIN {group} {member} {partitions} {strategy}{suffix}"
+        ))
+        .await?;
+        loop {
+            match self.next_frame().await? {
+                Some(ServerFrame::GroupOk {
+                    operation,
+                    group: Some(response_group),
+                    generation: Some(generation),
+                    partitions,
+                }) if operation == "JOIN" && response_group == group => {
+                    return Ok(GroupAssignment {
+                        group: response_group,
+                        generation,
+                        partitions,
+                    });
+                }
+                Some(ServerFrame::Err(err)) => return Err(ClientError::msg(err)),
+                Some(frame) => {
+                    return Err(ClientError::msg(format!(
+                        "expected group join response, got {frame:?}"
+                    )));
+                }
+                None => {
+                    return Err(ClientError::msg(
+                        "connection closed before group join response",
+                    ));
+                }
+            }
+        }
+    }
+
+    pub async fn group_heartbeat(
+        &mut self,
+        group: &str,
+        member: &str,
+        generation: u64,
+    ) -> Result<GroupAssignment> {
+        self.write_line(&format!("GROUP HEARTBEAT {group} {member} {generation}"))
+            .await?;
+        loop {
+            match self.next_frame().await? {
+                Some(ServerFrame::GroupOk {
+                    operation,
+                    group: Some(response_group),
+                    generation: Some(generation),
+                    partitions,
+                }) if operation == "HEARTBEAT" && response_group == group => {
+                    return Ok(GroupAssignment {
+                        group: response_group,
+                        generation,
+                        partitions,
+                    });
+                }
+                Some(ServerFrame::Err(err)) => return Err(ClientError::msg(err)),
+                Some(frame) => {
+                    return Err(ClientError::msg(format!(
+                        "expected group heartbeat response, got {frame:?}"
+                    )));
+                }
+                None => {
+                    return Err(ClientError::msg(
+                        "connection closed before group heartbeat response",
+                    ));
+                }
+            }
+        }
+    }
+
+    pub async fn group_leave(&mut self, group: &str, member: &str, generation: u64) -> Result<()> {
+        self.write_line(&format!("GROUP LEAVE {group} {member} {generation}"))
+            .await?;
+        self.expect_group_ok("LEAVE").await
+    }
+
+    pub async fn group_commit(
+        &mut self,
+        group: &str,
+        member: &str,
+        generation: u64,
+        partition: u32,
+        offset: u64,
+    ) -> Result<()> {
+        self.write_line(&format!(
+            "GROUP COMMIT {group} {member} {generation} {partition} {offset}"
+        ))
+        .await?;
+        self.expect_group_ok("COMMIT").await
+    }
+
+    async fn expect_group_ok(&mut self, operation: &str) -> Result<()> {
+        loop {
+            match self.next_frame().await? {
+                Some(ServerFrame::GroupOk {
+                    operation: actual, ..
+                }) if actual == operation => return Ok(()),
+                Some(ServerFrame::Err(err)) => return Err(ClientError::msg(err)),
+                Some(frame) => {
+                    return Err(ClientError::msg(format!(
+                        "expected group {operation} response, got {frame:?}"
+                    )));
+                }
+                None => return Err(ClientError::msg("connection closed before group response")),
+            }
+        }
+    }
+
     pub async fn publish(&mut self, subject: &str, payload: &[u8]) -> Result<()> {
         self.publish_with_reply(subject, None, payload).await
     }
