@@ -79,6 +79,27 @@ fn replays_consumer_publish_delivery_and_ack_state() {
 }
 
 #[test]
+fn replays_consumer_retry_policy() {
+    let dir = TestDir::new();
+    let (mut wal, _) = open_wal(dir.path());
+    let mut consumer = consumer("retry-consumer");
+    consumer.retry_policy = protocol::RetryPolicy {
+        max_attempts: 4,
+        backoff: protocol::RetryBackoff::Exponential,
+        initial_delay_ms: 25,
+        max_delay_ms: 500,
+        jitter_percent: 0,
+        terminal_action: protocol::RetryTerminalAction::DeadLetter,
+    };
+    wal.append_consumer_upsert(&consumer).unwrap();
+    wal.flush().unwrap();
+    drop(wal);
+
+    let (_, replay) = open_wal(dir.path());
+    assert_eq!(replay.consumers[&consumer.consumer_id].record, consumer);
+}
+
+#[test]
 fn replay_retains_message_until_all_matching_consumers_ack() {
     let dir = TestDir::new();
     let (mut wal, _) = open_wal(dir.path());

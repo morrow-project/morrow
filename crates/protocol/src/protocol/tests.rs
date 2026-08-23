@@ -323,6 +323,29 @@ async fn parses_pull_consumer_commands() {
     }
 }
 
+#[tokio::test]
+async fn parses_consumer_retry_policy() {
+    let line = "CONSUMER CREATE worker orders/* @latest retry=4:exponential:25:500:0:dead_letter\r\n";
+    let mut reader = BufReader::new(line.as_bytes());
+    let command = read_command(&mut reader, 1024, 8192).await.unwrap().unwrap();
+    assert_eq!(
+        command,
+        Command::ConsumerCreate {
+            name: "worker".into(),
+            filter_subject: "orders/*".into(),
+            start: StartPosition::Latest,
+            retry_policy: RetryPolicy {
+                max_attempts: 4,
+                backoff: RetryBackoff::Exponential,
+                initial_delay_ms: 25,
+                max_delay_ms: 500,
+                jitter_percent: 0,
+                terminal_action: RetryTerminalAction::DeadLetter,
+            },
+        }
+    );
+}
+
 #[test]
 fn retry_policy_calculates_bounded_fixed_and_exponential_delays() {
     let fixed = RetryPolicy {
