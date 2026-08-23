@@ -161,6 +161,15 @@ impl Morrow {
             "payload exceeds max payload"
         );
         self.authorize_publish(publisher_id, &subject_name).await?;
+        let producer_sequence = producer_ack.as_ref().and_then(|ack| ack.producer.clone());
+        let producer_fingerprint = producer_sequence.as_ref().map(|_| {
+            crate::broker::state::producer_fingerprint(
+                &subject_name,
+                key.as_deref(),
+                &headers,
+                &payload,
+            )
+        });
         let mut middleware_message = MiddlewareMessage {
             subject: subject_name,
             key,
@@ -291,6 +300,24 @@ impl Morrow {
         }
         let stream = stream.unwrap();
 
+        if let (Some(producer), Some(fingerprint)) =
+            (producer_sequence.as_ref(), producer_fingerprint)
+        {
+            let decision = {
+                let mut inner = self.inner.lock().await;
+                inner.begin_producer_sequence(producer, fingerprint)?
+            };
+            if let (crate::broker::state::ProducerSequenceDecision::Duplicate, Some(record)) =
+                decision
+            {
+                if let Some(ack) = ack {
+                    self.send_positioned_producer_ack(publisher_id, ack, &record)
+                        .await?;
+                }
+                return Ok(());
+            }
+        }
+
         if let Some(cluster) = self.cluster_runtime().await {
             let partition = select_partition(&stream, &subject_name, key.as_deref(), publisher_id);
             let stored_headers = headers
@@ -330,6 +357,21 @@ impl Morrow {
                 self.hooks.clock.now_ms(),
             )?;
             let committed_record = PublishRecord::from(envelope.clone());
+            if let (Some(producer), Some(fingerprint)) =
+                (producer_sequence.as_ref(), producer_fingerprint)
+            {
+                let mut inner = self.inner.lock().await;
+                inner
+                    .wal
+                    .append_producer_sequence(&ProducerSequenceRecord {
+                        producer_id: producer.producer_id.clone(),
+                        epoch: producer.epoch,
+                        sequence: producer.sequence,
+                        fingerprint,
+                        record: committed_record.clone(),
+                    })?;
+                inner.complete_producer_sequence(producer, fingerprint, committed_record.clone());
+            }
             self.pull_waiters.notify_subject(&committed_record.subject);
             self.run_after_commit_middleware(publisher_id, &committed_record)
                 .await?;
@@ -411,6 +453,22 @@ impl Morrow {
             inner.apply_record_compaction(record.seq, &self.config.streams);
             record
         };
+
+        if let (Some(producer), Some(fingerprint)) =
+            (producer_sequence.as_ref(), producer_fingerprint)
+        {
+            let mut inner = self.inner.lock().await;
+            inner
+                .wal
+                .append_producer_sequence(&ProducerSequenceRecord {
+                    producer_id: producer.producer_id.clone(),
+                    epoch: producer.epoch,
+                    sequence: producer.sequence,
+                    fingerprint,
+                    record: record.clone(),
+                })?;
+            inner.complete_producer_sequence(producer, fingerprint, record.clone());
+        }
 
         self.pull_waiters.notify_subject(&record.subject);
         self.run_after_commit_middleware(publisher_id, &record)

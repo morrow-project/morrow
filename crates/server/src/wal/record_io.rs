@@ -57,6 +57,9 @@ pub(super) fn dead_letter_purge_body(record: &DeadLetterPurgeRecord) -> Result<V
     put_u64(&mut body, record.id);
     Ok(body)
 }
+pub(super) fn producer_sequence_body(record: &ProducerSequenceRecord) -> Result<Vec<u8>> {
+    serde_json::to_vec(record).context("encoding producer sequence record")
+}
 pub(super) fn partition_append_body(record: &PartitionAppendRecord) -> Result<Vec<u8>> {
     let mut body = Vec::new();
     put_u64(&mut body, record.seq);
@@ -271,6 +274,9 @@ pub(super) fn decode_dead_letter_purge(body: &[u8]) -> Result<DeadLetterPurgeRec
     let record = DeadLetterPurgeRecord { id: cursor.u64()? };
     cursor.finish()?;
     Ok(record)
+}
+pub(super) fn decode_producer_sequence(body: &[u8]) -> Result<ProducerSequenceRecord> {
+    serde_json::from_slice(body).context("decoding producer sequence record")
 }
 pub(super) fn put_u32(out: &mut Vec<u8>, value: u32) {
     out.extend_from_slice(&value.to_le_bytes());

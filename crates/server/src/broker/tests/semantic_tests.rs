@@ -138,6 +138,84 @@ async fn scheduled_publish_waits_for_committed_delivery_time() {
     assert!(frame.starts_with("HDELIVER orders/created sid1"));
     assert!(frame.ends_with("\r\nhello\r\n"));
 }
+
+#[tokio::test]
+async fn idempotent_producer_retry_returns_original_position_without_append() {
+    let mut scenario = Scenario::new();
+    let mut publisher = scenario.connect_durable("publisher", 25).await;
+    let headers = [
+        ("Morrow-QoS", "1"),
+        ("Morrow-Msg-Id", "msg-1"),
+        ("Morrow-Producer-Id", "producer-a"),
+        ("Morrow-Producer-Epoch", "1"),
+        ("Morrow-Producer-Sequence", "1"),
+    ];
+    publisher
+        .publish_hpub("orders/created", &headers, b"one")
+        .await;
+    let first = publisher.read_frame().await;
+    assert!(first.contains("OK true 1"));
+    publisher
+        .publish_hpub("orders/created", &headers, b"one")
+        .await;
+    let duplicate = publisher.read_frame().await;
+    assert_eq!(duplicate, first);
+    let inner = scenario.broker().inner.lock().await;
+    assert_eq!(inner.partition_sequences.len(), 1);
+    assert_eq!(inner.producer_sequences.len(), 1);
+    drop(inner);
+    publisher.disconnect().await;
+    scenario.restart_broker().await;
+    let mut reconnected = scenario.connect_durable("publisher", 25).await;
+    reconnected
+        .publish_hpub("orders/created", &headers, b"one")
+        .await;
+    assert_eq!(reconnected.read_frame().await, first);
+}
+
+#[tokio::test]
+async fn idempotent_producer_rejects_gaps_and_conflicting_content() {
+    let scenario = Scenario::new();
+    let mut publisher = scenario.connect_durable("publisher", 25).await;
+    let base_headers = [
+        ("Morrow-QoS", "1"),
+        ("Morrow-Msg-Id", "msg-1"),
+        ("Morrow-Producer-Id", "producer-a"),
+        ("Morrow-Producer-Epoch", "1"),
+        ("Morrow-Producer-Sequence", "1"),
+    ];
+    publisher
+        .publish_hpub("orders/created", &base_headers, b"one")
+        .await;
+    publisher.read_frame().await;
+    let conflicting = [
+        ("Morrow-QoS", "1"),
+        ("Morrow-Msg-Id", "msg-1"),
+        ("Morrow-Producer-Id", "producer-a"),
+        ("Morrow-Producer-Epoch", "1"),
+        ("Morrow-Producer-Sequence", "1"),
+    ];
+    publisher
+        .publish_hpub("orders/created", &conflicting, b"different")
+        .await;
+    assert!(publisher.read_frame().await.starts_with("-ERR "));
+    let gap = [
+        ("Morrow-QoS", "1"),
+        ("Morrow-Msg-Id", "msg-3"),
+        ("Morrow-Producer-Id", "producer-a"),
+        ("Morrow-Producer-Epoch", "1"),
+        ("Morrow-Producer-Sequence", "3"),
+    ];
+    publisher
+        .publish_hpub("orders/created", &gap, b"three")
+        .await;
+    assert!(
+        publisher
+            .read_frame()
+            .await
+            .contains("producer sequence gap")
+    );
+}
 #[tokio::test]
 async fn acked_message_does_not_redeliver_after_manual_ticks() {
     let scenario = Scenario::new();

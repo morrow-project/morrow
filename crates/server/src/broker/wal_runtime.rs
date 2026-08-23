@@ -34,12 +34,14 @@ enum WalCommand {
     },
     DeadLetter(DeadLetterRecord, mpsc::Sender<Result<()>>),
     DeadLetterPurge(u64, mpsc::Sender<Result<()>>),
+    ProducerSequence(ProducerSequenceRecord, mpsc::Sender<Result<()>>),
     FlushDue(mpsc::Sender<Result<()>>),
     Flush(mpsc::Sender<Result<()>>),
     Checkpoint {
         messages: Vec<PublishRecord>,
         consumers: Vec<ReplayedConsumer>,
         dead_letters: Vec<DeadLetterRecord>,
+        producer_sequences: Vec<ProducerSequenceRecord>,
         response: mpsc::Sender<Result<()>>,
     },
     Status {
@@ -135,6 +137,10 @@ impl WalRuntime {
         self.request(|response| WalCommand::DeadLetterPurge(id, response))
     }
 
+    pub(super) fn append_producer_sequence(&self, record: &ProducerSequenceRecord) -> Result<()> {
+        self.request(|response| WalCommand::ProducerSequence(record.clone(), response))
+    }
+
     pub(super) async fn flush_due(&self) -> Result<()> {
         let runtime = self.clone();
         tokio::task::spawn_blocking(move || runtime.request(WalCommand::FlushDue))
@@ -154,6 +160,7 @@ impl WalRuntime {
         messages: Vec<PublishRecord>,
         consumers: Vec<ReplayedConsumer>,
         dead_letters: Vec<DeadLetterRecord>,
+        producer_sequences: Vec<ProducerSequenceRecord>,
     ) -> Result<()> {
         let runtime = self.clone();
         tokio::task::spawn_blocking(move || {
@@ -161,6 +168,7 @@ impl WalRuntime {
                 messages,
                 consumers,
                 dead_letters,
+                producer_sequences,
                 response,
             })
         })
@@ -251,6 +259,9 @@ fn wal_worker(mut wal: Wal, receiver: mpsc::Receiver<WalCommand>) {
             WalCommand::DeadLetterPurge(id, response) => {
                 let _ = response.send(wal.purge_dead_letter(id));
             }
+            WalCommand::ProducerSequence(record, response) => {
+                let _ = response.send(wal.append_producer_sequence(&record));
+            }
             WalCommand::FlushDue(response) => {
                 let _ = response.send(wal.flush_due());
             }
@@ -261,9 +272,15 @@ fn wal_worker(mut wal: Wal, receiver: mpsc::Receiver<WalCommand>) {
                 messages,
                 consumers,
                 dead_letters,
+                producer_sequences,
                 response,
             } => {
-                let _ = response.send(wal.checkpoint(messages, consumers, dead_letters));
+                let _ = response.send(wal.checkpoint(
+                    messages,
+                    consumers,
+                    dead_letters,
+                    producer_sequences,
+                ));
             }
             WalCommand::Status {
                 retained_message_count,

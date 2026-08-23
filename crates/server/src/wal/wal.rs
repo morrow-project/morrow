@@ -188,6 +188,10 @@ impl Wal {
         )
     }
 
+    pub fn append_producer_sequence(&mut self, record: &ProducerSequenceRecord) -> Result<()> {
+        self.append_record(KIND_PRODUCER_SEQUENCE, &producer_sequence_body(record)?)
+    }
+
     pub fn flush_due(&mut self) -> Result<()> {
         if self.last_sync.elapsed() >= self.fsync_interval {
             self.flush()?;
@@ -213,6 +217,7 @@ impl Wal {
         messages: impl IntoIterator<Item = PublishRecord>,
         consumers: impl IntoIterator<Item = ReplayedConsumer>,
         dead_letters: impl IntoIterator<Item = DeadLetterRecord>,
+        producer_sequences: impl IntoIterator<Item = ProducerSequenceRecord>,
     ) -> Result<()> {
         let started = Instant::now();
         self.flush()?;
@@ -226,6 +231,11 @@ impl Wal {
             for record in dead_letters {
                 let body = dead_letter_body(&record)?;
                 write_record_to(&mut file, KIND_DEAD_LETTER, &body)?;
+                checkpoint_bytes += record_size(&body)?;
+            }
+            for record in producer_sequences {
+                let body = producer_sequence_body(&record)?;
+                write_record_to(&mut file, KIND_PRODUCER_SEQUENCE, &body)?;
                 checkpoint_bytes += record_size(&body)?;
             }
             file.flush()?;

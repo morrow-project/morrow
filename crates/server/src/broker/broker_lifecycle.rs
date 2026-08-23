@@ -145,6 +145,24 @@ impl Morrow {
             })
             .collect();
         let dead_letters = replay.dead_letters.into_iter().collect();
+        let mut producer_epochs: HashMap<String, u64> = HashMap::new();
+        let producer_sequences = replay
+            .producer_sequences
+            .into_iter()
+            .map(|(identity, record)| {
+                producer_epochs
+                    .entry(record.producer_id.clone())
+                    .and_modify(|epoch| *epoch = (*epoch).max(record.epoch))
+                    .or_insert(record.epoch);
+                (
+                    identity,
+                    ProducerDedupEntry {
+                        fingerprint: record.fingerprint,
+                        record: record.record,
+                    },
+                )
+            })
+            .collect();
         let cluster = {
             #[cfg(test)]
             {
@@ -169,6 +187,9 @@ impl Morrow {
                 lease_deadlines,
                 scheduled_deliveries,
                 dead_letters,
+                producer_epochs,
+                producer_sequences,
+                producer_in_flight: HashSet::new(),
                 compaction_latest,
                 superseded_since_compaction: 0,
             })),
@@ -274,8 +295,21 @@ impl Morrow {
         let messages = inner.messages.values().cloned().collect::<Vec<_>>();
         let consumers = inner.replayed_consumers();
         let dead_letters = inner.dead_letters.values().cloned().collect::<Vec<_>>();
+        let producer_sequences = inner
+            .producer_sequences
+            .iter()
+            .map(
+                |((producer_id, epoch, sequence), entry)| ProducerSequenceRecord {
+                    producer_id: producer_id.clone(),
+                    epoch: *epoch,
+                    sequence: *sequence,
+                    fingerprint: entry.fingerprint,
+                    record: entry.record.clone(),
+                },
+            )
+            .collect::<Vec<_>>();
         self.wal
-            .checkpoint(messages, consumers, dead_letters)
+            .checkpoint(messages, consumers, dead_letters, producer_sequences)
             .await?;
         self.wal.flush().await?;
         Ok(())
@@ -355,6 +389,8 @@ impl Morrow {
             })
             .unwrap_or_default();
         let dead_letter_records = inner.dead_letters.len();
+        let producer_sessions = inner.producer_epochs.len();
+        let producer_dedup_entries = inner.producer_sequences.len();
         let compaction_candidates = inner.superseded_since_compaction;
         let compaction_keys = inner.compaction_latest.len();
         drop(inner);
@@ -401,6 +437,16 @@ impl Morrow {
         metrics.push_str("# TYPE morrow_in_flight_deliveries gauge\n");
         metrics.push_str(&format!(
             "morrow_in_flight_deliveries {in_flight_deliveries}\n"
+        ));
+        metrics.push_str("# HELP morrow_producer_sessions Current fenced producer identities.\n");
+        metrics.push_str("# TYPE morrow_producer_sessions gauge\n");
+        metrics.push_str(&format!("morrow_producer_sessions {producer_sessions}\n"));
+        metrics.push_str(
+            "# HELP morrow_producer_dedup_entries Current bounded producer sequence entries.\n",
+        );
+        metrics.push_str("# TYPE morrow_producer_dedup_entries gauge\n");
+        metrics.push_str(&format!(
+            "morrow_producer_dedup_entries {producer_dedup_entries}\n"
         ));
         metrics.push_str("# HELP morrow_scheduled_delivery_depth Current scheduled messages.\n");
         metrics.push_str("# TYPE morrow_scheduled_delivery_depth gauge\n");
