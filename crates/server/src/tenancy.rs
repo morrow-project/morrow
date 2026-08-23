@@ -354,6 +354,17 @@ impl AuditLog {
     pub fn verify_export(records: &[AuditRecord]) -> Result<()> {
         verify_audit_records(records)
     }
+
+    pub fn export_json(&self) -> Result<Vec<u8>> {
+        self.verify()?;
+        let mut output = Vec::new();
+        for record in &self.records {
+            serde_json::to_writer(&mut output, record)
+                .map_err(|error| BrokerError::with_source("encoding audit export", error))?;
+            output.push(b'\n');
+        }
+        Ok(output)
+    }
 }
 
 fn audit_hash(event: &AuditEvent, previous_hash: &str) -> Result<String> {
@@ -490,6 +501,7 @@ mod tests {
         drop(log);
         let reopened = AuditLog::open(&path, 8).unwrap();
         assert_eq!(reopened.records().len(), 1);
+        assert_eq!(reopened.export_json().unwrap().lines().count(), 1);
         let mut bytes = std::fs::read(&path).unwrap();
         let index = bytes.len() - 3;
         bytes[index] ^= 1;

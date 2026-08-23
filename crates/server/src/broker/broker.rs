@@ -47,6 +47,13 @@ impl Morrow {
             .to_vec()
     }
 
+    pub fn export_audit_log(&self) -> Result<Vec<u8>> {
+        self.audit
+            .lock()
+            .expect("audit log lock poisoned")
+            .export_json()
+    }
+
     pub fn verify_audit_log(&self) -> Result<()> {
         self.audit.lock().expect("audit log lock poisoned").verify()
     }
