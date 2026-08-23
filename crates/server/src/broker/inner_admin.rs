@@ -55,6 +55,35 @@ impl ConnectionState {
 }
 
 impl DurableBrokerState {
+    pub(super) fn producers_response_page(&self, offset: usize, limit: usize) -> ProducersResponse {
+        let mut producers = self
+            .producer_epochs
+            .iter()
+            .map(|(producer_id, epoch)| ProducerResponse {
+                producer_id: producer_id.clone(),
+                epoch: *epoch,
+                dedup_entries: self
+                    .producer_sequences
+                    .keys()
+                    .filter(|(id, producer_epoch, _)| id == producer_id && producer_epoch == epoch)
+                    .count(),
+            })
+            .collect::<Vec<_>>();
+        producers.sort_by(|left, right| left.producer_id.cmp(&right.producer_id));
+        let total_count = producers.len();
+        let page = producers
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .collect::<Vec<_>>();
+        ProducersResponse {
+            count: page.len(),
+            total_count,
+            next_offset: (offset + page.len() < total_count).then_some(offset + page.len()),
+            producers: page,
+        }
+    }
+
     pub(super) fn dead_letters_response_page(
         &self,
         offset: usize,
@@ -320,6 +349,16 @@ impl TransientState {
 }
 
 impl Morrow {
+    pub(super) async fn producers_response_page(
+        &self,
+        offset: usize,
+        limit: usize,
+    ) -> ProducersResponse {
+        self.inner
+            .lock()
+            .await
+            .producers_response_page(offset, limit)
+    }
     pub(super) async fn dead_letter_response(&self, id: u64) -> Option<DeadLetterResponse> {
         self.inner
             .lock()

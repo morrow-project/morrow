@@ -147,14 +147,6 @@ impl DurableBrokerState {
             },
         );
     }
-
-    pub(super) fn abort_producer_sequence(&mut self, producer: &protocol::ProducerSequence) {
-        self.producer_in_flight.remove(&(
-            producer.producer_id.clone(),
-            producer.epoch,
-            producer.sequence,
-        ));
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -363,6 +355,21 @@ pub(super) struct DeadLetterResponse {
     pub(super) first_delivery_ms: u64,
     pub(super) last_delivery_ms: u64,
     pub(super) payload_bytes: usize,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub(super) struct ProducersResponse {
+    pub(super) count: usize,
+    pub(super) total_count: usize,
+    pub(super) next_offset: Option<usize>,
+    pub(super) producers: Vec<ProducerResponse>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub(super) struct ProducerResponse {
+    pub(super) producer_id: String,
+    pub(super) epoch: u64,
+    pub(super) dedup_entries: usize,
 }
 
 #[derive(Debug, Default)]

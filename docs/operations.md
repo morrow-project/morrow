@@ -75,6 +75,10 @@ The same administrative resources are available under the versioned
 intentionally a bounded summary; middleware payloads and credentials are not
 included.
 
+`GET /api/v1/producers?limit=100&offset=0` reports fenced producer identities,
+their active epochs, and bounded deduplication-entry counts. It never exposes
+producer payloads or message content.
+
 ### Retry, scheduling, and dead letters
 
 Pull consumers may specify a retry policy as the optional final argument to
