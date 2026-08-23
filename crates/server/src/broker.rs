@@ -15,7 +15,7 @@ use tokio::{
     sync::{Mutex, Notify, mpsc},
 };
 use tokio_rustls::TlsAcceptor;
-use tracing::{error, info, warn};
+use tracing::{Instrument, error, info, warn};
 
 #[cfg(test)]
 use openraft::BasicNode;
