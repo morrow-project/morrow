@@ -142,6 +142,7 @@ impl PartitionLogSet {
             headers: request.headers.to_vec(),
             timestamp_ms: request.timestamp_ms,
             reply_to: request.reply_to.map(str::to_string),
+            schema_id: None,
             payload: request.payload.to_vec(),
             partitioning_epoch: request.stream.partitioning.epoch,
             leader_epoch: request.leader_epoch,

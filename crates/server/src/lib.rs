@@ -6,6 +6,7 @@ pub mod consumer_group;
 pub mod cross_region;
 pub mod encryption;
 pub mod error;
+pub mod materialized_view;
 pub mod middleware;
 pub mod partition_log;
 pub mod partition_replication;
@@ -17,6 +18,7 @@ pub(crate) mod security;
 pub mod stream;
 pub mod tenancy;
 pub mod tls;
+pub mod transaction;
 pub mod wal;
 
 pub use broker::Morrow;

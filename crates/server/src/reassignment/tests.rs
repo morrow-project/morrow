@@ -197,6 +197,7 @@ fn replicated_envelope(offset: u64, epoch: u64, payload: &[u8]) -> MessageEnvelo
         headers: Vec::new(),
         timestamp_ms: offset,
         reply_to: None,
+        schema_id: None,
         payload: payload.to_vec(),
         partitioning_epoch: 1,
         leader_epoch: epoch,

@@ -91,6 +91,7 @@ async fn randomized_incremental_application_matches_full_reconciliation() {
                     headers: vec![],
                     timestamp_ms: step,
                     reply_to: None,
+                    schema_id: None,
                     payload: step.to_le_bytes().to_vec(),
                     partitioning_epoch: 0,
                     leader_epoch: 0,

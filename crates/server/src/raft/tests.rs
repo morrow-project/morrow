@@ -49,6 +49,7 @@ fn replica_data_retention_rewrites_physical_history() {
                     headers: vec![],
                     timestamp_ms,
                     reply_to: None,
+                    schema_id: None,
                     payload: vec![offset as u8],
                     partitioning_epoch: 1,
                     leader_epoch: 1,

@@ -36,6 +36,12 @@ fn json_schema_compatibility_is_deterministic_and_persisted() {
     drop(registry);
     let reopened = SchemaRegistry::open(path).unwrap();
     assert_eq!(reopened.by_id(second.id).unwrap().version, 2);
+    assert!(reopened
+        .validate_message_metadata("tenant-a", "orders", second.id)
+        .is_ok());
+    assert!(reopened
+        .validate_message_metadata("tenant-b", "orders", second.id)
+        .is_err());
 }
 
 #[test]
