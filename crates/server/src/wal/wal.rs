@@ -180,6 +180,13 @@ impl Wal {
         self.append_record(KIND_DEAD_LETTER, &dead_letter_body(record)?)
     }
 
+    pub fn purge_dead_letter(&mut self, id: u64) -> Result<()> {
+        self.append_record(
+            KIND_DEAD_LETTER_PURGE,
+            &dead_letter_purge_body(&DeadLetterPurgeRecord { id })?,
+        )
+    }
+
     pub fn flush_due(&mut self) -> Result<()> {
         if self.last_sync.elapsed() >= self.fsync_interval {
             self.flush()?;
@@ -204,6 +211,7 @@ impl Wal {
         &mut self,
         messages: impl IntoIterator<Item = PublishRecord>,
         consumers: impl IntoIterator<Item = ReplayedConsumer>,
+        dead_letters: impl IntoIterator<Item = DeadLetterRecord>,
     ) -> Result<()> {
         let started = Instant::now();
         self.flush()?;
@@ -214,6 +222,11 @@ impl Wal {
         {
             let mut file = create_segment(&tmp)?;
             checkpoint_bytes += write_compact_state(&mut file, messages, consumers)?;
+            for record in dead_letters {
+                let body = dead_letter_body(&record)?;
+                write_record_to(&mut file, KIND_DEAD_LETTER, &body)?;
+                checkpoint_bytes += record_size(&body)?;
+            }
             file.flush()?;
             file.sync_data()?;
         }

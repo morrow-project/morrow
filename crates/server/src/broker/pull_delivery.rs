@@ -112,13 +112,22 @@ impl DurableBrokerState {
             }
             let in_flight = &consumer.in_flight;
             let preparing = &consumer.preparing;
-            let seq = consumer.cursors.next_indexed_candidate(
-                &consumer.record.filter_subject,
-                &self.messages,
-                &self.partition_sequences,
-                partition_logs,
-                |seq| in_flight.contains_key(&seq) || preparing.contains(&seq),
-            )?;
+            let seq = consumer
+                .cursors
+                .next_indexed_candidate(
+                    &consumer.record.filter_subject,
+                    &self.messages,
+                    &self.partition_sequences,
+                    partition_logs,
+                    |seq| in_flight.contains_key(&seq) || preparing.contains(&seq),
+                )
+                .or_else(|| {
+                    consumer
+                        .pending
+                        .iter()
+                        .find(|seq| !in_flight.contains_key(seq) && !preparing.contains(seq))
+                        .copied()
+                })?;
             if self
                 .messages
                 .get(&seq)

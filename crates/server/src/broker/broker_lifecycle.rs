@@ -273,7 +273,8 @@ impl Morrow {
         .map_err(|err| BrokerError::with_source("partition flush worker failed", err))??;
         let messages = inner.messages.values().cloned().collect::<Vec<_>>();
         let consumers = inner.replayed_consumers();
-        self.wal.checkpoint(messages, consumers).await?;
+        let dead_letters = inner.dead_letters.values().cloned().collect::<Vec<_>>();
+        self.wal.checkpoint(messages, consumers, dead_letters).await?;
         self.wal.flush().await?;
         Ok(())
     }

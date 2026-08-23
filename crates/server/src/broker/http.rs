@@ -11,11 +11,22 @@ pub(super) fn http_request_path(request_line: &str) -> Option<&str> {
     let method = parts.next()?;
     let path = parts.next()?;
     let version = parts.next()?;
-    if parts.next().is_some() || method != "GET" || (version != "HTTP/1.1" && version != "HTTP/1.0")
+    if parts.next().is_some()
+        || !matches!(method, "GET" | "POST" | "DELETE")
+        || (version != "HTTP/1.1" && version != "HTTP/1.0")
     {
         return None;
     }
     Some(path)
+}
+
+pub(super) fn http_request_method(request_line: &str) -> Option<&str> {
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next()?;
+    let _path = parts.next()?;
+    let version = parts.next()?;
+    (parts.next().is_none() && (version == "HTTP/1.1" || version == "HTTP/1.0"))
+        .then_some(method)
 }
 
 pub(super) fn http_query_parameter<'a>(query: &'a str, name: &str) -> Option<&'a str> {

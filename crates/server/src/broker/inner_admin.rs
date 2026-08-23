@@ -88,6 +88,34 @@ impl DurableBrokerState {
         }
     }
 
+    pub(super) fn purge_dead_letter(&mut self, id: u64) -> Result<bool> {
+        if !self.dead_letters.contains_key(&id) {
+            return Ok(false);
+        }
+        self.wal.purge_dead_letter(id)?;
+        self.dead_letters.remove(&id);
+        Ok(true)
+    }
+
+    pub(super) fn replay_dead_letter(&mut self, id: u64) -> Result<bool> {
+        let Some(record) = self.dead_letters.get(&id).cloned() else {
+            return Ok(false);
+        };
+        if !self.messages.contains_key(&record.source_seq) {
+            return Ok(false);
+        }
+        let Some(consumer) = self.consumers.get_mut(&record.consumer_id) else {
+            return Ok(false);
+        };
+        self.wal.purge_dead_letter(id)?;
+        self.dead_letters.remove(&id);
+        consumer.acked.remove(&record.source_seq);
+        consumer.pending.insert(record.source_seq);
+        consumer.pending_attempts.insert(record.source_seq, 1);
+        self.mark_consumer_ready(&record.consumer_id);
+        Ok(true)
+    }
+
     pub(super) fn subscriptions_response(&self) -> SubscriptionsResponse {
         let mut durable_consumers = self
             .consumers
@@ -291,6 +319,48 @@ impl TransientState {
 }
 
 impl Morrow {
+    pub(super) async fn dead_letter_response(&self, id: u64) -> Option<DeadLetterResponse> {
+        self.inner
+            .lock()
+            .await
+            .dead_letters
+            .get(&id)
+            .map(|record| DeadLetterResponse {
+                id: record.id,
+                source_seq: record.source_seq,
+                consumer_id: record.consumer_id.clone(),
+                source_stream: record.source_stream.clone(),
+                source_partition: record.source_partition,
+                source_offset: record.source_offset,
+                reason: record.reason.clone(),
+                attempt_count: record.attempt_count,
+                first_delivery_ms: record.first_delivery_ms,
+                last_delivery_ms: record.last_delivery_ms,
+                payload_bytes: record.payload.len(),
+            })
+    }
+
+    pub(super) async fn purge_dead_letter(&self, id: u64) -> Result<bool> {
+        let mut inner = self.inner.lock().await;
+        let purged = inner.purge_dead_letter(id)?;
+        drop(inner);
+        if purged {
+            self.wal.flush_due().await?;
+        }
+        Ok(purged)
+    }
+
+    pub(super) async fn replay_dead_letter(&self, id: u64) -> Result<bool> {
+        let mut inner = self.inner.lock().await;
+        let replayed = inner.replay_dead_letter(id)?;
+        drop(inner);
+        if replayed {
+            self.wal.flush_due().await?;
+            self.pull_waiters.notify_all();
+            self.deliver_pending().await?;
+        }
+        Ok(replayed)
+    }
     pub(super) async fn dead_letters_response_page(
         &self,
         offset: usize,

@@ -203,6 +203,10 @@ fn apply_record(kind: u8, body: &[u8], state: &mut ReplayState) -> Result<()> {
             let record = decode_dead_letter(body)?;
             state.dead_letters.insert(record.id, record);
         }
+        KIND_DEAD_LETTER_PURGE => {
+            let record = decode_dead_letter_purge(body)?;
+            state.dead_letters.remove(&record.id);
+        }
         _ => crate::broker_bail!("unknown WAL record kind {kind}"),
     }
     Ok(())

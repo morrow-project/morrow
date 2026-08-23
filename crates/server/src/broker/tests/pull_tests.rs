@@ -77,7 +77,7 @@ async fn nack_delay_uses_the_durable_lease_deadline() {
 
 #[tokio::test]
 async fn exhausted_pull_delivery_is_written_once_to_dead_letters() {
-    let scenario = Scenario::new();
+    let mut scenario = Scenario::new();
     let mut consumer = TestClient::connect_pull(scenario.broker(), "puller", 25).await;
     consumer
         .write_line(
@@ -105,8 +105,13 @@ async fn exhausted_pull_delivery_is_written_once_to_dead_letters() {
     assert!(dead_letter.consumer_id.starts_with("pull-"));
     assert_eq!(dead_letter.attempt_count, 1);
     assert!(dead_letter.payload.is_empty());
-    let consumer = inner.consumers.get(&dead_letter.consumer_id).unwrap();
-    assert_eq!(consumer.cursors.committed_offset("orders", 0), Some(1));
+    let state_consumer = inner.consumers.get(&dead_letter.consumer_id).unwrap();
+    assert_eq!(state_consumer.cursors.committed_offset("orders", 0), Some(1));
+    drop(inner);
+    consumer.disconnect().await;
+    publisher.disconnect().await;
+    scenario.restart_broker().await;
+    assert_eq!(scenario.broker().inner.lock().await.dead_letters.len(), 1);
 }
 
 #[tokio::test]

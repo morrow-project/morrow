@@ -51,6 +51,11 @@ pub(super) fn ack_body(record: &AckRecord) -> Result<Vec<u8>> {
 pub(super) fn dead_letter_body(record: &DeadLetterRecord) -> Result<Vec<u8>> {
     serde_json::to_vec(record).context("encoding dead-letter record")
 }
+pub(super) fn dead_letter_purge_body(record: &DeadLetterPurgeRecord) -> Result<Vec<u8>> {
+    let mut body = Vec::new();
+    put_u64(&mut body, record.id);
+    Ok(body)
+}
 pub(super) fn partition_append_body(record: &PartitionAppendRecord) -> Result<Vec<u8>> {
     let mut body = Vec::new();
     put_u64(&mut body, record.seq);
@@ -251,6 +256,12 @@ pub(super) fn decode_ack(body: &[u8]) -> Result<AckRecord> {
 }
 pub(super) fn decode_dead_letter(body: &[u8]) -> Result<DeadLetterRecord> {
     serde_json::from_slice(body).context("decoding dead-letter record")
+}
+pub(super) fn decode_dead_letter_purge(body: &[u8]) -> Result<DeadLetterPurgeRecord> {
+    let mut cursor = Cursor { bytes: body, pos: 0 };
+    let record = DeadLetterPurgeRecord { id: cursor.u64()? };
+    cursor.finish()?;
+    Ok(record)
 }
 pub(super) fn put_u32(out: &mut Vec<u8>, value: u32) {
     out.extend_from_slice(&value.to_le_bytes());

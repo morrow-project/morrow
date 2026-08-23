@@ -104,6 +104,7 @@ impl Morrow {
         let Some(request_target) = http_request_path(request_line) else {
             return write_http_not_found(&mut stream).await;
         };
+        let method = http_request_method(request_line).unwrap_or("GET");
         let (path, query) = request_target
             .split_once('?')
             .unwrap_or((request_target, ""));
@@ -134,6 +135,58 @@ impl Morrow {
         };
         if !http_authorized(&request, admin_token) {
             return write_http_unauthorized(&mut stream).await;
+        }
+        if method == "DELETE" {
+            if let Some(id) = path
+                .strip_prefix("/api/v1/dead-letters/")
+                .or_else(|| path.strip_prefix("/dead-letters/"))
+                .and_then(|value| value.parse().ok())
+            {
+                return if self.purge_dead_letter(id).await? {
+                    write_http_response(&mut stream, "204 No Content", "application/json", &[])
+                        .await
+                } else {
+                    write_http_not_found(&mut stream).await
+                };
+            }
+        }
+        if method == "GET" {
+            if let Some(id) = path
+                .strip_prefix("/api/v1/dead-letters/")
+                .or_else(|| path.strip_prefix("/dead-letters/"))
+                .and_then(|value| value.parse().ok())
+            {
+                return match self.dead_letter_response(id).await {
+                    Some(record) => {
+                        let body = serde_json::to_vec(&record)
+                            .context("serializing HTTP dead-letter record")?;
+                        write_http_response(&mut stream, "200 OK", "application/json", &body)
+                            .await
+                    }
+                    None => write_http_not_found(&mut stream).await,
+                };
+            }
+        }
+        if method == "POST" {
+            if let Some(id) = path
+                .strip_prefix("/api/v1/dead-letters/")
+                .and_then(|value| value.strip_suffix("/replay"))
+                .or_else(|| {
+                    path.strip_prefix("/dead-letters/")
+                        .and_then(|value| value.strip_suffix("/replay"))
+                })
+                .and_then(|value| value.parse().ok())
+            {
+                let replayed = self.replay_dead_letter(id).await?;
+                let body = format!("{{\"replayed\":{replayed}}}");
+                return write_http_response(
+                    &mut stream,
+                    if replayed { "200 OK" } else { "404 Not Found" },
+                    "application/json",
+                    body.as_bytes(),
+                )
+                .await;
+            }
         }
         match path {
             "/cluster" | "/api/v1/cluster" => self.write_cluster_response(&mut stream).await,

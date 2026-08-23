@@ -21,6 +21,7 @@ const KIND_PARTITION_APPEND: u8 = 5;
 const KIND_CONSUMER_CURSOR: u8 = 6;
 const KIND_CONSUMER_DELETE: u8 = 7;
 const KIND_DEAD_LETTER: u8 = 8;
+const KIND_DEAD_LETTER_PURGE: u8 = 9;
 pub const DEFAULT_WAL_SEGMENT_BYTES: u64 = 64 * 1024 * 1024;
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct PublishRecord {
@@ -115,6 +116,10 @@ pub struct DeadLetterRecord {
     pub first_delivery_ms: u64,
     pub last_delivery_ms: u64,
     pub payload: Vec<u8>,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeadLetterPurgeRecord {
+    pub id: u64,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PartitionAppendRecord {
