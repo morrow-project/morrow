@@ -45,6 +45,7 @@ async fn parses_hpub_with_qos_headers() {
             ack: Some(ProducerAckRequest {
                 level: AckLevel::Durable,
                 msg_id: "msg-1".into(),
+                producer: None,
             }),
         }
     );
@@ -75,8 +76,35 @@ async fn parses_hpub_with_reply_to_and_qos_headers() {
             ack: Some(ProducerAckRequest {
                 level: AckLevel::ClusterDurable,
                 msg_id: "msg-3".into(),
+                producer: None,
             }),
         }
+    );
+}
+
+#[tokio::test]
+async fn parses_idempotent_producer_sequence_headers() {
+    let headers = "MORROW/1.0\r\nMorrow-QoS: 1\r\nMorrow-Msg-Id: msg-1\r\nMorrow-Producer-Id: producer-a\r\nMorrow-Producer-Epoch: 7\r\nMorrow-Producer-Sequence: 42\r\n\r\n";
+    let line = format!(
+        "HPUB orders/created {} {}\r\n{headers}hello\r\n",
+        headers.len(),
+        headers.len() + 5
+    );
+    let mut reader = BufReader::new(line.as_bytes());
+    let command = read_command(&mut reader, 1024, 8192)
+        .await
+        .unwrap()
+        .unwrap();
+    let Command::Pub { ack: Some(ack), .. } = command else {
+        panic!("expected producer acknowledgement request");
+    };
+    assert_eq!(
+        ack.producer,
+        Some(ProducerSequence {
+            producer_id: "producer-a".into(),
+            epoch: 7,
+            sequence: 42,
+        })
     );
 }
 

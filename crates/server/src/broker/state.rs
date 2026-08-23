@@ -1,4 +1,7 @@
 use super::*;
+use std::hash::{Hash, Hasher};
+
+const MAX_PRODUCER_SEQUENCES_PER_PRODUCER: usize = 4_096;
 
 pub(super) struct DurableBrokerState {
     pub(super) wal: WalRuntime,
@@ -12,6 +15,161 @@ pub(super) struct DurableBrokerState {
     pub(super) dead_letters: BTreeMap<u64, DeadLetterRecord>,
     pub(super) compaction_latest: HashMap<CompactionKey, (u64, u64)>,
     pub(super) superseded_since_compaction: usize,
+    pub(super) producer_epochs: HashMap<String, u64>,
+    pub(super) producer_sequences: HashMap<(String, u64, u64), ProducerDedupEntry>,
+    pub(super) producer_in_flight: HashSet<(String, u64, u64)>,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct ProducerDedupEntry {
+    pub(super) fingerprint: u64,
+    pub(super) record: PublishRecord,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ProducerSequenceDecision {
+    New,
+    Duplicate,
+}
+
+pub(super) fn producer_fingerprint(
+    subject: &str,
+    key: Option<&[u8]>,
+    headers: &[(String, String)],
+    payload: &[u8],
+) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    subject.hash(&mut hasher);
+    key.hash(&mut hasher);
+    headers.hash(&mut hasher);
+    payload.hash(&mut hasher);
+    hasher.finish()
+}
+
+impl DurableBrokerState {
+    pub(super) fn begin_producer_sequence(
+        &mut self,
+        producer: &protocol::ProducerSequence,
+        fingerprint: u64,
+    ) -> Result<(ProducerSequenceDecision, Option<PublishRecord>)> {
+        if let Some(entry) = self.producer_sequences.get(&(
+            producer.producer_id.clone(),
+            producer.epoch,
+            producer.sequence,
+        )) {
+            crate::broker_ensure!(
+                entry.fingerprint == fingerprint,
+                "producer sequence was reused with different content"
+            );
+            return Ok((
+                ProducerSequenceDecision::Duplicate,
+                Some(entry.record.clone()),
+            ));
+        }
+        let current_epoch = self
+            .producer_epochs
+            .get(&producer.producer_id)
+            .copied()
+            .unwrap_or(producer.epoch);
+        crate::broker_ensure!(
+            producer.epoch >= current_epoch,
+            "producer epoch is stale and has been fenced"
+        );
+        if producer.epoch > current_epoch {
+            self.producer_epochs
+                .insert(producer.producer_id.clone(), producer.epoch);
+            self.producer_sequences
+                .retain(|(producer_id, _, _), _| producer_id != &producer.producer_id);
+        }
+        crate::broker_ensure!(
+            !self
+                .producer_in_flight
+                .iter()
+                .any(|(producer_id, epoch, sequence)| {
+                    producer_id == &producer.producer_id
+                        && *epoch == producer.epoch
+                        && *sequence != producer.sequence
+                }),
+            "producer has another sequence in progress"
+        );
+        let last_sequence = self
+            .producer_sequences
+            .keys()
+            .filter(|(producer_id, epoch, _)| {
+                producer_id == &producer.producer_id && *epoch == producer.epoch
+            })
+            .map(|(_, _, sequence)| *sequence)
+            .max();
+        match last_sequence {
+            None => crate::broker_ensure!(producer.sequence <= 1, "producer sequence gap"),
+            Some(last) => {
+                if producer.sequence <= last {
+                    crate::broker_ensure!(
+                        producer.sequence == last.saturating_add(1),
+                        "producer sequence is outside the deduplication frontier"
+                    );
+                } else {
+                    crate::broker_ensure!(
+                        producer.sequence == last.saturating_add(1),
+                        "producer sequence gap"
+                    );
+                }
+            }
+        }
+        let identity = (
+            producer.producer_id.clone(),
+            producer.epoch,
+            producer.sequence,
+        );
+        crate::broker_ensure!(
+            self.producer_in_flight.insert(identity),
+            "producer sequence is already in progress"
+        );
+        Ok((ProducerSequenceDecision::New, None))
+    }
+
+    pub(super) fn complete_producer_sequence(
+        &mut self,
+        producer: &protocol::ProducerSequence,
+        fingerprint: u64,
+        record: PublishRecord,
+    ) {
+        let identity = (
+            producer.producer_id.clone(),
+            producer.epoch,
+            producer.sequence,
+        );
+        self.producer_in_flight.remove(&identity);
+        self.producer_epochs
+            .insert(producer.producer_id.clone(), producer.epoch);
+        let producer_count = self
+            .producer_sequences
+            .keys()
+            .filter(|(producer_id, epoch, _)| {
+                producer_id == &producer.producer_id && *epoch == producer.epoch
+            })
+            .count();
+        if producer_count >= MAX_PRODUCER_SEQUENCES_PER_PRODUCER {
+            if let Some(oldest) = self
+                .producer_sequences
+                .keys()
+                .filter(|(producer_id, epoch, _)| {
+                    producer_id == &producer.producer_id && *epoch == producer.epoch
+                })
+                .min_by_key(|(_, _, sequence)| *sequence)
+                .cloned()
+            {
+                self.producer_sequences.remove(&oldest);
+            }
+        }
+        self.producer_sequences.insert(
+            identity,
+            ProducerDedupEntry {
+                fingerprint,
+                record,
+            },
+        );
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -220,6 +378,21 @@ pub(super) struct DeadLetterResponse {
     pub(super) first_delivery_ms: u64,
     pub(super) last_delivery_ms: u64,
     pub(super) payload_bytes: usize,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub(super) struct ProducersResponse {
+    pub(super) count: usize,
+    pub(super) total_count: usize,
+    pub(super) next_offset: Option<usize>,
+    pub(super) producers: Vec<ProducerResponse>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub(super) struct ProducerResponse {
+    pub(super) producer_id: String,
+    pub(super) epoch: u64,
+    pub(super) dedup_entries: usize,
 }
 
 #[derive(Debug, Default)]

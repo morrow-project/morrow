@@ -84,6 +84,14 @@ pub enum AckLevel {
 pub struct ProducerAckRequest {
     pub level: AckLevel,
     pub msg_id: String,
+    pub producer: Option<ProducerSequence>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct ProducerSequence {
+    pub producer_id: String,
+    pub epoch: u64,
+    pub sequence: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -590,9 +598,30 @@ fn parse_producer_ack_request(
     let msg_id = header_value(headers, "Morrow-Msg-Id")
         .ok_or_else(|| ProtocolError("Morrow-Msg-Id is required when Morrow-QoS is set".into()))?;
     validate_msg_id(msg_id)?;
+    let producer_id = header_value(headers, "Morrow-Producer-Id");
+    let producer_epoch = header_value(headers, "Morrow-Producer-Epoch");
+    let producer_sequence = header_value(headers, "Morrow-Producer-Sequence");
+    let producer = match (producer_id, producer_epoch, producer_sequence) {
+        (None, None, None) => None,
+        (Some(producer_id), Some(epoch), Some(sequence)) => Some(ProducerSequence {
+            producer_id: validate_producer_id(producer_id)?,
+            epoch: epoch
+                .parse()
+                .map_err(|_| ProtocolError("Morrow-Producer-Epoch must be an integer".into()))?,
+            sequence: sequence
+                .parse()
+                .map_err(|_| ProtocolError("Morrow-Producer-Sequence must be an integer".into()))?,
+        }),
+        _ => {
+            return Err(ProtocolError(
+                "producer identity, epoch, and sequence must be supplied together".into(),
+            ));
+        }
+    };
     Ok(Some(ProducerAckRequest {
         level,
         msg_id: msg_id.to_string(),
+        producer,
     }))
 }
 
@@ -614,6 +643,20 @@ fn validate_msg_id(value: &str) -> Result<(), ProtocolError> {
         ));
     }
     Ok(())
+}
+
+fn validate_producer_id(value: &str) -> Result<String, ProtocolError> {
+    if value.is_empty()
+        || value.len() > 128
+        || value.chars().any(|ch| ch == '\r' || ch == '\n')
+        || value.chars().any(char::is_whitespace)
+    {
+        return Err(ProtocolError(
+            "Morrow-Producer-Id must be non-empty, at most 128 bytes, and contain no whitespace"
+                .into(),
+        ));
+    }
+    Ok(value.to_string())
 }
 
 fn trim_crlf(line: &mut Vec<u8>) -> Result<(), ProtocolError> {

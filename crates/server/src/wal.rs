@@ -22,6 +22,7 @@ const KIND_CONSUMER_CURSOR: u8 = 6;
 const KIND_CONSUMER_DELETE: u8 = 7;
 const KIND_DEAD_LETTER: u8 = 8;
 const KIND_DEAD_LETTER_PURGE: u8 = 9;
+const KIND_PRODUCER_SEQUENCE: u8 = 10;
 pub const DEFAULT_WAL_SEGMENT_BYTES: u64 = 64 * 1024 * 1024;
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct PublishRecord {
@@ -123,6 +124,14 @@ pub struct DeadLetterRecord {
 pub struct DeadLetterPurgeRecord {
     pub id: u64,
 }
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct ProducerSequenceRecord {
+    pub producer_id: String,
+    pub epoch: u64,
+    pub sequence: u64,
+    pub fingerprint: u64,
+    pub record: PublishRecord,
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PartitionAppendRecord {
     pub seq: u64,
@@ -166,6 +175,7 @@ pub struct Replay {
     pub partition_appends: HashMap<u64, PartitionAppendRecord>,
     pub consumers: HashMap<String, ReplayedConsumer>,
     pub dead_letters: HashMap<u64, DeadLetterRecord>,
+    pub producer_sequences: HashMap<(String, u64, u64), ProducerSequenceRecord>,
     pub next_seq: u64,
     pub next_delivery_id: u64,
     pub duration_ms: u64,

@@ -236,6 +236,44 @@ impl Client {
         msg_id: &str,
         key: Option<&str>,
     ) -> Result<ProducerAck> {
+        self.publish_with_qos_and_key_and_producer(
+            subject, reply_to, payload, level, msg_id, key, None,
+        )
+        .await
+    }
+
+    pub async fn publish_with_producer_sequence(
+        &mut self,
+        subject: &str,
+        reply_to: Option<&str>,
+        payload: &[u8],
+        level: protocol::AckLevel,
+        msg_id: &str,
+        key: Option<&str>,
+        producer: &protocol::ProducerSequence,
+    ) -> Result<ProducerAck> {
+        self.publish_with_qos_and_key_and_producer(
+            subject,
+            reply_to,
+            payload,
+            level,
+            msg_id,
+            key,
+            Some(producer),
+        )
+        .await
+    }
+
+    async fn publish_with_qos_and_key_and_producer(
+        &mut self,
+        subject: &str,
+        reply_to: Option<&str>,
+        payload: &[u8],
+        level: protocol::AckLevel,
+        msg_id: &str,
+        key: Option<&str>,
+        producer: Option<&protocol::ProducerSequence>,
+    ) -> Result<ProducerAck> {
         validate_producer_msg_id(msg_id)?;
         if key.is_some_and(|key| key.is_empty() || key.contains(['\r', '\n'])) {
             return Err(ClientError::msg(
@@ -253,6 +291,13 @@ impl Client {
             "MORROW/1.0\r\nMorrow-QoS: {}\r\nMorrow-Msg-Id: {msg_id}\r\n\r\n",
             level as u8
         );
+        if let Some(producer) = producer {
+            headers.truncate(headers.len() - 2);
+            headers.push_str(&format!(
+                "Morrow-Producer-Id: {}\r\nMorrow-Producer-Epoch: {}\r\nMorrow-Producer-Sequence: {}\r\n\r\n",
+                producer.producer_id, producer.epoch, producer.sequence
+            ));
+        }
         if let Some(key) = key {
             headers.truncate(headers.len() - 2);
             headers.push_str(&format!("Morrow-Key: {key}\r\n\r\n"));
