@@ -6,7 +6,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use tokio::{
@@ -15,7 +15,7 @@ use tokio::{
     sync::{Mutex, Notify, mpsc},
 };
 use tokio_rustls::TlsAcceptor;
-use tracing::{error, info, warn};
+use tracing::{Instrument, error, info, warn};
 
 #[cfg(test)]
 use openraft::BasicNode;

@@ -42,6 +42,80 @@ listeners in a cluster. Do not enable
 
 ## Administration
 
+When `http_listen` is configured, the admin listener exposes two health
+endpoints that do not require the admin bearer token:
+
+* `GET /health/live` returns `200` once the process can accept HTTP requests.
+* `GET /health/ready` returns `200` for a standalone broker or a cluster with
+  a known leader, and `503` while a cluster is still forming or degraded.
+  The JSON `reason` identifies `leader_election`, `quorum_loss`,
+  `route_degraded`, or `storage_failure` when applicable.
+
+The authenticated `GET /metrics` endpoint exposes bounded-cardinality
+Prometheus text-format metrics for connections, subscriptions, consumers, WAL
+usage, readiness, and resource-quota rejections. It deliberately does not
+include subjects, client IDs, message IDs, payloads, credentials, or other
+unbounded user values. The metric names include publish and delivery counters,
+rejected-operation and consumer-lag metrics, partition-log read/write counters,
+latency histograms in microseconds,
+partition retention and recovery, WAL and compaction gauges, cluster and route
+state, middleware execution counters, and quota rejections.
+
+Middleware execution, drop, reject, and failure counters are included in the
+same endpoint.
+
+The same administrative resources are available under the versioned
+`/api/v1/` namespace: `/api/v1/cluster`, `/api/v1/connections`,
+`/api/v1/quotas`, `/api/v1/subscriptions`, `/api/v1/streams`,
+`/api/v1/storage`, `/api/v1/routes`, `/api/v1/connectors`, and
+`/api/v1/metrics`. The health endpoints are available as
+`/api/v1/health/live` and `/api/v1/health/ready`.
+
+`/api/v1/middleware` reports the active middleware generation. It is
+intentionally a bounded summary; middleware payloads and credentials are not
+included.
+
+`/api/v1/routes` exposes route topology independently of the cluster response.
+`/api/v1/connectors` lists only currently connected clients whose durable IDs
+use the `connector-` namespace; it excludes connector secrets and configuration
+material.
+
+The server emits `tracing` spans named `morrow.publish`,
+`morrow.delivery.prepare`, `morrow.partition.read`, `morrow.partition.write`,
+`morrow.partition.flush`, `morrow.cluster.commit`, `morrow.raft.rpc`, and
+`morrow.route.forward`, plus `morrow.command` for client command boundaries and
+`morrow.middleware` for
+middleware stage/generation boundaries. A valid W3C `traceparent` publish
+header is extracted as the OpenTelemetry parent context and recorded as bounded
+span context metadata. Spans carry no payloads, credentials, subjects, or
+message IDs. When `OTEL_EXPORTER_OTLP_ENDPOINT` or
+`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` is set, the server installs a batched OTLP
+gRPC exporter; otherwise it uses the lightweight local formatter only.
+`OTEL_SDK_DISABLED=true` disables the OpenTelemetry exporter even when an
+endpoint is present.
+
+High-cardinality connection listings can be paged with
+`/api/v1/connections?limit=100&offset=0`. The server clamps the page size to
+1,000 and returns `total_count` plus `next_offset` when more results remain.
+The versioned subscriptions listing uses the same bounded `limit` and `offset`
+parameters and returns separate totals and continuation offsets for durable
+consumers and transient subscriptions.
+
+### Observability load validation
+
+The release-mode integration benchmark reports throughput and p50/p95/p99
+latency for 250 clustered durable publishes. Run it in three configurations:
+
+1. formatter-only metrics: `cargo test -p integration --release --test
+   client_server benchmark_cluster_durable_publish_latency -- --ignored
+   --nocapture` with no OTLP endpoint.
+2. metrics plus OTLP tracing: run the same command with
+   `OTEL_EXPORTER_OTLP_ENDPOINT` pointed at an OpenTelemetry Collector.
+3. exporter disabled: run the first command with `OTEL_SDK_DISABLED=true`.
+
+Record the printed throughput and percentile values for each run; the benchmark
+does not include payloads or user identifiers in telemetry.
+
 When `http_listen` is configured, set an admin token and protect the listener.
 The JSON endpoints include `/cluster`, `/connections`, `/subscriptions`,
 `/streams`, `/wal`, and `/quotas`.

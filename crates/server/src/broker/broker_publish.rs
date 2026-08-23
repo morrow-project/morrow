@@ -1,4 +1,38 @@
 use super::*;
+use opentelemetry::propagation::{Extractor, TextMapPropagator};
+use tracing_opentelemetry::OpenTelemetrySpanExt;
+
+struct HeaderExtractor<'a>(&'a [(String, String)]);
+
+impl Extractor for HeaderExtractor<'_> {
+    fn get(&self, key: &str) -> Option<&str> {
+        self.0
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(key))
+            .map(|(_, value)| value.as_str())
+    }
+
+    fn keys(&self) -> Vec<&str> {
+        self.0.iter().map(|(name, _)| name.as_str()).collect()
+    }
+}
+
+fn valid_traceparent(headers: &[(String, String)]) -> Option<&str> {
+    let value = headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("traceparent"))
+        .map(|(_, value)| value.as_str())?;
+    let bytes = value.as_bytes();
+    (bytes.len() == 55
+        && bytes[2] == b'-'
+        && bytes[35] == b'-'
+        && bytes[52] == b'-'
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| matches!(index, 2 | 35 | 52) || byte.is_ascii_hexdigit()))
+    .then_some(value)
+}
 
 impl Morrow {
     pub(super) async fn load_partition_record(
@@ -8,6 +42,10 @@ impl Morrow {
         if metadata.stream.is_none() {
             return Ok(metadata);
         }
+        self.metrics
+            .partition_reads_total
+            .fetch_add(1, Ordering::Relaxed);
+        let span = tracing::info_span!("morrow.partition.read");
         let partition_logs = self.partition_logs.clone();
         let permit = self
             .storage_permits
@@ -19,6 +57,7 @@ impl Morrow {
             let _permit = permit;
             partition_logs.load_record(&metadata)
         })
+        .instrument(span)
         .await
         .map_err(|err| BrokerError::with_source("partition read worker failed", err))?
     }
@@ -44,6 +83,7 @@ impl Morrow {
             let _permit = permit;
             partition_logs.flush_partition(&stream, partition)
         })
+        .instrument(tracing::info_span!("morrow.partition.flush"))
         .await
         .map_err(|err| BrokerError::with_source("partition flush worker failed", err))?
     }
@@ -58,17 +98,42 @@ impl Morrow {
         payload: Vec<u8>,
         producer_ack: Option<protocol::ProducerAckRequest>,
     ) -> Result<()> {
-        self.publish_with_depth(
+        let traceparent = valid_traceparent(&headers).unwrap_or("none");
+        let span = tracing::info_span!(
+            "morrow.publish",
             publisher_id,
-            subject_name,
-            reply_to,
-            headers,
-            key,
-            payload,
-            producer_ack,
-            0,
-        )
-        .await
+            payload_bytes = payload.len(),
+            recursion_depth = 0usize,
+            traceparent,
+        );
+        let parent = opentelemetry_sdk::propagation::TraceContextPropagator::new()
+            .extract(&HeaderExtractor(&headers));
+        let _ = span.set_parent(parent);
+        let started = Instant::now();
+        self.metrics.publishes_total.fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .published_bytes_total
+            .fetch_add(payload.len() as u64, Ordering::Relaxed);
+        let result = self
+            .publish_with_depth(
+                publisher_id,
+                subject_name,
+                reply_to,
+                headers,
+                key,
+                payload,
+                producer_ack,
+                0,
+            )
+            .instrument(span)
+            .await;
+        if result.is_err() {
+            self.metrics
+                .rejected_operations_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        self.metrics.publish_latency_us.observe(started.elapsed());
+        result
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -252,7 +317,10 @@ impl Morrow {
                 legacy_seq: seq,
             };
             let fsync = ack.is_none_or(|ack| ack.level == protocol::AckLevel::HighDurability);
-            let envelope = cluster.replicate_partition(envelope, fsync).await?;
+            let envelope = cluster
+                .replicate_partition(envelope, fsync)
+                .instrument(tracing::info_span!("morrow.cluster.commit"))
+                .await?;
             cluster.enforce_retention(self.hooks.clock.now_ms())?;
             self.apply_cluster_partition(envelope.clone()).await?;
             let _storage_operation = self.storage_gate.read().await;
@@ -313,8 +381,12 @@ impl Morrow {
                 let _permit = permit;
                 partition_logs.append_envelope(pending_envelope)
             })
+            .instrument(tracing::info_span!("morrow.partition.write"))
             .await
             .map_err(|err| BrokerError::with_source("partition append worker failed", err))??;
+            self.metrics
+                .partition_writes_total
+                .fetch_add(1, Ordering::Relaxed);
             let reference = PartitionAppendRecord::from(&envelope);
             let mut inner = self.inner.lock().await;
             inner.wal.append_partition_append(&reference)?;
@@ -407,6 +479,12 @@ impl Morrow {
     }
 
     pub(super) async fn ack(&self, ack: AckSubject) -> Result<bool> {
+        async { self.ack_inner(ack).await }
+            .instrument(tracing::info_span!("morrow.acknowledgement"))
+            .await
+    }
+
+    async fn ack_inner(&self, ack: AckSubject) -> Result<bool> {
         let mut inner = self.inner.lock().await;
         let mut should_cleanup = false;
         let mut acknowledged_record = None;
@@ -459,6 +537,9 @@ impl Morrow {
         drop(inner);
         self.wal.flush_due().await?;
         if valid {
+            self.metrics
+                .acknowledgements_total
+                .fetch_add(1, Ordering::Relaxed);
             self.pull_waiters.notify_consumer(&ack.consumer_id);
         }
         if let Some(record) = acknowledged_record {
@@ -508,24 +589,32 @@ impl Morrow {
     }
 
     pub(super) async fn deliver_pending(&self) -> Result<()> {
-        let deliveries = {
+        let span = tracing::info_span!("morrow.delivery.prepare");
+        let started = Instant::now();
+        let deliveries = async {
             let connections = ConnectionState {
                 clients: self.connections.lock().await.clients.clone(),
             };
             let mut inner = self.inner.lock().await;
-            inner.prepare_durable_deliveries(
+            Ok::<_, BrokerError>(inner.prepare_durable_deliveries(
                 &connections,
                 &self.partition_logs,
                 &self.middleware,
                 self.hooks.clock.now_ms(),
-            )?
-        };
+            )?)
+        }
+        .instrument(span)
+        .await?;
         self.redelivery_notify.notify_one();
         self.wal.flush_due().await?;
 
+        self.metrics
+            .delivery_attempts_total
+            .fetch_add(deliveries.len() as u64, Ordering::Relaxed);
         for delivery in deliveries {
             let _ = delivery.sender.send(delivery.frame).await;
         }
+        self.metrics.delivery_latency_us.observe(started.elapsed());
         Ok(())
     }
 

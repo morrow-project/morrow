@@ -161,10 +161,96 @@ pub(super) struct ClusterResponse {
     pub(super) state_application: ClusterStateApplicationResponse,
 }
 
+#[derive(Debug, serde::Serialize)]
+pub(super) struct HealthResponse {
+    pub(super) status: &'static str,
+    pub(super) cluster_status: &'static str,
+    pub(super) role: &'static str,
+    pub(super) reason: Option<&'static str>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub(super) struct MiddlewareResponse {
+    pub(super) current_generation: u64,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub(super) struct ConnectorsResponse {
+    pub(super) count: usize,
+    pub(super) connectors: Vec<ConnectorResponse>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub(super) struct ConnectorResponse {
+    pub(super) connection_id: u64,
+    pub(super) durable_id: String,
+    pub(super) status: &'static str,
+    pub(super) authenticated: bool,
+    pub(super) connected_at_ms: u64,
+    pub(super) protocol_version: u32,
+}
+
 #[derive(Debug, Default)]
 pub(super) struct ClusterApplicationMetrics {
     pub(super) delta_applications: AtomicU64,
     pub(super) full_reconciliations: AtomicU64,
+}
+
+#[derive(Debug, Default)]
+pub(super) struct BrokerMetrics {
+    pub(super) publishes_total: AtomicU64,
+    pub(super) published_bytes_total: AtomicU64,
+    pub(super) rejected_operations_total: AtomicU64,
+    pub(super) partition_reads_total: AtomicU64,
+    pub(super) partition_writes_total: AtomicU64,
+    pub(super) delivery_attempts_total: AtomicU64,
+    pub(super) acknowledgements_total: AtomicU64,
+    pub(super) nacks_total: AtomicU64,
+    pub(super) redeliveries_total: AtomicU64,
+    pub(super) publish_latency_us: LatencyHistogram,
+    pub(super) delivery_latency_us: LatencyHistogram,
+}
+
+#[derive(Debug)]
+pub(super) struct LatencyHistogram {
+    buckets: [AtomicU64; 6],
+    count: AtomicU64,
+    sum_us: AtomicU64,
+}
+
+impl Default for LatencyHistogram {
+    fn default() -> Self {
+        Self {
+            buckets: std::array::from_fn(|_| AtomicU64::new(0)),
+            count: AtomicU64::new(0),
+            sum_us: AtomicU64::new(0),
+        }
+    }
+}
+
+impl LatencyHistogram {
+    pub(super) fn observe(&self, duration: Duration) {
+        let micros = duration.as_micros().min(u64::MAX as u128) as u64;
+        let bucket = match micros {
+            0..=9 => 0,
+            10..=99 => 1,
+            100..=999 => 2,
+            1_000..=9_999 => 3,
+            10_000..=99_999 => 4,
+            _ => 5,
+        };
+        self.buckets[bucket].fetch_add(1, Ordering::Relaxed);
+        self.count.fetch_add(1, Ordering::Relaxed);
+        self.sum_us.fetch_add(micros, Ordering::Relaxed);
+    }
+
+    pub(super) fn snapshot(&self) -> ([u64; 6], u64, u64) {
+        (
+            std::array::from_fn(|index| self.buckets[index].load(Ordering::Relaxed)),
+            self.count.load(Ordering::Relaxed),
+            self.sum_us.load(Ordering::Relaxed),
+        )
+    }
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -196,6 +282,8 @@ pub(super) struct ClusterPeerResponse {
 #[derive(Debug, serde::Serialize)]
 pub(super) struct ConnectionsResponse {
     pub(super) count: usize,
+    pub(super) total_count: usize,
+    pub(super) next_offset: Option<usize>,
     pub(super) connections: Vec<ConnectionResponse>,
 }
 
@@ -232,6 +320,16 @@ pub(super) struct ConnectionResponse {
 pub(super) struct SubscriptionsResponse {
     pub(super) durable_consumers: Vec<DurableConsumerResponse>,
     pub(super) transient_subscriptions: Vec<TransientSubscriptionResponse>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub(super) struct SubscriptionsPageResponse {
+    pub(super) durable_consumers: Vec<DurableConsumerResponse>,
+    pub(super) transient_subscriptions: Vec<TransientSubscriptionResponse>,
+    pub(super) durable_total_count: usize,
+    pub(super) durable_next_offset: Option<usize>,
+    pub(super) transient_total_count: usize,
+    pub(super) transient_next_offset: Option<usize>,
 }
 
 #[derive(Debug, serde::Serialize)]

@@ -23,6 +23,25 @@ async fn http_connections_endpoint_reports_live_client_metadata() {
     assert!(response.contains("\"subscriptions\":1"));
     assert!(response.contains("\"transient_subscriptions\":1"));
 }
+
+#[tokio::test]
+async fn versioned_connections_endpoint_supports_bounded_pagination() {
+    let scenario = Scenario::new();
+    let _first = scenario.connect_durable("client1", 25).await;
+    let _second = scenario.connect_durable("client2", 25).await;
+
+    let first_page = http_request(scenario.broker(), "/api/v1/connections?limit=1").await;
+    let second_page = http_request(scenario.broker(), "/api/v1/connections?limit=1&offset=1").await;
+
+    assert!(first_page.contains("\"count\":1"));
+    assert!(first_page.contains("\"total_count\":2"));
+    assert!(first_page.contains("\"next_offset\":1"));
+    assert!(first_page.contains("\"id\":1"));
+    assert!(second_page.contains("\"count\":1"));
+    assert!(second_page.contains("\"total_count\":2"));
+    assert!(second_page.contains("\"next_offset\":null"));
+    assert!(second_page.contains("\"id\":2"));
+}
 #[tokio::test]
 async fn http_subscriptions_endpoint_reports_durable_and_transient_state() {
     let scenario = Scenario::new();
@@ -54,6 +73,28 @@ async fn http_subscriptions_endpoint_reports_durable_and_transient_state() {
     assert!(response.contains("\"transient_subscriptions\""));
     assert!(response.contains("\"subject\":\"_MORROW/INBOX/client1/1\""));
     assert!(response.contains("\"sid\":\"inbox1\""));
+}
+
+#[tokio::test]
+async fn versioned_subscriptions_endpoint_reports_bounded_pagination() {
+    let scenario = Scenario::new();
+    let response = http_request(scenario.broker(), "/api/v1/subscriptions?limit=1").await;
+    assert!(response.contains("\"durable_total_count\":0"));
+    assert!(response.contains("\"transient_total_count\":0"));
+    assert!(response.contains("\"durable_next_offset\":null"));
+    assert!(response.contains("\"transient_next_offset\":null"));
+}
+
+#[tokio::test]
+async fn versioned_connector_and_route_endpoints_are_authenticated_and_sanitized() {
+    let scenario = Scenario::new();
+    let connectors = http_request(scenario.broker(), "/api/v1/connectors").await;
+    let routes = http_request(scenario.broker(), "/api/v1/routes").await;
+    assert!(connectors.starts_with("HTTP/1.1 200 OK\r\n"));
+    assert!(connectors.contains("\"count\":0"));
+    assert!(connectors.contains("\"connectors\":[]"));
+    assert!(routes.starts_with("HTTP/1.1 200 OK\r\n"));
+    assert!(routes.contains("null"));
 }
 
 #[tokio::test]
@@ -94,6 +135,117 @@ async fn http_status_and_unknown_paths_return_not_found() {
     assert!(status.ends_with("{\"error\":\"not found\"}"));
     assert!(unknown.starts_with("HTTP/1.1 404 Not Found\r\n"));
     assert!(unknown.ends_with("{\"error\":\"not found\"}"));
+}
+
+#[tokio::test]
+async fn http_health_endpoints_report_liveness_and_readiness() {
+    let scenario = Scenario::new();
+
+    let live = http_request_with_auth(scenario.broker(), "/health/live", None).await;
+    let ready = http_request_with_auth(scenario.broker(), "/health/ready", None).await;
+    let versioned_live =
+        http_request_with_auth(scenario.broker(), "/api/v1/health/live", None).await;
+
+    assert!(live.starts_with("HTTP/1.1 200 OK\r\n"));
+    assert!(live.ends_with(r#"{"status":"alive"}"#));
+    assert!(ready.starts_with("HTTP/1.1 200 OK\r\n"));
+    assert!(ready.contains(r#""status":"ready""#));
+    assert!(ready.contains(r#""cluster_status":"standalone""#));
+    assert!(ready.contains(r#""reason":null"#));
+    assert!(versioned_live.starts_with("HTTP/1.1 200 OK\r\n"));
+}
+
+#[tokio::test]
+async fn http_readiness_rejects_a_cluster_without_a_leader() {
+    let scenario = Scenario::new_fake_cluster_local_node(3, 1, None);
+
+    let ready = http_request_with_auth(scenario.broker(), "/health/ready", None).await;
+
+    assert!(ready.starts_with("HTTP/1.1 503 Service Unavailable\r\n"));
+    assert!(ready.contains(r#""status":"forming""#));
+    assert!(ready.contains(r#""cluster_status":"forming""#));
+    assert!(ready.contains(r#""reason":"leader_election""#));
+}
+
+#[tokio::test]
+async fn http_readiness_reports_and_recovers_from_storage_failure() {
+    let scenario = Scenario::new();
+    scenario
+        .broker()
+        .storage_failure
+        .store(true, Ordering::Relaxed);
+    let degraded = http_request(scenario.broker(), "/health/ready").await;
+    assert!(degraded.starts_with("HTTP/1.1 503 Service Unavailable\r\n"));
+    assert!(degraded.contains(r#""reason":"storage_failure""#));
+
+    scenario
+        .broker()
+        .storage_failure
+        .store(false, Ordering::Relaxed);
+    let ready = http_request(scenario.broker(), "/health/ready").await;
+    assert!(ready.starts_with("HTTP/1.1 200 OK\r\n"));
+    assert!(ready.contains(r#""status":"ready""#));
+}
+
+#[tokio::test]
+async fn http_readiness_reports_quorum_loss_separately_from_election() {
+    let scenario = Scenario::new_fake_cluster_local_node(3, 1, Some(1));
+    scenario.partition_available([1]);
+    let degraded = http_request(scenario.broker(), "/health/ready").await;
+    assert!(degraded.starts_with("HTTP/1.1 503 Service Unavailable\r\n"));
+    assert!(degraded.contains(r#""status":"degraded""#));
+    assert!(degraded.contains(r#""reason":"quorum_loss""#));
+
+    scenario.restore_all_nodes();
+    let ready = http_request(scenario.broker(), "/health/ready").await;
+    assert!(ready.starts_with("HTTP/1.1 200 OK\r\n"));
+}
+
+#[tokio::test]
+async fn http_metrics_endpoint_is_authenticated_and_bounded() {
+    let scenario = Scenario::new();
+
+    let unauthorized = http_request_with_auth(scenario.broker(), "/metrics", None).await;
+    let response = http_request(scenario.broker(), "/metrics").await;
+    let versioned = http_request(scenario.broker(), "/api/v1/metrics").await;
+
+    assert!(unauthorized.starts_with("HTTP/1.1 401 Unauthorized\r\n"));
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+    assert!(response.contains("content-type: text/plain; version=0.0.4"));
+    assert!(versioned.starts_with("HTTP/1.1 200 OK\r\n"));
+    assert!(response.contains("morrow_connections 0\n"));
+    assert!(response.contains("morrow_publishes_total 0\n"));
+    assert!(response.contains("morrow_rejected_operations_total 0\n"));
+    assert!(response.contains("morrow_consumer_lag_messages 0\n"));
+    assert!(response.contains("morrow_partition_reads_total 0\n"));
+    assert!(response.contains("morrow_partition_writes_total 0\n"));
+    assert!(response.contains("morrow_delivery_attempts_total 0\n"));
+    assert!(response.contains("morrow_pull_waiters 0\n"));
+    assert!(response.contains("morrow_pending_deliveries 0\n"));
+    assert!(response.contains("morrow_in_flight_deliveries 0\n"));
+    assert!(response.contains("# TYPE morrow_publish_latency_us histogram\n"));
+    assert!(response.contains("morrow_publish_latency_us_bucket{le=\"+Inf\"} 0\n"));
+    assert!(response.contains("morrow_middleware_executions_total 0\n"));
+    assert!(response.contains("morrow_wal_rotations_total 0\n"));
+    assert!(response.contains("morrow_cluster_delta_applications_total 0\n"));
+    assert!(response.contains("morrow_wal_last_fsync_duration_us 0\n"));
+    assert!(response.contains("morrow_partition_retained_messages 0\n"));
+    assert!(response.contains("morrow_configured_partitions 3\n"));
+    assert!(response.contains("morrow_cluster_partitions 0\n"));
+    assert!(response.contains("morrow_cluster_ready 1\n"));
+    assert!(response.contains("morrow_connectors_connected 0\n"));
+    assert!(!response.contains("subject="));
+    assert!(!response.contains("client_id="));
+}
+
+#[tokio::test]
+async fn versioned_middleware_endpoint_reports_current_generation() {
+    let scenario = Scenario::new();
+
+    let response = http_request(scenario.broker(), "/api/v1/middleware").await;
+
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+    assert!(response.contains("\"current_generation\":0"));
 }
 
 #[tokio::test]

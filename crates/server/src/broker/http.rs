@@ -18,6 +18,13 @@ pub(super) fn http_request_path(request_line: &str) -> Option<&str> {
     Some(path)
 }
 
+pub(super) fn http_query_parameter<'a>(query: &'a str, name: &str) -> Option<&'a str> {
+    query.split('&').find_map(|parameter| {
+        let (key, value) = parameter.split_once('=')?;
+        (key == name).then_some(value)
+    })
+}
+
 pub(super) fn http_authorized(request: &[u8], token: &str) -> bool {
     let Ok(request) = std::str::from_utf8(request) else {
         return false;
@@ -77,4 +84,15 @@ where
     writer.write_all(header.as_bytes()).await?;
     writer.write_all(body).await?;
     Ok(())
+}
+
+pub(super) async fn write_http_text_response<W>(
+    writer: &mut W,
+    status: &str,
+    body: &str,
+) -> Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    write_http_response(writer, status, "text/plain; version=0.0.4", body.as_bytes()).await
 }

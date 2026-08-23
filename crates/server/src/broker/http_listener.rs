@@ -101,9 +101,34 @@ impl Morrow {
             .and_then(|line| std::str::from_utf8(line).ok())
             .map(str::trim_end)
             .unwrap_or("");
-        let Some(path) = http_request_path(request_line) else {
+        let Some(request_target) = http_request_path(request_line) else {
             return write_http_not_found(&mut stream).await;
         };
+        let (path, query) = request_target
+            .split_once('?')
+            .unwrap_or((request_target, ""));
+
+        if matches!(path, "/health/live" | "/api/v1/health/live") {
+            return write_http_response(
+                &mut stream,
+                "200 OK",
+                "application/json",
+                br#"{"status":"alive"}"#,
+            )
+            .await;
+        }
+
+        if matches!(path, "/health/ready" | "/api/v1/health/ready") {
+            let health = self.health_response().await;
+            let status = if health.status == "ready" {
+                "200 OK"
+            } else {
+                "503 Service Unavailable"
+            };
+            let body = serde_json::to_vec(&health).context("serializing HTTP health response")?;
+            return write_http_response(&mut stream, status, "application/json", &body).await;
+        }
+
         let Some(admin_token) = self.config.admin_token.as_deref() else {
             return write_http_unauthorized(&mut stream).await;
         };
@@ -111,12 +136,28 @@ impl Morrow {
             return write_http_unauthorized(&mut stream).await;
         }
         match path {
-            "/cluster" => self.write_cluster_response(&mut stream).await,
-            "/connections" => self.write_connections_response(&mut stream).await,
-            "/quotas" => self.write_quotas_response(&mut stream).await,
-            "/subscriptions" => self.write_subscriptions_response(&mut stream).await,
-            "/streams" => self.write_streams_response(&mut stream).await,
-            "/wal" => self.write_wal_response(&mut stream).await,
+            "/cluster" | "/api/v1/cluster" => self.write_cluster_response(&mut stream).await,
+            "/connections" => self.write_connections_response(&mut stream, None).await,
+            "/api/v1/connections" => {
+                self.write_connections_response(&mut stream, Some(parse_page(query)))
+                    .await
+            }
+            "/quotas" | "/api/v1/quotas" => self.write_quotas_response(&mut stream).await,
+            "/connectors" | "/api/v1/connectors" => {
+                self.write_connectors_response(&mut stream).await
+            }
+            "/routes" | "/api/v1/routes" => self.write_routes_response(&mut stream).await,
+            "/subscriptions" => self.write_subscriptions_response(&mut stream, None).await,
+            "/api/v1/subscriptions" => {
+                self.write_subscriptions_response(&mut stream, Some(parse_page(query)))
+                    .await
+            }
+            "/streams" | "/api/v1/streams" => self.write_streams_response(&mut stream).await,
+            "/wal" | "/api/v1/storage" => self.write_wal_response(&mut stream).await,
+            "/middleware" | "/api/v1/middleware" => {
+                self.write_middleware_response(&mut stream).await
+            }
+            "/metrics" | "/api/v1/metrics" => self.write_metrics_response(&mut stream).await,
             _ => write_http_not_found(&mut stream).await,
         }
     }
@@ -130,8 +171,9 @@ impl Morrow {
     async fn write_connections_response<W: AsyncWrite + Unpin>(
         &self,
         stream: &mut W,
+        page: Option<(usize, usize)>,
     ) -> Result<()> {
-        let body = serde_json::to_vec(&self.connections_response().await)
+        let body = serde_json::to_vec(&self.connections_response_page(page).await)
             .context("serializing HTTP connections response")?;
         write_http_response(stream, "200 OK", "application/json", &body).await
     }
@@ -142,12 +184,30 @@ impl Morrow {
         write_http_response(stream, "200 OK", "application/json", &body).await
     }
 
+    async fn write_connectors_response<W: AsyncWrite + Unpin>(&self, stream: &mut W) -> Result<()> {
+        let body = serde_json::to_vec(&self.connectors_response().await)
+            .context("serializing HTTP connectors response")?;
+        write_http_response(stream, "200 OK", "application/json", &body).await
+    }
+
+    async fn write_routes_response<W: AsyncWrite + Unpin>(&self, stream: &mut W) -> Result<()> {
+        let body = serde_json::to_vec(&self.routes_response().await)
+            .context("serializing HTTP routes response")?;
+        write_http_response(stream, "200 OK", "application/json", &body).await
+    }
+
     async fn write_subscriptions_response<W: AsyncWrite + Unpin>(
         &self,
         stream: &mut W,
+        page: Option<(usize, usize)>,
     ) -> Result<()> {
-        let body = serde_json::to_vec(&self.subscriptions_response().await)
-            .context("serializing HTTP subscriptions response")?;
+        let body = match page {
+            Some((offset, limit)) => {
+                serde_json::to_vec(&self.subscriptions_response_page(offset, limit).await)
+            }
+            None => serde_json::to_vec(&self.subscriptions_response().await),
+        }
+        .context("serializing HTTP subscriptions response")?;
         write_http_response(stream, "200 OK", "application/json", &body).await
     }
 
@@ -162,4 +222,27 @@ impl Morrow {
             .context("serializing HTTP WAL response")?;
         write_http_response(stream, "200 OK", "application/json", &body).await
     }
+
+    async fn write_metrics_response<W: AsyncWrite + Unpin>(&self, stream: &mut W) -> Result<()> {
+        let body = self.metrics_response().await;
+        write_http_text_response(stream, "200 OK", &body).await
+    }
+
+    async fn write_middleware_response<W: AsyncWrite + Unpin>(&self, stream: &mut W) -> Result<()> {
+        let body = serde_json::to_vec(&MiddlewareResponse {
+            current_generation: self.middleware.current_generation(),
+        })
+        .context("serializing HTTP middleware response")?;
+        write_http_response(stream, "200 OK", "application/json", &body).await
+    }
+}
+
+fn parse_page(query: &str) -> (usize, usize) {
+    let offset = http_query_parameter(query, "offset")
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0);
+    let limit = http_query_parameter(query, "limit")
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(100);
+    (offset, limit.clamp(1, 1_000))
 }

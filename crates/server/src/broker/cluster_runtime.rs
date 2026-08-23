@@ -108,6 +108,14 @@ impl ClusterRuntime {
         }
     }
 
+    pub(super) async fn quorum_available(&self) -> bool {
+        match self {
+            Self::Real(runtime) => runtime.quorum_available().await,
+            #[cfg(test)]
+            Self::Fake(runtime) => runtime.quorum_available(),
+        }
+    }
+
     pub(super) async fn ensure_metadata_ready(&self) -> Result<()> {
         match self {
             Self::Real(runtime) => runtime.ensure_metadata_ready().await,

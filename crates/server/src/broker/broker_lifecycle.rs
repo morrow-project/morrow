@@ -177,6 +177,8 @@ impl Morrow {
             cluster_applied_index: Arc::new(AtomicU64::new(0)),
             cluster_delta_gate: Arc::new(Mutex::new(())),
             cluster_application_metrics: Arc::new(ClusterApplicationMetrics::default()),
+            metrics: Arc::new(BrokerMetrics::default()),
+            storage_failure: Arc::new(AtomicBool::new(false)),
             redelivery_notify: Arc::new(Notify::new()),
             pull_waiters: PullWaiterRegistry::default(),
             compaction_running: Arc::new(AtomicBool::new(false)),
@@ -262,6 +264,362 @@ impl Morrow {
 
     pub async fn cluster_leader(&self) -> Option<u64> {
         self.cluster_runtime().await?.current_leader().await
+    }
+
+    pub(super) async fn health_response(&self) -> HealthResponse {
+        let cluster = self.cluster_response().await;
+        let route_degraded = cluster
+            .routes
+            .as_ref()
+            .is_some_and(|routes| !routes.seeds.is_empty() && routes.connected.is_empty());
+        let quorum_lost = if cluster.cluster_status == "ready" {
+            match self.cluster_runtime().await {
+                Some(cluster) => !cluster.quorum_available().await,
+                None => false,
+            }
+        } else {
+            false
+        };
+        let (status, reason) = if self.storage_failure.load(Ordering::Relaxed) {
+            ("degraded", Some("storage_failure"))
+        } else if route_degraded {
+            ("degraded", Some("route_degraded"))
+        } else if quorum_lost {
+            ("degraded", Some("quorum_loss"))
+        } else if cluster.cluster_status == "standalone" {
+            ("ready", None)
+        } else if cluster.cluster_status == "ready" {
+            ("ready", None)
+        } else {
+            ("forming", Some("leader_election"))
+        };
+        HealthResponse {
+            status,
+            cluster_status: cluster.cluster_status,
+            role: cluster.role,
+            reason,
+        }
+    }
+
+    pub(super) async fn metrics_response(&self) -> String {
+        let connections = self.connections.lock().await.clients.len();
+        let transient_subscriptions = self.transient.lock().await.subscriptions.len();
+        let inner = self.inner.lock().await;
+        let wal = inner
+            .wal
+            .status(inner.messages.len(), inner.consumers.len());
+        let consumers = inner.consumers.len();
+        let pending_deliveries = inner
+            .consumers
+            .values()
+            .map(|consumer| consumer.pending.len())
+            .sum::<usize>();
+        let consumer_lag_messages = inner
+            .consumers
+            .values()
+            .map(|consumer| consumer.pending.len() + consumer.in_flight.len())
+            .sum::<usize>();
+        let in_flight_deliveries = inner
+            .consumers
+            .values()
+            .map(|consumer| consumer.in_flight.len())
+            .sum::<usize>();
+        let compaction_candidates = inner.superseded_since_compaction;
+        let compaction_keys = inner.compaction_latest.len();
+        drop(inner);
+        let pull_waiters = self.pull_waiters.len();
+
+        let quotas = self.quotas.snapshot();
+        let cluster = self.cluster_response().await;
+        let streams = self.streams_response().await;
+        let retained_messages = streams
+            .streams
+            .iter()
+            .map(|stream| stream.retained_messages)
+            .sum::<usize>();
+        let retained_bytes = streams
+            .streams
+            .iter()
+            .map(|stream| stream.retained_bytes)
+            .sum::<u64>();
+        let partition_count = streams
+            .streams
+            .iter()
+            .map(|stream| stream.partition_status.len())
+            .sum::<usize>();
+        let mut metrics = String::new();
+        metrics.push_str("# HELP morrow_connections Current client connections.\n");
+        metrics.push_str("# TYPE morrow_connections gauge\n");
+        metrics.push_str(&format!("morrow_connections {connections}\n"));
+        metrics
+            .push_str("# HELP morrow_transient_subscriptions Current transient subscriptions.\n");
+        metrics.push_str("# TYPE morrow_transient_subscriptions gauge\n");
+        metrics.push_str(&format!(
+            "morrow_transient_subscriptions {transient_subscriptions}\n"
+        ));
+        metrics.push_str("# HELP morrow_durable_consumers Current durable consumers.\n");
+        metrics.push_str("# TYPE morrow_durable_consumers gauge\n");
+        metrics.push_str(&format!("morrow_durable_consumers {consumers}\n"));
+        metrics.push_str("# HELP morrow_pull_waiters Current blocked pull requests.\n");
+        metrics.push_str("# TYPE morrow_pull_waiters gauge\n");
+        metrics.push_str(&format!("morrow_pull_waiters {pull_waiters}\n"));
+        metrics.push_str("# HELP morrow_pending_deliveries Current pending deliveries.\n");
+        metrics.push_str("# TYPE morrow_pending_deliveries gauge\n");
+        metrics.push_str(&format!("morrow_pending_deliveries {pending_deliveries}\n"));
+        metrics.push_str("# HELP morrow_in_flight_deliveries Current in-flight deliveries.\n");
+        metrics.push_str("# TYPE morrow_in_flight_deliveries gauge\n");
+        metrics.push_str(&format!(
+            "morrow_in_flight_deliveries {in_flight_deliveries}\n"
+        ));
+        metrics.push_str("# HELP morrow_publishes_total Publish commands received.\n");
+        metrics.push_str("# TYPE morrow_publishes_total counter\n");
+        metrics.push_str(&format!(
+            "morrow_publishes_total {}\n",
+            self.metrics.publishes_total.load(Ordering::Relaxed)
+        ));
+        metrics.push_str("# HELP morrow_published_bytes_total Published payload bytes.\n");
+        metrics.push_str("# TYPE morrow_published_bytes_total counter\n");
+        metrics.push_str(&format!(
+            "morrow_published_bytes_total {}\n",
+            self.metrics.published_bytes_total.load(Ordering::Relaxed)
+        ));
+        metrics.push_str(
+            "# HELP morrow_rejected_operations_total Operations rejected by broker policy.\n",
+        );
+        metrics.push_str("# TYPE morrow_rejected_operations_total counter\n");
+        metrics.push_str(&format!(
+            "morrow_rejected_operations_total {}\n",
+            self.metrics
+                .rejected_operations_total
+                .load(Ordering::Relaxed)
+        ));
+        metrics.push_str("# HELP morrow_consumer_lag_messages Current consumer backlog.\n");
+        metrics.push_str("# TYPE morrow_consumer_lag_messages gauge\n");
+        metrics.push_str(&format!(
+            "morrow_consumer_lag_messages {consumer_lag_messages}\n"
+        ));
+        metrics.push_str("# HELP morrow_partition_reads_total Partition-log records loaded.\n");
+        metrics.push_str("# TYPE morrow_partition_reads_total counter\n");
+        metrics.push_str(&format!(
+            "morrow_partition_reads_total {}\n",
+            self.metrics.partition_reads_total.load(Ordering::Relaxed)
+        ));
+        metrics.push_str("# HELP morrow_partition_writes_total Partition-log records appended.\n");
+        metrics.push_str("# TYPE morrow_partition_writes_total counter\n");
+        metrics.push_str(&format!(
+            "morrow_partition_writes_total {}\n",
+            self.metrics.partition_writes_total.load(Ordering::Relaxed)
+        ));
+        metrics.push_str(
+            "# HELP morrow_delivery_attempts_total Delivery attempts sent to consumers.\n",
+        );
+        metrics.push_str("# TYPE morrow_delivery_attempts_total counter\n");
+        metrics.push_str(&format!(
+            "morrow_delivery_attempts_total {}\n",
+            self.metrics.delivery_attempts_total.load(Ordering::Relaxed)
+        ));
+        metrics.push_str("# HELP morrow_acknowledgements_total Valid acknowledgements.\n");
+        metrics.push_str("# TYPE morrow_acknowledgements_total counter\n");
+        metrics.push_str(&format!(
+            "morrow_acknowledgements_total {}\n",
+            self.metrics.acknowledgements_total.load(Ordering::Relaxed)
+        ));
+        metrics.push_str("# HELP morrow_nacks_total Negative acknowledgements.\n");
+        metrics.push_str("# TYPE morrow_nacks_total counter\n");
+        metrics.push_str(&format!(
+            "morrow_nacks_total {}\n",
+            self.metrics.nacks_total.load(Ordering::Relaxed)
+        ));
+        metrics.push_str("# HELP morrow_redeliveries_total Lease-expiry redeliveries.\n");
+        metrics.push_str("# TYPE morrow_redeliveries_total counter\n");
+        metrics.push_str(&format!(
+            "morrow_redeliveries_total {}\n",
+            self.metrics.redeliveries_total.load(Ordering::Relaxed)
+        ));
+        append_latency_histogram(
+            &mut metrics,
+            "morrow_publish_latency_us",
+            &self.metrics.publish_latency_us,
+        );
+        append_latency_histogram(
+            &mut metrics,
+            "morrow_delivery_latency_us",
+            &self.metrics.delivery_latency_us,
+        );
+        metrics.push_str("# HELP morrow_wal_bytes Total WAL bytes.\n");
+        metrics.push_str("# TYPE morrow_wal_bytes gauge\n");
+        metrics.push_str(&format!("morrow_wal_bytes {}\n", wal.total_wal_bytes));
+        metrics.push_str("# HELP morrow_wal_retained_messages Retained WAL messages.\n");
+        metrics.push_str("# TYPE morrow_wal_retained_messages gauge\n");
+        metrics.push_str(&format!(
+            "morrow_wal_retained_messages {}\n",
+            wal.retained_message_count
+        ));
+        metrics.push_str(
+            "# HELP morrow_partition_retained_messages Current retained partition messages.\n",
+        );
+        metrics.push_str("# TYPE morrow_partition_retained_messages gauge\n");
+        metrics.push_str(&format!(
+            "morrow_partition_retained_messages {retained_messages}\n"
+        ));
+        metrics
+            .push_str("# HELP morrow_partition_retained_bytes Current retained partition bytes.\n");
+        metrics.push_str("# TYPE morrow_partition_retained_bytes gauge\n");
+        metrics.push_str(&format!(
+            "morrow_partition_retained_bytes {retained_bytes}\n"
+        ));
+        metrics.push_str("# HELP morrow_configured_partitions Configured partition count.\n");
+        metrics.push_str("# TYPE morrow_configured_partitions gauge\n");
+        metrics.push_str(&format!("morrow_configured_partitions {partition_count}\n"));
+        metrics.push_str("# HELP morrow_recovered_partitions Recovered partition count.\n");
+        metrics.push_str("# TYPE morrow_recovered_partitions gauge\n");
+        metrics.push_str(&format!(
+            "morrow_recovered_partitions {}\n",
+            streams.recovery.completed_partitions
+        ));
+        metrics.push_str("# HELP morrow_wal_rotations_total WAL segment rotations.\n");
+        metrics.push_str("# TYPE morrow_wal_rotations_total counter\n");
+        metrics.push_str(&format!("morrow_wal_rotations_total {}\n", wal.rotations));
+        metrics.push_str("# HELP morrow_wal_checkpoints_total WAL checkpoints.\n");
+        metrics.push_str("# TYPE morrow_wal_checkpoints_total counter\n");
+        metrics.push_str(&format!(
+            "morrow_wal_checkpoints_total {}\n",
+            wal.checkpoints
+        ));
+        metrics.push_str("# HELP morrow_wal_truncations_total WAL truncations.\n");
+        metrics.push_str("# TYPE morrow_wal_truncations_total counter\n");
+        metrics.push_str(&format!(
+            "morrow_wal_truncations_total {}\n",
+            wal.truncations
+        ));
+        metrics.push_str("# HELP morrow_wal_last_fsync_duration_us Last WAL fsync duration.\n");
+        metrics.push_str("# TYPE morrow_wal_last_fsync_duration_us gauge\n");
+        metrics.push_str(&format!(
+            "morrow_wal_last_fsync_duration_us {}\n",
+            wal.last_fsync_duration_ms.saturating_mul(1_000)
+        ));
+        metrics.push_str(
+            "# HELP morrow_wal_last_checkpoint_duration_us Last WAL checkpoint duration.\n",
+        );
+        metrics.push_str("# TYPE morrow_wal_last_checkpoint_duration_us gauge\n");
+        metrics.push_str(&format!(
+            "morrow_wal_last_checkpoint_duration_us {}\n",
+            wal.last_checkpoint_duration_ms.saturating_mul(1_000)
+        ));
+        metrics.push_str(
+            "# HELP morrow_compaction_candidates Current superseded records awaiting compaction.\n",
+        );
+        metrics.push_str("# TYPE morrow_compaction_candidates gauge\n");
+        metrics.push_str(&format!(
+            "morrow_compaction_candidates {compaction_candidates}\n"
+        ));
+        metrics.push_str("# HELP morrow_compaction_keys Current compaction index keys.\n");
+        metrics.push_str("# TYPE morrow_compaction_keys gauge\n");
+        metrics.push_str(&format!("morrow_compaction_keys {compaction_keys}\n"));
+        metrics.push_str("# HELP morrow_cluster_partitions Current cluster partitions.\n");
+        metrics.push_str("# TYPE morrow_cluster_partitions gauge\n");
+        metrics.push_str(&format!(
+            "morrow_cluster_partitions {}\n",
+            cluster.partitions.len()
+        ));
+        metrics.push_str("# HELP morrow_cluster_peers Current configured cluster peers.\n");
+        metrics.push_str("# TYPE morrow_cluster_peers gauge\n");
+        metrics.push_str(&format!("morrow_cluster_peers {}\n", cluster.peers.len()));
+        metrics
+            .push_str("# HELP morrow_cluster_delta_applications_total Applied cluster deltas.\n");
+        metrics.push_str("# TYPE morrow_cluster_delta_applications_total counter\n");
+        metrics.push_str(&format!(
+            "morrow_cluster_delta_applications_total {}\n",
+            cluster.state_application.delta_applications
+        ));
+        metrics.push_str(
+            "# HELP morrow_cluster_full_reconciliations_total Full cluster reconciliations.\n",
+        );
+        metrics.push_str("# TYPE morrow_cluster_full_reconciliations_total counter\n");
+        metrics.push_str(&format!(
+            "morrow_cluster_full_reconciliations_total {}\n",
+            cluster.state_application.full_reconciliations
+        ));
+        let connected_routes = cluster
+            .routes
+            .as_ref()
+            .map(|routes| routes.connected.len())
+            .unwrap_or_default();
+        let (middleware_executions, middleware_drops, middleware_rejects, middleware_failures) =
+            self.middleware.metrics_snapshot();
+        let connector_count = self.connectors_response().await.count;
+        metrics.push_str("# HELP morrow_connectors_connected Current connected connectors.\n");
+        metrics.push_str("# TYPE morrow_connectors_connected gauge\n");
+        metrics.push_str(&format!("morrow_connectors_connected {connector_count}\n"));
+        metrics.push_str("# HELP morrow_route_peers_connected Current connected route peers.\n");
+        metrics.push_str("# TYPE morrow_route_peers_connected gauge\n");
+        metrics.push_str(&format!(
+            "morrow_route_peers_connected {connected_routes}\n"
+        ));
+        metrics.push_str("# HELP morrow_middleware_generation Current middleware generation.\n");
+        metrics.push_str("# TYPE morrow_middleware_generation gauge\n");
+        metrics.push_str(&format!(
+            "morrow_middleware_generation {}\n",
+            self.middleware.current_generation()
+        ));
+        metrics.push_str("# HELP morrow_middleware_executions_total Middleware executions.\n");
+        metrics.push_str("# TYPE morrow_middleware_executions_total counter\n");
+        metrics.push_str(&format!(
+            "morrow_middleware_executions_total {middleware_executions}\n"
+        ));
+        metrics.push_str("# HELP morrow_middleware_drops_total Middleware drops.\n");
+        metrics.push_str("# TYPE morrow_middleware_drops_total counter\n");
+        metrics.push_str(&format!(
+            "morrow_middleware_drops_total {middleware_drops}\n"
+        ));
+        metrics.push_str("# HELP morrow_middleware_rejects_total Middleware rejects.\n");
+        metrics.push_str("# TYPE morrow_middleware_rejects_total counter\n");
+        metrics.push_str(&format!(
+            "morrow_middleware_rejects_total {middleware_rejects}\n"
+        ));
+        metrics
+            .push_str("# HELP morrow_middleware_failures_total Middleware execution failures.\n");
+        metrics.push_str("# TYPE morrow_middleware_failures_total counter\n");
+        metrics.push_str(&format!(
+            "morrow_middleware_failures_total {middleware_failures}\n"
+        ));
+        metrics.push_str(
+            "# HELP morrow_cluster_ready Whether the broker is ready to serve traffic.\n",
+        );
+        metrics.push_str("# TYPE morrow_cluster_ready gauge\n");
+        metrics.push_str(&format!(
+            "morrow_cluster_ready {}\n",
+            (cluster.cluster_status == "standalone" || cluster.cluster_status == "ready") as u8
+        ));
+        metrics.push_str(
+            "# HELP morrow_quota_rejections_total Rejected operations caused by resource quotas.\n",
+        );
+        metrics.push_str("# TYPE morrow_quota_rejections_total counter\n");
+        metrics.push_str(&format!(
+            "morrow_quota_rejections_total{{resource=\"connections\"}} {}\n",
+            quotas.connections.rejections
+        ));
+        metrics.push_str(&format!(
+            "morrow_quota_rejections_total{{resource=\"http_connections\"}} {}\n",
+            quotas.http_connections.rejections
+        ));
+        metrics.push_str(&format!(
+            "morrow_quota_rejections_total{{resource=\"raft_connections\"}} {}\n",
+            quotas.raft_connections.rejections
+        ));
+        metrics.push_str(&format!(
+            "morrow_quota_rejections_total{{resource=\"route_connections\"}} {}\n",
+            quotas.route_connections.rejections
+        ));
+        metrics.push_str(&format!(
+            "morrow_quota_rejections_total{{resource=\"state\"}} {}\n",
+            quotas.state_rejections
+        ));
+        metrics.push_str(&format!(
+            "morrow_quota_rejections_total{{resource=\"outbound\"}} {}\n",
+            quotas.outbound_rejections
+        ));
+        metrics
     }
 
     pub(super) async fn cluster_response(&self) -> ClusterResponse {
@@ -589,4 +947,17 @@ impl Morrow {
             .get(&id)
             .is_some_and(|client| client.configured)
     }
+}
+
+fn append_latency_histogram(metrics: &mut String, name: &str, histogram: &LatencyHistogram) {
+    const BOUNDS: [&str; 6] = ["9", "99", "999", "9999", "99999", "+Inf"];
+    let (buckets, count, sum_us) = histogram.snapshot();
+    metrics.push_str(&format!("# HELP {name} Latency in microseconds.\n"));
+    metrics.push_str(&format!("# TYPE {name} histogram\n"));
+    let mut cumulative = 0;
+    for (bound, bucket) in BOUNDS.into_iter().zip(buckets) {
+        cumulative += bucket;
+        metrics.push_str(&format!("{name}_bucket{{le=\"{bound}\"}} {cumulative}\n"));
+    }
+    metrics.push_str(&format!("{name}_sum {sum_us}\n{name}_count {count}\n"));
 }

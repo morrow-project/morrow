@@ -19,7 +19,10 @@ impl Morrow {
                 _ = self.redelivery_notify.notified() => continue,
             }
             if let Err(err) = self.expire_and_redeliver().await {
+                self.storage_failure.store(true, Ordering::Relaxed);
                 error!(error = ?err, "redelivery error");
+            } else {
+                self.storage_failure.store(false, Ordering::Relaxed);
             }
         }
     }
@@ -37,6 +40,9 @@ impl Morrow {
             inner.expire_due_leases(now, MAX_EXPIRED_LEASES_PER_TICK)
         };
         if expired > 0 {
+            self.metrics
+                .redeliveries_total
+                .fetch_add(expired as u64, Ordering::Relaxed);
             self.pull_waiters.notify_all();
         }
         self.deliver_pending().await

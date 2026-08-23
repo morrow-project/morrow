@@ -10,6 +10,7 @@ pub struct RaftRuntime {
     tls_enabled: bool,
     partition_data: SharedReplicaData,
     configured_streams: Vec<crate::stream::StreamDefinition>,
+    heartbeat_interval_ms: u64,
     security_references: BTreeSet<String>,
     raft_tls: Option<RaftTlsRuntime>,
     quotas: Arc<crate::quota::QuotaRuntime>,
@@ -162,6 +163,7 @@ impl RaftRuntime {
             tls_enabled,
             partition_data,
             configured_streams: streams.definitions().to_vec(),
+            heartbeat_interval_ms: config.heartbeat_interval_ms,
             security_references: ["cluster-auth-token".to_string()].into_iter().collect(),
             raft_tls,
             quotas,
@@ -501,6 +503,18 @@ impl RaftRuntime {
 
     pub async fn current_leader(&self) -> Option<u64> {
         self.raft.current_leader().await
+    }
+
+    pub async fn quorum_available(&self) -> bool {
+        let metrics = self.raft.metrics();
+        let metrics = metrics.borrow();
+        if metrics.current_leader.is_none() {
+            return false;
+        }
+        metrics.current_leader != Some(self.node_id)
+            || metrics
+                .millis_since_quorum_ack
+                .is_some_and(|elapsed| elapsed <= self.heartbeat_interval_ms.saturating_mul(3))
     }
 
     pub async fn leader_client_addr(&self) -> Option<String> {
