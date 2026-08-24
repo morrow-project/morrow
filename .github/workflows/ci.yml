@@ -18,6 +18,7 @@ env:
 jobs:
   test:
     name: Test and build (${{ matrix.name }})
+    if: github.event_name == 'pull_request' || !startsWith(github.event.head_commit.message, 'Prepare release ')
     strategy:
       fail-fast: false
       matrix:
