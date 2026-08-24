@@ -91,6 +91,47 @@ pub(super) fn parse_info(line: &str) -> Result<Info> {
                     .collect()
             })
             .unwrap_or_else(|| vec![1]),
+        encodings: value
+            .get("encodings")
+            .and_then(serde_json::Value::as_array)
+            .map(|encodings| {
+                encodings
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .filter_map(|encoding| match encoding {
+                        "text" => Some(protocol::WireEncoding::Text),
+                        "cbor" => Some(protocol::WireEncoding::Cbor),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_else(|| vec![protocol::WireEncoding::Text]),
+        features: value
+            .get("features")
+            .and_then(serde_json::Value::as_array)
+            .map(|features| {
+                features
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default(),
+        max_frame_size: value
+            .get("max_frame_size")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| value.try_into().ok())
+            .unwrap_or(16 * 1024 * 1024),
+        max_metadata_size: value
+            .get("max_metadata_size")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| value.try_into().ok())
+            .unwrap_or(16 * 1024 * 1024),
+        max_payload_size: value
+            .get("max_payload_size")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| value.try_into().ok())
+            .unwrap_or(16 * 1024 * 1024),
         auth_required: value
             .get("auth_required")
             .and_then(serde_json::Value::as_bool)
