@@ -180,7 +180,7 @@ jobs:
 
   build-debian:
     name: Build Debian package (${{ matrix.debian_arch }})
-    needs: [tag, publish-binaries]
+    needs: [tag, build]
     strategy:
       fail-fast: false
       matrix:
@@ -191,21 +191,23 @@ jobs:
             release_arch: arm64
     runs-on: ubuntu-24.04
     steps:
-      - name: Check out Debian packaging repository
-      - name: Download and verify release archive
+      - name: Check out tagged source
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.tag.outputs.version }}
+
+      - name: Download binary release artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: release-linux-${{ matrix.release_arch }}
+          path: dist
+
+      - name: Verify release archive
         env:
-          GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.tag.outputs.version }}
           RELEASE_ARCH: ${{ matrix.release_arch }}
         run: |
           set -euo pipefail
-          mkdir -p dist
-          gh release download "${VERSION}" \
-            --repo morrow-project/morrow \
-            --pattern "morrow-${VERSION}-linux-${RELEASE_ARCH}.tar.gz" \
-            --pattern "morrow-${VERSION}-linux-${RELEASE_ARCH}.tar.gz.sha256" \
-            --dir dist \
-            --clobber
           (
             cd dist
             sha256sum --check "morrow-${VERSION}-linux-${RELEASE_ARCH}.tar.gz.sha256"
@@ -234,7 +236,7 @@ jobs:
 
   publish-debian:
     name: Publish Debian packages
-    needs: [tag, build-debian]
+    needs: [tag, create-release, build-debian]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -257,7 +259,7 @@ jobs:
 
   build-rpm:
     name: Build RPM package (${{ matrix.rpm_arch }})
-    needs: [tag, publish-binaries]
+    needs: [tag, build]
     strategy:
       fail-fast: false
       matrix:
@@ -273,22 +275,25 @@ jobs:
       - name: Install runner and RPM tooling
         run: |
           dnf install --assumeyes --setopt=install_weak_deps=False \
-            coreutils curl git gh gzip nodejs rpm-build tar
+            coreutils git gzip nodejs rpm-build tar
 
-      - name: Download and verify release archive
+      - name: Check out tagged source
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.tag.outputs.version }}
+
+      - name: Download binary release artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: release-linux-${{ matrix.release_arch }}
+          path: dist
+
+      - name: Verify release archive
         env:
-          GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.tag.outputs.version }}
           RELEASE_ARCH: ${{ matrix.release_arch }}
         run: |
           set -euo pipefail
-          mkdir -p dist
-          gh release download "${VERSION}" \
-            --repo morrow-project/morrow \
-            --pattern "morrow-${VERSION}-linux-${RELEASE_ARCH}.tar.gz" \
-            --pattern "morrow-${VERSION}-linux-${RELEASE_ARCH}.tar.gz.sha256" \
-            --dir dist \
-            --clobber
           (
             cd dist
             sha256sum --check "morrow-${VERSION}-linux-${RELEASE_ARCH}.tar.gz.sha256"
@@ -319,7 +324,7 @@ jobs:
 
   publish-rpm:
     name: Publish RPM packages
-    needs: [tag, build-rpm]
+    needs: [tag, create-release, build-rpm]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -342,12 +347,24 @@ jobs:
 
   publish-docker:
     name: Publish Docker image
-    needs: [tag, publish-binaries]
+    needs: [tag, build]
     runs-on: ubuntu-24.04
     permissions:
       contents: read
       packages: write
     steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.tag.outputs.version }}
+
+      - name: Download Linux binary artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-linux-*
+          merge-multiple: true
+          path: docker-dist
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 

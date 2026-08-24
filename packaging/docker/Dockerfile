@@ -6,15 +6,14 @@ FROM alpine:3.22 AS fetch
 ARG VERSION
 ARG TARGETARCH
 
+COPY docker-dist /releases
+
 RUN set -eux; \
     archive="morrow-${VERSION}-linux-${TARGETARCH}.tar.gz"; \
-    base_url="https://github.com/morrow-project/morrow/releases/download/${VERSION}"; \
-    apk add --no-cache curl tar; \
-    curl --fail --silent --show-error --location "${base_url}/${archive}" --output "/tmp/${archive}"; \
-    curl --fail --silent --show-error --location "${base_url}/${archive}.sha256" --output "/tmp/${archive}.sha256"; \
-    (cd /tmp && sha256sum -c "${archive}.sha256"); \
+    apk add --no-cache tar; \
+    (cd /releases && sha256sum -c "${archive}.sha256"); \
     mkdir -p /out; \
-    tar --extract --gzip --file "/tmp/${archive}" --directory /tmp; \
+    tar --extract --gzip --file "/releases/${archive}" --directory /tmp; \
     cp "/tmp/morrow-${VERSION}-linux-${TARGETARCH}/morrow-server" /out/morrow-server; \
     chmod 0555 /out/morrow-server
 
