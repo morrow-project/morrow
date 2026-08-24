@@ -7,6 +7,7 @@ pub mod model;
 pub mod protocol;
 pub mod schema;
 pub mod subject;
+pub mod text;
 
 pub use frames::*;
 pub use model::{

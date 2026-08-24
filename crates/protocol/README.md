@@ -19,5 +19,8 @@ Authentication negotiation is described in [`AUTH.md`](AUTH.md).
 The machine-readable CDDL schema and SDK guidance are documented in
 [`../docs/protocol-sdk-generation.md`](../docs/protocol-sdk-generation.md).
 
+The model-backed debug frontend is implemented in `src/text.rs`; the original
+command-oriented text grammar remains in `src/protocol.rs`.
+
 The authoritative wire reference is [`PROTOCOL.md`](PROTOCOL.md). Protocol
 changes should update that document and add encoding and rejection tests.
