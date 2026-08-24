@@ -6,6 +6,7 @@ impl Args {
         let _program = args.next();
         let mut config_path = PathBuf::from(DEFAULT_CONFIG_PATH);
         let mut server = None;
+        let mut config_path_explicit = false;
         let mut rest = Vec::new();
         while let Some(arg) = args.next() {
             if arg == "--version" {
@@ -13,6 +14,7 @@ impl Args {
                 return Ok(Self {
                     config_path,
                     server,
+                    config_path_explicit,
                     command: Command::Version,
                 });
             }
@@ -21,6 +23,7 @@ impl Args {
                     .next()
                     .ok_or_else(|| CliError::msg("--config requires a path"))?;
                 config_path = PathBuf::from(value);
+                config_path_explicit = true;
             } else if arg == "--server" {
                 let value = args
                     .next()
@@ -38,6 +41,7 @@ impl Args {
         Ok(Self {
             config_path,
             server,
+            config_path_explicit,
             command,
         })
     }

@@ -59,6 +59,7 @@ pub enum Command {
 pub struct Args {
     pub config_path: PathBuf,
     pub server: Option<SocketAddr>,
+    pub config_path_explicit: bool,
     pub command: Command,
 }
 #[derive(Debug, Clone)]

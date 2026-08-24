@@ -14,7 +14,8 @@ pub async fn run(args: impl IntoIterator<Item = String>) -> Result<()> {
         println!("morrow-cli {VERSION}");
         return Ok(());
     }
-    let config = CliConfig::load_or_default(&args.config_path)?.with_server(args.server);
+    let config =
+        CliConfig::load(&args.config_path, !args.config_path_explicit)?.with_server(args.server);
     run_command(&config, args.command).await
 }
 

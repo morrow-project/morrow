@@ -13,6 +13,24 @@ fn parses_client_config_defaults() {
 }
 
 #[test]
+fn uses_defaults_when_implicit_config_is_missing() {
+    let path =
+        std::env::temp_dir().join(format!("morrow-cli-missing-config-{}", std::process::id()));
+    let config = CliConfig::load(&path, true).unwrap();
+    assert_eq!(config.server, DEFAULT_SERVER.parse().unwrap());
+}
+
+#[test]
+fn rejects_missing_explicit_config() {
+    let path = std::env::temp_dir().join(format!(
+        "morrow-cli-explicit-missing-config-{}",
+        std::process::id()
+    ));
+    let err = CliConfig::load(&path, false).unwrap_err();
+    assert!(err.to_string().contains("reading"));
+}
+
+#[test]
 fn rejects_invalid_server_address() {
     let err = CliConfig::from_json(&serde_json::json!({"server": "bad"})).unwrap_err();
     assert!(err.to_string().contains("server"));
@@ -53,6 +71,7 @@ fn rejects_malformed_seed() {
 fn parses_ping_args() {
     let args = Args::parse(["morrow-cli", "ping"].into_iter().map(str::to_string)).unwrap();
     assert_eq!(args.config_path, PathBuf::from(DEFAULT_CONFIG_PATH));
+    assert!(!args.config_path_explicit);
     assert_eq!(args.command, Command::Ping);
 }
 
@@ -130,6 +149,7 @@ fn parses_bench_duration() {
 fn parses_version_args_without_a_config_path() {
     let args = Args::parse(["morrow-cli", "--version"].into_iter().map(str::to_string)).unwrap();
     assert_eq!(args.config_path, PathBuf::from(DEFAULT_CONFIG_PATH));
+    assert!(!args.config_path_explicit);
     assert_eq!(args.command, Command::Version);
 }
 
@@ -149,6 +169,7 @@ fn parses_pub_args() {
     )
     .unwrap();
     assert_eq!(args.config_path, PathBuf::from("custom.json"));
+    assert!(args.config_path_explicit);
     assert_eq!(
         args.command,
         Command::Pub {
