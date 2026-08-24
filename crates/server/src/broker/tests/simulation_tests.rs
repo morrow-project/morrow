@@ -15,12 +15,14 @@ enum ClusterEvent {
 
 #[tokio::test]
 async fn seeded_cluster_scenario_replays_with_the_same_trace() {
-    let first = run_seeded_cluster(0x5eed).await;
-    let second = run_seeded_cluster(0x5eed).await;
+    for seed in [0x5eed, 1, 2, 3, 0xdead_beef] {
+        let first = run_seeded_cluster(seed).await;
+        let second = run_seeded_cluster(seed).await;
 
-    assert_eq!(first.0, second.0);
-    assert_eq!(first.1, second.1);
-    assert_eq!(first.1, 3);
+        assert_eq!(first.0, second.0, "seed {seed:#x} produced a new trace");
+        assert_eq!(first.1, second.1, "seed {seed:#x} produced new state");
+        assert_eq!(first.1, 3, "seed {seed:#x} lost a committed record");
+    }
 }
 
 async fn run_seeded_cluster(seed: u64) -> (EventTrace, usize) {

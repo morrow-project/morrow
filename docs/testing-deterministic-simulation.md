@@ -47,6 +47,16 @@ seed and trace as a fixed-seed scenario. New subsystems should add a small
 adapter around the same primitives rather than introduce a second production
 implementation.
 
+The initial cluster campaign can be run independently with:
+
+```text
+cargo nextest run -p server --lib simulation_tests --no-fail-fast
+```
+
+It executes several fixed seeds and runs each seed twice, checking that the
+event trace and committed state are identical. The full workspace CI job also
+executes this test as part of the server library suite.
+
 Real-process integration tests remain necessary for sockets, TLS, filesystem
 semantics, process lifecycle, and platform behavior. Simulation tests
 complement those tests; they do not replace them.
