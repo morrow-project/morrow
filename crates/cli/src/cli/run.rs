@@ -14,7 +14,8 @@ pub async fn run(args: impl IntoIterator<Item = String>) -> Result<()> {
         println!("morrow-cli {VERSION}");
         return Ok(());
     }
-    let config = CliConfig::load(&args.config_path, !args.config_path_explicit)?;
+    let config =
+        CliConfig::load(&args.config_path, !args.config_path_explicit)?.with_server(args.server);
     run_command(&config, args.command).await
 }
 
@@ -126,6 +127,51 @@ pub(super) async fn run_command(config: &CliConfig, command: Command) -> Result<
                     return Ok(());
                 }
             }
+        }
+        Command::BenchPubSub {
+            subject,
+            messages,
+            duration_ms,
+            payload_size,
+            publishers,
+            subscribers,
+            concurrency,
+            ack,
+            durable_id,
+            json,
+        } => {
+            if !config.server.ip().is_loopback() && !config.has_transport_security() {
+                eprintln!(
+                    "warning: benchmark is using a remote plaintext connection; configure TLS and authentication for production use"
+                );
+            }
+            let result = bench::run_pubsub(
+                config.clone(),
+                bench::PubSubOptions {
+                    subject,
+                    messages,
+                    duration_ms,
+                    payload_size,
+                    publishers,
+                    subscribers,
+                    concurrency,
+                    ack,
+                    durable_id,
+                },
+            )
+            .await?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&result).map_err(|err| CliError::with_source(
+                        "serializing benchmark result",
+                        err
+                    ))?
+                );
+            } else {
+                result.print_human();
+            }
+            Ok(())
         }
     }
 }

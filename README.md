@@ -93,6 +93,7 @@ Read the complete wire reference in
 ## Documentation
 
 - [Building and testing](docs/building.md)
+- [Benchmarking](docs/benchmarking.md)
 - [Contributing](docs/contributing.md)
 - [Operations and deployment](docs/operations.md)
 - [Dynamic consumer groups](docs/consumer-groups.md)
