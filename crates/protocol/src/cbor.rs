@@ -81,6 +81,9 @@ pub fn encode_with_flags(frame: &Frame, flags: u8) -> Result<Vec<u8>, CborError>
     if flags != 0 {
         return Err(CborError::InvalidFlags(flags));
     }
+    frame
+        .validate()
+        .map_err(|error| CborError::Cbor(error.to_string()))?;
     let (metadata_frame, payload) = split_payload(frame);
     let mut metadata = Vec::new();
     ciborium::ser::into_writer(&metadata_frame, &mut metadata)

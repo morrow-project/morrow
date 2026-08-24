@@ -11,7 +11,7 @@ pub use frames::*;
 pub use model::{
     AckRequest, AuthProof, Capabilities, ConnectRequest, ConsumerCreateRequest,
     ConsumerDeleteRequest, CreditRequest, Delivery, Error, ExtendRequest, Frame, GroupRequest,
-    GroupResult, Header, Message, NackRequest, PROTOCOL_VERSION, ProducerIdentity,
+    GroupResult, Header, Message, ModelError, NackRequest, PROTOCOL_VERSION, ProducerIdentity,
     PublishDurability, PublishRequest, PublishResult, Request, RequestBody, RequestId, Response,
     ResponseBody, RetryPolicy as ModelRetryPolicy, StartPosition as ModelStartPosition,
     StreamPosition, SubscribeRequest, UnsubscribeRequest, WindowUpdate, WireEncoding,
