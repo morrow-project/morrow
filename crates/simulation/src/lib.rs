@@ -580,6 +580,17 @@ impl SimulatedStorage {
         self.persisted.get(key).map(Vec::as_slice)
     }
 
+    pub fn corrupt(&mut self, key: &str, offset: usize, value: u8) -> bool {
+        let Some(bytes) = self.persisted.get_mut(key) else {
+            return false;
+        };
+        let Some(byte) = bytes.get_mut(offset) else {
+            return false;
+        };
+        *byte = value;
+        true
+    }
+
     pub fn restart(&self) -> Self {
         Self {
             persisted: self.persisted.clone(),
@@ -627,6 +638,22 @@ mod tests {
         assert_eq!(transport.deliver_ready(10).len(), 2);
         transport.partition(&[1], &[2], true);
         assert!(!transport.send(10, 1, 2, "dropped"));
+
+        transport.set_link(
+            2,
+            1,
+            LinkConfig {
+                reorder: true,
+                ..LinkConfig::default()
+            },
+        );
+        assert!(transport.send(10, 2, 1, "first"));
+        assert!(transport.send(10, 2, 1, "second"));
+        let reordered = transport.deliver_ready(10);
+        assert_eq!(reordered[0].payload, "second");
+        assert_eq!(reordered[1].payload, "first");
+        transport.disconnect(2, 1, true);
+        assert!(!transport.send(10, 2, 1, "disconnected"));
     }
 
     #[test]
@@ -637,6 +664,8 @@ mod tests {
         assert_eq!(storage.read("wal"), Some(&b"ab"[..]));
         let restarted = storage.restart();
         assert_eq!(restarted.read("wal"), Some(&b"ab"[..]));
+        assert!(storage.corrupt("wal", 0, b'X'));
+        assert_eq!(storage.read("wal"), Some(&b"Xb"[..]));
     }
 
     #[test]
