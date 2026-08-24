@@ -192,10 +192,6 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Check out Debian packaging repository
-        uses: actions/checkout@v7
-        with:
-          repository: morrow-project/debian-morrow
-
       - name: Download and verify release archive
         env:
           GH_TOKEN: ${{ github.token }}
@@ -221,7 +217,7 @@ jobs:
           DEBIAN_ARCH: ${{ matrix.debian_arch }}
           RELEASE_ARCH: ${{ matrix.release_arch }}
         run: |
-          bash scripts/build-deb.sh \
+          bash packaging/debian/build-deb.sh \
             "${VERSION}" \
             "${DEBIAN_ARCH}" \
             "dist/morrow-${VERSION}-linux-${RELEASE_ARCH}.tar.gz" \
@@ -279,11 +275,6 @@ jobs:
           dnf install --assumeyes --setopt=install_weak_deps=False \
             coreutils curl git gh gzip nodejs rpm-build tar
 
-      - name: Check out RPM packaging repository
-        uses: actions/checkout@v7
-        with:
-          repository: morrow-project/rpm-morrow
-
       - name: Download and verify release archive
         env:
           GH_TOKEN: ${{ github.token }}
@@ -309,7 +300,7 @@ jobs:
           RPM_ARCH: ${{ matrix.rpm_arch }}
           RELEASE_ARCH: ${{ matrix.release_arch }}
         run: |
-          bash scripts/build-rpm.sh \
+          bash packaging/rpm/build-rpm.sh \
             "${VERSION}" \
             "${RPM_ARCH}" \
             "${RELEASE_ARCH}" \
@@ -357,11 +348,6 @@ jobs:
       contents: read
       packages: write
     steps:
-      - name: Check out Docker image definition
-        uses: actions/checkout@v7
-        with:
-          repository: morrow-project/docker-morrow
-
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
@@ -388,7 +374,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: ./Dockerfile
+          file: ./packaging/docker/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
