@@ -22,5 +22,8 @@ The machine-readable CDDL schema and SDK guidance are documented in
 The model-backed debug frontend is implemented in `src/text.rs`; the original
 command-oriented text grammar remains in `src/protocol.rs`.
 
+Versioning and extension rules are documented in
+[`../docs/protocol-evolution.md`](../docs/protocol-evolution.md).
+
 The authoritative wire reference is [`PROTOCOL.md`](PROTOCOL.md). Protocol
 changes should update that document and add encoding and rejection tests.
