@@ -9,13 +9,13 @@ pub mod subject;
 
 pub use frames::*;
 pub use model::{
-    AckRequest, AuthProof, Capabilities, ConnectRequest, ConsumerCreateRequest,
-    ConsumerDeleteRequest, CreditRequest, Delivery, Error, ExtendRequest, Frame, GroupRequest,
-    GroupResult, Header, Message, ModelError, NackRequest, PROTOCOL_VERSION, ProducerIdentity,
-    PublishBatchRequest, PublishBatchResult, PublishDurability, PublishRequest, PublishResult,
-    Request, RequestBody, RequestId, Response, ResponseBody, RetryPolicy as ModelRetryPolicy,
-    StartPosition as ModelStartPosition, StreamPosition, SubscribeRequest, UnsubscribeRequest,
-    WindowUpdate, WireEncoding,
+    AckBatchRequest, AckRequest, AuthProof, Capabilities, ConnectRequest, ConsumerCreateRequest,
+    ConsumerDeleteRequest, CreditRequest, Delivery, DeliveryToken, Error, ExtendRequest, Frame,
+    GroupRequest, GroupResult, Header, Message, ModelError, NackRequest, PROTOCOL_VERSION,
+    ProducerIdentity, PublishBatchRequest, PublishBatchResult, PublishDurability, PublishRequest,
+    PublishResult, Request, RequestBody, RequestId, Response, ResponseBody,
+    RetryPolicy as ModelRetryPolicy, StartPosition as ModelStartPosition, StreamPosition,
+    SubscribeRequest, UnsubscribeRequest, WindowUpdate, WireEncoding,
 };
 pub use protocol::{
     AckLevel, AckSubject, Command, ConnectAuth, GroupAssignmentStrategy, ProducerAckRequest,

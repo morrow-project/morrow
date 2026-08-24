@@ -18,7 +18,8 @@ response, delivery, error, and flow-control semantics.
   replay.
 - Application headers are distinct from broker metadata and may contain
   repeated binary values.
-- Durable acknowledgement identity is an opaque delivery token.
+- Durable acknowledgement identity is an opaque, non-empty delivery token
+  scoped to a consumer generation.
 - Unknown encoded fields may be ignored unless the operation explicitly marks
   them as required.
 - Payload bytes are never interpreted by the protocol model.
