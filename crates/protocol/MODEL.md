@@ -10,7 +10,8 @@ response, delivery, error, and flow-control semantics.
 
 ## Model invariants
 
-- Requests carry a client-selected `request_id`.
+- Requests carry a client-selected nonzero `request_id`; zero is reserved for
+  unsolicited frames.
 - Responses repeat the request ID and asynchronous deliveries do not use the
   response channel.
 - Messages have one representation for publishing, delivery, fetching, and
