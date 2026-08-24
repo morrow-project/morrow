@@ -63,6 +63,21 @@ jobs:
             --no-fail-fast \
             --failure-output immediate-final
 
+      - name: Run deterministic simulation campaign
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          cargo nextest run \
+            --target "${TARGET}" \
+            --package server \
+            --lib \
+            simulation_tests \
+            --locked \
+            --profile ci \
+            --no-fail-fast \
+            --failure-output immediate-final
+
       - name: Run documentation tests
         shell: bash
         env:
