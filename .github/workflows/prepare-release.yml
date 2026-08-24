@@ -3,10 +3,14 @@ name: Prepare Morrow Release
 on:
   workflow_dispatch:
     inputs:
-      version:
-        description: Plain semantic version to prepare, such as 0.1.1
+      bump:
+        description: Version increment
         required: true
-        type: string
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
 
 permissions:
   contents: write
@@ -17,7 +21,7 @@ env:
 
 jobs:
   prepare:
-    name: Prepare release ${{ inputs.version }}
+    name: Prepare ${{ inputs.bump }} release
     runs-on: ubuntu-24.04
     steps:
       - name: Check out main
@@ -31,10 +35,58 @@ jobs:
         with:
           rustflags: ""
 
+      - name: Calculate release version
+        id: version
+        shell: bash
+        env:
+          BUMP: ${{ inputs.bump }}
+        run: |
+          set -euo pipefail
+
+          current="$(
+            cargo metadata --no-deps --format-version 1 --locked |
+              jq -r '.packages[] | select(.name != "byte-unit") | .version' |
+              sort -u
+          )"
+          if [[ "$(printf '%s\n' "${current}" | wc -l | tr -d ' ')" != "1" ]]; then
+            echo "Workspace packages do not share one version:" >&2
+            echo "${current}" >&2
+            exit 1
+          fi
+
+          if [[ ! "${current}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Current workspace version is not plain semantic version: ${current}" >&2
+            exit 1
+          fi
+
+          IFS=. read -r major minor patch <<< "${current}"
+          case "${BUMP}" in
+            patch)
+              patch=$((10#${patch} + 1))
+              ;;
+            minor)
+              minor=$((10#${minor} + 1))
+              patch=0
+              ;;
+            major)
+              major=$((10#${major} + 1))
+              minor=0
+              patch=0
+              ;;
+            *)
+              echo "Unsupported version increment: ${BUMP}" >&2
+              exit 1
+              ;;
+          esac
+
+          version="${major}.${minor}.${patch}"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "Preparing release ${version} from ${current} (${BUMP} bump)"
+
       - name: Update workspace version
         shell: bash
         env:
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
           if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -68,7 +120,7 @@ jobs:
       - name: Verify workspace versions
         shell: bash
         env:
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
           versions="$(jq -r '.packages[] | select(.name != "byte-unit") | .version' /tmp/morrow-metadata.json | sort -u)"
@@ -87,7 +139,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
           branch="release/${VERSION}"

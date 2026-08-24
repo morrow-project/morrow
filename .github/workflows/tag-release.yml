@@ -1,12 +1,11 @@
 name: Tag and Publish Morrow Release
 
 on:
-  workflow_dispatch:
-    inputs:
-      version:
-        description: Merged workspace version to release, such as 0.1.1
-        required: true
-        type: string
+  pull_request:
+    types: [closed]
+    branches:
+      - main
+      - 'maintain/**'
 
 permissions:
   contents: read
@@ -17,16 +16,19 @@ env:
 jobs:
   tag:
     name: Create release tag
+    if: >
+      github.event.pull_request.merged == true &&
+      startsWith(github.event.pull_request.head.ref, 'release/')
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     outputs:
       version: ${{ steps.validate.outputs.version }}
     steps:
-      - name: Check out main
+      - name: Check out merged release
         uses: actions/checkout@v7
         with:
-          ref: main
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
           fetch-depth: 0
       - name: Set up Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -37,9 +39,16 @@ jobs:
         id: validate
         shell: bash
         env:
-          VERSION: ${{ inputs.version }}
+          RELEASE_BRANCH: ${{ github.event.pull_request.head.ref }}
         run: |
           set -euo pipefail
+          head_branch="${RELEASE_BRANCH}"
+          if [[ ! "${head_branch}" =~ ^release/[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Merged pull request is not a release branch: ${head_branch}" >&2
+            exit 1
+          fi
+
+          VERSION="${head_branch#release/}"
           if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "Release tags must use plain semantic versions such as 0.1.0; got ${VERSION}" >&2
             exit 1
@@ -63,7 +72,7 @@ jobs:
       - name: Create and push tag
         shell: bash
         env:
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ steps.validate.outputs.version }}
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
