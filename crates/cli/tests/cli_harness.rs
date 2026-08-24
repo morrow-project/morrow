@@ -366,7 +366,7 @@ fn tls_config() -> TlsConfig {
     TlsConfig {
         cert_file: tls_cert_file(),
         key_file: tls_key_file(),
-        handshake_timeout_ms: 100,
+        handshake_timeout_ms: 2_000,
     }
 }
 
