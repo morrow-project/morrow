@@ -75,12 +75,7 @@ impl SinkTask for ObjectStoreSink {
             std::fs::rename(temporary, path).map_err(display)?;
         }
         for directory in directories {
-            OpenOptions::new()
-                .read(true)
-                .open(directory)
-                .map_err(display)?
-                .sync_data()
-                .map_err(display)?;
+            crate::storage::sync_dir(&directory).map_err(display)?;
         }
         Ok(SinkCompletion { offsets })
     }

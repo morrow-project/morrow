@@ -176,7 +176,7 @@ fn crc(body: &[u8]) -> u32 {
 
 fn sync_parent(path: &Path) -> io::Result<()> {
     if let Some(parent) = path.parent() {
-        File::open(parent)?.sync_data()?;
+        crate::storage::sync_dir(parent)?;
     }
     Ok(())
 }

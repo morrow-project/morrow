@@ -543,7 +543,7 @@ fn stage_segment_compaction(
         .ok_or_else(|| BrokerError::msg("partition compaction target has no filename"))?;
     std::fs::write(&marker, target.to_string_lossy().as_bytes())?;
     OpenOptions::new().read(true).open(&marker)?.sync_data()?;
-    File::open(dir)?.sync_data()?;
+    crate::storage::sync_dir(dir)?;
     Ok(())
 }
 
@@ -566,7 +566,7 @@ fn install_pending_segment_compaction(dir: &Path) -> Result<()> {
         std::fs::rename(&tmp, &target)?;
     }
     std::fs::remove_file(marker)?;
-    File::open(dir)?.sync_data()?;
+    crate::storage::sync_dir(dir)?;
     Ok(())
 }
 
@@ -615,7 +615,7 @@ fn persist_retention_offset(dir: &Path, next_offset: u64) -> Result<()> {
     std::fs::write(&tmp, next_offset.to_le_bytes())?;
     OpenOptions::new().read(true).open(&tmp)?.sync_data()?;
     std::fs::rename(tmp, path)?;
-    File::open(dir)?.sync_data()?;
+    crate::storage::sync_dir(dir)?;
     Ok(())
 }
 
@@ -654,7 +654,7 @@ fn stage_rewrite(
     let marker = dir.join(REWRITE_MARKER_FILE);
     std::fs::write(&marker, next_offset.to_le_bytes())?;
     OpenOptions::new().read(true).open(&marker)?.sync_data()?;
-    File::open(dir)?.sync_data()?;
+    crate::storage::sync_dir(dir)?;
     Ok(())
 }
 
@@ -683,7 +683,7 @@ fn install_pending_rewrite(dir: &Path) -> Result<()> {
     }
     persist_retention_offset(dir, next_offset)?;
     std::fs::remove_file(marker)?;
-    File::open(dir)?.sync_data()?;
+    crate::storage::sync_dir(dir)?;
     Ok(())
 }
 

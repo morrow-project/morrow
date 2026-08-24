@@ -15,6 +15,7 @@ pub mod raft;
 pub mod reassignment;
 pub mod schema_registry;
 pub(crate) mod security;
+pub(crate) mod storage;
 pub mod stream;
 pub mod tenancy;
 pub mod tls;
