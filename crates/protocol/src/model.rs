@@ -8,6 +8,48 @@ use serde::{Deserialize, Serialize};
 
 pub const PROTOCOL_VERSION: u16 = 1;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WireEncoding {
+    Text,
+    Cbor,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Capabilities {
+    pub protocol_versions: Vec<u16>,
+    pub encodings: Vec<WireEncoding>,
+    pub features: Vec<String>,
+    pub max_frame_size: usize,
+    pub max_metadata_size: usize,
+    pub max_payload_size: usize,
+}
+
+impl Default for Capabilities {
+    fn default() -> Self {
+        Self {
+            // Version 2 is retained here for the current text command surface;
+            // the new binary/text semantic model is protocol v1.
+            protocol_versions: vec![PROTOCOL_VERSION, 2],
+            encodings: vec![WireEncoding::Text, WireEncoding::Cbor],
+            features: vec![
+                "request-ids".into(),
+                "checksums".into(),
+                "credit-flow-control".into(),
+            ],
+            max_frame_size: crate::cbor::DEFAULT_MAX_FRAME_SIZE,
+            max_metadata_size: crate::cbor::DEFAULT_MAX_FRAME_SIZE,
+            max_payload_size: crate::cbor::DEFAULT_MAX_FRAME_SIZE,
+        }
+    }
+}
+
+impl Capabilities {
+    pub fn supports(&self, version: u16, encoding: WireEncoding) -> bool {
+        self.protocol_versions.contains(&version) && self.encodings.contains(&encoding)
+    }
+}
+
 pub type RequestId = u64;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -38,6 +80,7 @@ pub enum RequestBody {
 pub struct ConnectRequest {
     pub durable_id: Option<String>,
     pub protocol_version: u16,
+    pub encoding: WireEncoding,
     pub features: Vec<String>,
     pub verbose: bool,
     pub ack_timeout_ms: Option<u64>,
@@ -327,5 +370,13 @@ mod tests {
     #[test]
     fn protocol_version_is_explicit() {
         assert_eq!(PROTOCOL_VERSION, 1);
+    }
+
+    #[test]
+    fn default_capabilities_advertise_both_wire_codecs() {
+        let capabilities = Capabilities::default();
+        assert!(capabilities.supports(PROTOCOL_VERSION, WireEncoding::Text));
+        assert!(capabilities.supports(PROTOCOL_VERSION, WireEncoding::Cbor));
+        assert!(capabilities.protocol_versions.contains(&2));
     }
 }

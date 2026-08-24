@@ -1,12 +1,42 @@
-use crate::protocol::{AckLevel, AckSubject};
+use crate::{
+    model::Capabilities,
+    protocol::{AckLevel, AckSubject},
+};
+use serde_json::json;
 
 pub fn info_line(max_payload: usize, nonce: Option<&str>) -> Vec<u8> {
-    let nonce = nonce
-        .map(|nonce| format!(",\"nonce\":\"{nonce}\",\"auth_required\":true"))
-        .unwrap_or_else(|| ",\"auth_required\":false".to_string());
+    let mut capabilities = Capabilities::default();
+    capabilities.max_payload_size = max_payload;
+    info_line_with_capabilities(max_payload, nonce, &capabilities)
+}
+
+pub fn info_line_with_capabilities(
+    max_payload: usize,
+    nonce: Option<&str>,
+    capabilities: &Capabilities,
+) -> Vec<u8> {
+    let nonce = nonce.map(|nonce| (nonce, true)).unwrap_or(("", false));
+    let mut payload = json!({
+        "server_id": "morrow",
+        "server_name": "Morrow",
+        "version": env!("CARGO_PKG_VERSION"),
+        "proto": 2,
+        "protocol_versions": capabilities.protocol_versions,
+        "encodings": capabilities.encodings,
+        "features": capabilities.features,
+        "max_payload": max_payload,
+        "max_frame_size": capabilities.max_frame_size,
+        "max_metadata_size": capabilities.max_metadata_size,
+        "max_payload_size": capabilities.max_payload_size,
+        "auth_required": nonce.1,
+        "tls_required": false,
+    });
+    if nonce.1 {
+        payload["nonce"] = json!(nonce.0);
+    }
     format!(
-        "INFO {{\"server_id\":\"morrow\",\"server_name\":\"Morrow\",\"version\":\"{}\",\"proto\":2,\"protocol_versions\":[1,2],\"max_payload\":{max_payload}{nonce},\"tls_required\":false}}\r\n",
-        env!("CARGO_PKG_VERSION"),
+        "INFO {}\r\n",
+        serde_json::to_string(&payload).expect("INFO capabilities are serializable"),
     )
     .into_bytes()
 }
@@ -249,4 +279,26 @@ fn payload_frame(header: String, payload: &[u8]) -> Vec<u8> {
     frame.extend_from_slice(payload);
     frame.extend_from_slice(b"\r\n");
     frame
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn info_advertises_protocol_codecs_features_and_limits() {
+        let line = String::from_utf8(info_line(1024, None)).unwrap();
+        let payload = line.strip_prefix("INFO ").unwrap().trim();
+        let value: serde_json::Value = serde_json::from_str(payload).unwrap();
+        assert_eq!(value["protocol_versions"], serde_json::json!([1, 2]));
+        assert_eq!(value["encodings"], serde_json::json!(["text", "cbor"]));
+        assert_eq!(value["max_payload_size"], 1024);
+        assert!(
+            value["features"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|feature| feature == "request-ids")
+        );
+    }
 }

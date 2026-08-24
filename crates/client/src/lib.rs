@@ -45,6 +45,11 @@ pub struct Info {
     pub raw: String,
     pub proto: u32,
     pub protocol_versions: Vec<u32>,
+    pub encodings: Vec<protocol::WireEncoding>,
+    pub features: Vec<String>,
+    pub max_frame_size: usize,
+    pub max_metadata_size: usize,
+    pub max_payload_size: usize,
     pub auth_required: bool,
     pub nonce: Option<String>,
 }

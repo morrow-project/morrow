@@ -30,6 +30,12 @@ The server may send `-ERR '<message>'` for malformed frames or rejected
 operations. After protocol read errors, the server sends `-ERR` when possible
 and closes the connection.
 
+The `INFO` frame advertises the available protocol versions, wire encodings,
+feature names, and frame, metadata, and payload limits. Protocol v1 clients may
+select either the `text` or `cbor` encoding; the text command surface continues
+to advertise legacy version 2 capabilities while the semantic model migrates
+to protocol v1.
+
 ## Identifiers and Subjects
 
 ### Identifiers

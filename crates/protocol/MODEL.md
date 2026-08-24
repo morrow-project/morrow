@@ -21,6 +21,8 @@ response, delivery, error, and flow-control semantics.
 - Unknown encoded fields may be ignored unless the operation explicitly marks
   them as required.
 - Payload bytes are never interpreted by the protocol model.
+- Connection capabilities advertise protocol versions, wire encodings, feature
+  names, and independent metadata and payload limits.
 
 The current text parser and encoder are retained while the CBOR transport is
 introduced. New protocol features should be added to this model first and then
