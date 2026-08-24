@@ -46,6 +46,7 @@ pub enum Command {
 #[derive(Debug, Clone)]
 pub struct Args {
     pub config_path: PathBuf,
+    pub config_path_explicit: bool,
     pub command: Command,
 }
 #[derive(Debug, Clone)]
