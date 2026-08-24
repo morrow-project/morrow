@@ -32,6 +32,9 @@ check these properties:
 - `DeterministicRng` provides seed-driven scenario choices.
 - `SimulatedTransport` models delay, drop, duplication, reordering, disconnect,
   and symmetric partitions.
+- `SimulatedCluster` models membership epochs, bootstrap, join, leave,
+  crash/restart, quorum availability, and network delivery between online
+  members.
 - `SimulatedStorage` models failed and partial writes and restart persistence.
 - `EventTrace` records a seed and ordered event descriptions for replay.
 

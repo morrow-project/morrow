@@ -369,6 +369,120 @@ impl<M: Clone> SimulatedTransport<M> {
     }
 }
 
+#[derive(Debug)]
+pub struct SimulatedCluster {
+    members: BTreeMap<u64, bool>,
+    membership_epoch: u64,
+    transport: SimulatedTransport<Vec<u8>>,
+}
+
+impl Default for SimulatedCluster {
+    fn default() -> Self {
+        Self {
+            members: BTreeMap::new(),
+            membership_epoch: 0,
+            transport: SimulatedTransport::default(),
+        }
+    }
+}
+
+impl SimulatedCluster {
+    pub fn bootstrap(&mut self, node_id: u64) -> bool {
+        if !self.members.is_empty() {
+            return false;
+        }
+        self.members.insert(node_id, true);
+        self.membership_epoch = self.membership_epoch.saturating_add(1);
+        true
+    }
+
+    pub fn join(&mut self, node_id: u64) -> bool {
+        if self.members.contains_key(&node_id) || self.members.is_empty() {
+            return false;
+        }
+        self.members.insert(node_id, true);
+        self.membership_epoch = self.membership_epoch.saturating_add(1);
+        true
+    }
+
+    pub fn leave(&mut self, node_id: u64) -> bool {
+        if self.members.remove(&node_id).is_none() {
+            return false;
+        }
+        self.membership_epoch = self.membership_epoch.saturating_add(1);
+        true
+    }
+
+    pub fn crash(&mut self, node_id: u64) -> bool {
+        let Some(online) = self.members.get_mut(&node_id) else {
+            return false;
+        };
+        *online = false;
+        true
+    }
+
+    pub fn restart(&mut self, node_id: u64) -> bool {
+        let Some(online) = self.members.get_mut(&node_id) else {
+            return false;
+        };
+        *online = true;
+        true
+    }
+
+    pub fn members(&self) -> impl Iterator<Item = u64> + '_ {
+        self.members.keys().copied()
+    }
+
+    pub fn online_members(&self) -> impl Iterator<Item = u64> + '_ {
+        self.members
+            .iter()
+            .filter_map(|(node_id, online)| online.then_some(*node_id))
+    }
+
+    pub fn is_member(&self, node_id: u64) -> bool {
+        self.members.contains_key(&node_id)
+    }
+
+    pub fn is_online(&self, node_id: u64) -> bool {
+        self.members.get(&node_id).copied().unwrap_or(false)
+    }
+
+    pub fn membership_epoch(&self) -> u64 {
+        self.membership_epoch
+    }
+
+    pub fn quorum_size(&self) -> usize {
+        self.members.len() / 2 + 1
+    }
+
+    pub fn quorum_available(&self) -> bool {
+        self.online_members().count() >= self.quorum_size()
+    }
+
+    pub fn set_link(&mut self, from: u64, to: u64, config: LinkConfig) {
+        self.transport.set_link(from, to, config);
+    }
+
+    pub fn partition(&mut self, left: &[u64], right: &[u64], blocked: bool) {
+        self.transport.partition(left, right, blocked);
+    }
+
+    pub fn send(&mut self, now_ms: u64, from: u64, to: u64, payload: Vec<u8>) -> bool {
+        if !self.is_online(from) || !self.is_online(to) {
+            return false;
+        }
+        self.transport.send(now_ms, from, to, payload)
+    }
+
+    pub fn deliver_ready(&mut self, now_ms: u64) -> Vec<DeliveredMessage<Vec<u8>>> {
+        self.transport.deliver_ready(now_ms)
+    }
+
+    pub fn queued_messages(&self) -> usize {
+        self.transport.queued_messages()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StorageError {
     Failed,
@@ -560,5 +674,36 @@ mod tests {
         assert_eq!(events, [(100, "second"), (120, "first")]);
         assert_eq!(simulation.steps(), 2);
         assert_eq!(simulation.trace.seed, 7);
+    }
+
+    #[test]
+    fn cluster_models_membership_lifecycle_quorum_and_network_faults() {
+        let mut cluster = SimulatedCluster::default();
+        assert!(cluster.bootstrap(1));
+        assert!(cluster.join(2));
+        assert!(cluster.join(3));
+        assert_eq!(cluster.membership_epoch(), 3);
+        assert!(cluster.quorum_available());
+
+        cluster.set_link(
+            1,
+            2,
+            LinkConfig {
+                delay_ms: 5,
+                ..LinkConfig::default()
+            },
+        );
+        assert!(cluster.send(0, 1, 2, b"join-catch-up".to_vec()));
+        assert!(cluster.crash(3));
+        assert!(cluster.quorum_available());
+        cluster.partition(&[1], &[2], true);
+        assert!(!cluster.send(0, 1, 2, b"partitioned".to_vec()));
+        cluster.partition(&[1], &[2], false);
+        assert_eq!(cluster.deliver_ready(4), Vec::new());
+        assert_eq!(cluster.deliver_ready(5)[0].payload, b"join-catch-up");
+        assert!(cluster.restart(3));
+        assert!(cluster.leave(2));
+        assert!(cluster.crash(3));
+        assert!(!cluster.quorum_available());
     }
 }
