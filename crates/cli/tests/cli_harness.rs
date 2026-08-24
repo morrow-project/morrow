@@ -330,6 +330,7 @@ impl Harness {
         let max_payload = 1024;
         let config = Config {
             listen: addr,
+            websocket: None,
             http_listen: Some(admin_addr),
             admin_token: Some(ADMIN_TOKEN.to_string()),
             admin_tls: None,

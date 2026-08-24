@@ -95,6 +95,12 @@ impl Morrow {
             .as_ref()
             .map(crate::tls::load_acceptor)
             .transpose()?;
+        let websocket_tls_acceptor = config
+            .websocket
+            .as_ref()
+            .and_then(|websocket| websocket.tls.as_ref())
+            .map(crate::tls::load_acceptor)
+            .transpose()?;
         let consumers: HashMap<_, _> = replay
             .consumers
             .into_iter()
@@ -262,6 +268,7 @@ impl Morrow {
             config,
             tls_acceptor,
             admin_tls_acceptor,
+            websocket_tls_acceptor,
             quotas,
             tenant_quotas,
             policy,
@@ -302,6 +309,7 @@ impl Morrow {
         self.log_cluster_event("server started").await;
         self.spawn_cluster_log_monitor();
         self.spawn_http_status_listener();
+        self.spawn_websocket_listener().await?;
         if self.hooks.start_redelivery_loop {
             let redeliver = self.clone();
             tokio::spawn(async move {
@@ -509,6 +517,58 @@ impl Morrow {
         metrics.push_str("# HELP morrow_connections Current client connections.\n");
         metrics.push_str("# TYPE morrow_connections gauge\n");
         metrics.push_str(&format!("morrow_connections {connections}\n"));
+        metrics.push_str("# HELP morrow_websocket_connections Current WebSocket connections.\n");
+        metrics.push_str("# TYPE morrow_websocket_connections gauge\n");
+        metrics.push_str(&format!(
+            "morrow_websocket_connections {}\n",
+            self.metrics.websocket_connections.load(Ordering::Relaxed)
+        ));
+        for (name, help, value) in [
+            (
+                "morrow_websocket_connections_total",
+                "WebSocket connections accepted.",
+                self.metrics
+                    .websocket_connections_total
+                    .load(Ordering::Relaxed),
+            ),
+            (
+                "morrow_websocket_messages_received_total",
+                "WebSocket messages received.",
+                self.metrics
+                    .websocket_messages_received_total
+                    .load(Ordering::Relaxed),
+            ),
+            (
+                "morrow_websocket_messages_sent_total",
+                "WebSocket messages sent.",
+                self.metrics
+                    .websocket_messages_sent_total
+                    .load(Ordering::Relaxed),
+            ),
+            (
+                "morrow_websocket_bytes_received_total",
+                "WebSocket payload bytes received.",
+                self.metrics
+                    .websocket_bytes_received_total
+                    .load(Ordering::Relaxed),
+            ),
+            (
+                "morrow_websocket_bytes_sent_total",
+                "WebSocket payload bytes sent.",
+                self.metrics
+                    .websocket_bytes_sent_total
+                    .load(Ordering::Relaxed),
+            ),
+            (
+                "morrow_websocket_errors_total",
+                "WebSocket transport errors.",
+                self.metrics.websocket_errors_total.load(Ordering::Relaxed),
+            ),
+        ] {
+            metrics.push_str(&format!(
+                "# HELP {name} {help}\n# TYPE {name} counter\n{name} {value}\n"
+            ));
+        }
         metrics
             .push_str("# HELP morrow_transient_subscriptions Current transient subscriptions.\n");
         metrics.push_str("# TYPE morrow_transient_subscriptions gauge\n");

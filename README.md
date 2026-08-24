@@ -94,6 +94,7 @@ Read the complete wire reference in
 
 - [Building and testing](docs/building.md)
 - [Benchmarking](docs/benchmarking.md)
+- [WebSocket client](clients/morrow-ws/README.md)
 - [Contributing](docs/contributing.md)
 - [Operations and deployment](docs/operations.md)
 - [Dynamic consumer groups](docs/consumer-groups.md)

@@ -15,6 +15,7 @@ pub const DEFAULT_MAX_ENCODED_BATCH_BYTES: usize = 20 * 1_048_576;
 #[derive(Debug, Clone)]
 pub struct Config {
     pub listen: SocketAddr,
+    pub websocket: Option<WebSocketConfig>,
     pub http_listen: Option<SocketAddr>,
     pub admin_token: Option<String>,
     pub admin_tls: Option<TlsConfig>,
@@ -42,6 +43,12 @@ pub struct TlsConfig {
     pub cert_file: PathBuf,
     pub key_file: PathBuf,
     pub handshake_timeout_ms: u64,
+}
+#[derive(Debug, Clone)]
+pub struct WebSocketConfig {
+    pub listen: SocketAddr,
+    pub tls: Option<TlsConfig>,
+    pub allowed_origins: Vec<String>,
 }
 #[derive(Debug, Clone)]
 pub struct InternalTlsConfig {
@@ -167,6 +174,7 @@ impl Config {
             .unwrap_or("127.0.0.1:4222")
             .parse()
             .context("config field listen must be a socket address")?;
+        let websocket = get_websocket_config(value)?;
         let http_listen = get_http_listen(value)?;
         let admin_token = get_secret(value, "admin_token", "admin_token_file")?;
         let admin_tls = get_named_tls_config(value, "admin_tls")?;
@@ -201,6 +209,7 @@ impl Config {
 
         let config = Self {
             listen,
+            websocket,
             http_listen,
             admin_token,
             admin_tls,
@@ -294,6 +303,22 @@ impl Config {
                     .is_some_and(|token| !token.is_empty()),
                 "config field admin_token is required when http_listen is set"
             );
+        }
+        if let Some(websocket) = &self.websocket {
+            crate::broker_ensure!(
+                websocket.listen != self.listen,
+                "config field websocket.listen must differ from listen"
+            );
+            crate::broker_ensure!(
+                websocket
+                    .allowed_origins
+                    .iter()
+                    .all(|origin| !origin.trim().is_empty()),
+                "config field websocket.allowed_origins must not contain empty origins"
+            );
+            if let Some(tls) = &websocket.tls {
+                tls.validate_named("websocket.tls")?;
+            }
         }
         if let Some(tls) = &self.admin_tls {
             crate::broker_ensure!(
@@ -582,6 +607,48 @@ fn get_http_listen(value: &serde_json::Value) -> Result<Option<SocketAddr>> {
             "config field http_listen must be a string or null",
         )),
     }
+}
+
+fn get_websocket_config(value: &serde_json::Value) -> Result<Option<WebSocketConfig>> {
+    let Some(websocket) = value.get("websocket") else {
+        return Ok(None);
+    };
+    if websocket.is_null() {
+        return Ok(None);
+    }
+    let serde_json::Value::Object(_) = websocket else {
+        return Err(BrokerError::msg(
+            "config field websocket must be an object or null",
+        ));
+    };
+    let listen = get_string(websocket, "listen")?
+        .ok_or_else(|| BrokerError::msg("config field websocket.listen is required"))?
+        .parse()
+        .context("config field websocket.listen must be a socket address")?;
+    let allowed_origins = match websocket.get("allowed_origins") {
+        None | Some(serde_json::Value::Null) => Vec::new(),
+        Some(serde_json::Value::Array(values)) => values
+            .iter()
+            .map(|value| match value {
+                serde_json::Value::String(origin) if !origin.trim().is_empty() => {
+                    Ok(origin.clone())
+                }
+                _ => Err(BrokerError::msg(
+                    "config field websocket.allowed_origins must contain only non-empty strings",
+                )),
+            })
+            .collect::<Result<Vec<_>>>()?,
+        Some(_) => {
+            return Err(BrokerError::msg(
+                "config field websocket.allowed_origins must be an array or null",
+            ));
+        }
+    };
+    Ok(Some(WebSocketConfig {
+        listen,
+        tls: get_named_tls_config(websocket, "tls")?,
+        allowed_origins,
+    }))
 }
 #[path = "config/cluster_config.rs"]
 mod cluster_config;

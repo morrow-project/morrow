@@ -1,0 +1,11 @@
+{
+  "name": "@morrow-project/ws-client",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc --strict --target ES2022 --module ES2022 --moduleResolution Bundler --declaration --outDir dist src/index.ts"
+  }
+}

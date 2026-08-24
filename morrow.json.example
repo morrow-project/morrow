@@ -1,5 +1,6 @@
 {
   "listen": "127.0.0.1:4222",
+  "websocket": null,
   "http_listen": null,
   "admin_token": null,
   "quotas": {

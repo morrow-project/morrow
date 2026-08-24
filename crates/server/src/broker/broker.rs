@@ -16,6 +16,7 @@ pub struct Morrow {
     pub(super) config: Config,
     pub(super) tls_acceptor: Option<TlsAcceptor>,
     pub(super) admin_tls_acceptor: Option<TlsAcceptor>,
+    pub(super) websocket_tls_acceptor: Option<TlsAcceptor>,
     pub(super) quotas: Arc<crate::quota::QuotaRuntime>,
     pub(super) tenant_quotas: crate::quota::TenantQuotaRuntime,
     pub(super) policy: Arc<crate::tenancy::PolicyStore>,
