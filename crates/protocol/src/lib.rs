@@ -12,9 +12,10 @@ pub use model::{
     AckRequest, AuthProof, Capabilities, ConnectRequest, ConsumerCreateRequest,
     ConsumerDeleteRequest, CreditRequest, Delivery, Error, ExtendRequest, Frame, GroupRequest,
     GroupResult, Header, Message, ModelError, NackRequest, PROTOCOL_VERSION, ProducerIdentity,
-    PublishDurability, PublishRequest, PublishResult, Request, RequestBody, RequestId, Response,
-    ResponseBody, RetryPolicy as ModelRetryPolicy, StartPosition as ModelStartPosition,
-    StreamPosition, SubscribeRequest, UnsubscribeRequest, WindowUpdate, WireEncoding,
+    PublishBatchRequest, PublishBatchResult, PublishDurability, PublishRequest, PublishResult,
+    Request, RequestBody, RequestId, Response, ResponseBody, RetryPolicy as ModelRetryPolicy,
+    StartPosition as ModelStartPosition, StreamPosition, SubscribeRequest, UnsubscribeRequest,
+    WindowUpdate, WireEncoding,
 };
 pub use protocol::{
     AckLevel, AckSubject, Command, ConnectAuth, GroupAssignmentStrategy, ProducerAckRequest,

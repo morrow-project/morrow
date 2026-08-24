@@ -85,6 +85,7 @@ pub enum RequestBody {
     Connect(ConnectRequest),
     Ping,
     Publish(PublishRequest),
+    PublishBatch(PublishBatchRequest),
     Subscribe(SubscribeRequest),
     Unsubscribe(UnsubscribeRequest),
     ConsumerCreate(ConsumerCreateRequest),
@@ -121,6 +122,23 @@ pub struct PublishRequest {
     pub message: Message,
     pub durability: PublishDurability,
     pub producer: Option<ProducerIdentity>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublishBatchRequest {
+    pub publishes: Vec<PublishRequest>,
+}
+
+impl PublishBatchRequest {
+    pub fn validate(&self) -> Result<(), ModelError> {
+        if self.publishes.is_empty() {
+            return Err(ModelError("publish batch must not be empty".into()));
+        }
+        for publish in &self.publishes {
+            publish.message.validate()?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -241,6 +259,7 @@ pub struct Response {
 pub enum ResponseBody {
     Accepted,
     Published(PublishResult),
+    PublishedBatch(PublishBatchResult),
     Subscribed { subscription_id: String },
     Unsubscribed { subscription_id: String },
     ConsumerCreated { name: String },
@@ -258,6 +277,11 @@ pub struct PublishResult {
     pub stream: Option<String>,
     pub partition: Option<u32>,
     pub offset: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublishBatchResult {
+    pub results: Vec<PublishResult>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -420,6 +444,10 @@ impl Frame {
                 body: RequestBody::Publish(publish),
                 ..
             }) => publish.message.validate(),
+            Self::Request(Request {
+                body: RequestBody::PublishBatch(batch),
+                ..
+            }) => batch.validate(),
             Self::Delivery(delivery) => delivery.message.validate(),
             _ => Ok(()),
         }
@@ -502,6 +530,38 @@ mod tests {
             Header::single("bad header", b"value".to_vec())
                 .validate()
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn publish_batches_require_messages_and_preserve_durability() {
+        let batch = PublishBatchRequest {
+            publishes: vec![PublishRequest {
+                message: Message {
+                    subject: "orders/created".into(),
+                    reply_to: None,
+                    headers: Vec::new(),
+                    key: None,
+                    payload: b"hello".to_vec(),
+                    message_id: Some("m-1".into()),
+                    timestamp_ms: None,
+                    position: None,
+                },
+                durability: PublishDurability::Replicated,
+                producer: Some(ProducerIdentity {
+                    producer_id: "producer-1".into(),
+                    epoch: 3,
+                    sequence: 8,
+                }),
+            }],
+        };
+        assert!(batch.validate().is_ok());
+        assert!(
+            PublishBatchRequest {
+                publishes: Vec::new()
+            }
+            .validate()
+            .is_err()
         );
     }
 }
