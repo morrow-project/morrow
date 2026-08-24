@@ -159,6 +159,17 @@ async fn run_seeded_cluster(seed: u64) -> (EventTrace, usize) {
         }
     }
 
-    let messages = scenario.broker().inner.lock().await.messages.len();
+    let inner = scenario.broker().inner.lock().await;
+    let mut offsets = inner
+        .messages
+        .values()
+        .filter_map(|record| {
+            (record.stream.as_deref() == Some("orders") && record.subject == "orders/created")
+                .then_some(record.offset)
+        })
+        .collect::<Vec<_>>();
+    offsets.sort_unstable();
+    assert_eq!(offsets, vec![Some(0), Some(1), Some(2)]);
+    let messages = inner.messages.len();
     (simulation.trace, messages)
 }
