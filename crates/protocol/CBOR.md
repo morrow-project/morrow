@@ -26,6 +26,8 @@ requires flags to be zero. Frame kinds are:
 | 3 | delivery |
 | 4 | window update |
 | 5 | error |
+| 6 | ping |
+| 7 | pong |
 
 Publish requests and deliveries carry their message payload outside the CBOR
 metadata. The corresponding semantic model still exposes that payload as a

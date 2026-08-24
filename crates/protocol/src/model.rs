@@ -205,6 +205,22 @@ pub struct AckBatchRequest {
     pub acknowledgements: Vec<AckRequest>,
 }
 
+impl AckBatchRequest {
+    pub fn validate(&self) -> Result<(), ModelError> {
+        if self.acknowledgements.is_empty()
+            || self
+                .acknowledgements
+                .iter()
+                .any(|ack| ack.consumer.is_empty() || ack.generation == 0)
+        {
+            return Err(ModelError(
+                "ack batch entries require a consumer and generation".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NackRequest {
     pub consumer: String,
@@ -226,6 +242,17 @@ pub struct CreditRequest {
     pub subscription_id: String,
     pub messages: usize,
     pub bytes: usize,
+}
+
+impl CreditRequest {
+    pub fn validate(&self) -> Result<(), ModelError> {
+        if self.subscription_id.is_empty() || (self.messages == 0 && self.bytes == 0) {
+            return Err(ModelError(
+                "credit requires a subscription and positive message or byte credit".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -335,6 +362,22 @@ pub struct WindowUpdate {
     pub subscription_id: String,
     pub messages: usize,
     pub bytes: usize,
+}
+
+impl WindowUpdate {
+    pub fn validate(&self) -> Result<(), ModelError> {
+        if self.subscription_id.is_empty() || (self.messages == 0 && self.bytes == 0) {
+            return Err(ModelError(
+                "window update requires a subscription and positive credit".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Heartbeat {
+    pub nonce: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -460,6 +503,8 @@ pub enum Frame {
     Delivery(Delivery),
     WindowUpdate(WindowUpdate),
     Error(Error),
+    Ping(Heartbeat),
+    Pong(Heartbeat),
 }
 
 impl Frame {
@@ -473,6 +518,14 @@ impl Frame {
                 body: RequestBody::PublishBatch(batch),
                 ..
             }) => batch.validate(),
+            Self::Request(Request {
+                body: RequestBody::AckBatch(batch),
+                ..
+            }) => batch.validate(),
+            Self::Request(Request {
+                body: RequestBody::Credit(credit),
+                ..
+            }) => credit.validate(),
             Self::Delivery(delivery) => {
                 delivery.message.validate()?;
                 if delivery.consumer.is_some() && delivery.delivery_token.as_bytes().is_empty() {
@@ -481,6 +534,10 @@ impl Frame {
                     ));
                 }
                 Ok(())
+            }
+            Self::WindowUpdate(update) => update.validate(),
+            Self::Ping(heartbeat) | Self::Pong(heartbeat) if heartbeat.nonce == 0 => {
+                Err(ModelError("heartbeat nonce must be nonzero".into()))
             }
             _ => Ok(()),
         }
@@ -614,5 +671,20 @@ mod tests {
             batch.acknowledgements[0].delivery_token.as_bytes(),
             &[1, 2, 3]
         );
+    }
+
+    #[test]
+    fn flow_control_and_heartbeat_values_reject_ambiguous_zeroes() {
+        assert!(
+            WindowUpdate {
+                subscription_id: "worker".into(),
+                messages: 0,
+                bytes: 0,
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(Frame::Ping(Heartbeat { nonce: 0 }).validate().is_err());
+        assert!(Frame::Pong(Heartbeat { nonce: 9 }).validate().is_ok());
     }
 }
