@@ -16,5 +16,8 @@ Stable protocol error codes are listed in [`ERRORS.md`](ERRORS.md).
 
 Authentication negotiation is described in [`AUTH.md`](AUTH.md).
 
+The machine-readable CDDL schema and SDK guidance are documented in
+[`../docs/protocol-sdk-generation.md`](../docs/protocol-sdk-generation.md).
+
 The authoritative wire reference is [`PROTOCOL.md`](PROTOCOL.md). Protocol
 changes should update that document and add encoding and rejection tests.

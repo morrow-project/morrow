@@ -1,0 +1,65 @@
+; Morrow protocol v1 semantic model.
+; The fixed binary envelope is specified in ../CBOR.md.
+
+request = {
+  request_id: uint,
+  operation: tstr,
+  ? arguments: any
+}
+
+response = {
+  request_id: uint,
+  response: tstr,
+  ? value: any
+}
+
+message = {
+  subject: tstr,
+  ? reply_to: tstr,
+  headers: [* header],
+  ? key: bstr,
+  payload: bstr,
+  ? message_id: tstr,
+  ? timestamp_ms: uint,
+  ? position: stream-position
+}
+
+header = {
+  name: tstr,
+  values: [* bstr]
+}
+
+stream-position = {
+  stream: tstr,
+  partition: uint,
+  offset: uint,
+  ? partitioning_epoch: uint,
+  ? leader_epoch: uint
+}
+
+delivery = {
+  ? consumer: tstr,
+  ? subscription_id: tstr,
+  generation: uint,
+  delivery_token: bstr,
+  attempt: uint,
+  ? lease_deadline_ms: uint,
+  message: message
+}
+
+error = {
+  ? request_id: uint,
+  code: tstr,
+  retryable: bool,
+  ? retry_after_ms: uint,
+  message: tstr
+}
+
+capabilities = {
+  protocol_versions: [* uint],
+  encodings: [* tstr],
+  features: [* tstr],
+  max_frame_size: uint,
+  max_metadata_size: uint,
+  max_payload_size: uint
+}
