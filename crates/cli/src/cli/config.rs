@@ -1,10 +1,20 @@
 use super::*;
 
 impl CliConfig {
-    pub fn load(path: impl AsRef<Path>) -> Result<Self> {
+    pub fn load(path: impl AsRef<Path>, use_defaults_if_missing: bool) -> Result<Self> {
         let path = path.as_ref();
-        let contents = fs::read_to_string(path)
-            .map_err(|err| CliError::with_source(format!("reading {}", path.display()), err))?;
+        let contents = match fs::read_to_string(path) {
+            Ok(contents) => contents,
+            Err(err) if use_defaults_if_missing && err.kind() == std::io::ErrorKind::NotFound => {
+                return Self::from_json(&serde_json::Value::Object(Default::default()));
+            }
+            Err(err) => {
+                return Err(CliError::with_source(
+                    format!("reading {}", path.display()),
+                    err,
+                ));
+            }
+        };
         let value: serde_json::Value = serde_json::from_str(&contents)
             .map_err(|err| CliError::with_source(format!("parsing {}", path.display()), err))?;
         Self::from_json(&value)
