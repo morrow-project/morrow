@@ -38,10 +38,19 @@ impl VirtualClock {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct DeterministicScheduler<E> {
     next_sequence: u64,
     events: BTreeMap<(u64, u64), E>,
+}
+
+impl<E> Default for DeterministicScheduler<E> {
+    fn default() -> Self {
+        Self {
+            next_sequence: 0,
+            events: BTreeMap::new(),
+        }
+    }
 }
 
 impl<E> DeterministicScheduler<E> {
@@ -75,14 +84,99 @@ impl<E> DeterministicScheduler<E> {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SimulationError {
+    StepLimitExceeded { limit: usize },
+}
+
+impl fmt::Display for SimulationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::StepLimitExceeded { limit } => {
+                write!(formatter, "simulation exceeded step limit {limit}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for SimulationError {}
+
+#[derive(Debug)]
+pub struct Simulation<E> {
+    pub clock: VirtualClock,
+    pub scheduler: DeterministicScheduler<E>,
+    pub rng: DeterministicRng,
+    pub trace: EventTrace,
+    step_limit: usize,
+    steps: usize,
+}
+
+impl<E> Simulation<E> {
+    pub fn new(seed: u64, start_ms: u64) -> Self {
+        Self {
+            clock: VirtualClock::new(start_ms),
+            scheduler: DeterministicScheduler::default(),
+            rng: DeterministicRng::new(seed),
+            trace: EventTrace::new(seed),
+            step_limit: 100_000,
+            steps: 0,
+        }
+    }
+
+    pub fn set_step_limit(&mut self, limit: usize) {
+        self.step_limit = limit;
+    }
+
+    pub fn schedule_after(&mut self, delay_ms: u64, event: E) -> u64 {
+        self.scheduler
+            .schedule_at(self.clock.now_ms().saturating_add(delay_ms), event)
+    }
+
+    pub fn schedule_at(&mut self, at_ms: u64, event: E) -> u64 {
+        self.scheduler.schedule_at(at_ms, event)
+    }
+
+    pub fn step(&mut self) -> Result<Option<E>, SimulationError> {
+        if self.steps >= self.step_limit {
+            return Err(SimulationError::StepLimitExceeded {
+                limit: self.step_limit,
+            });
+        }
+        let Some(at_ms) = self.scheduler.next_due_at() else {
+            return Ok(None);
+        };
+        self.clock.set_ms(at_ms);
+        let event = self.scheduler.pop_due(at_ms);
+        self.steps += 1;
+        self.trace.record(at_ms, "scheduler.step");
+        Ok(event)
+    }
+
+    pub fn run_until_idle<F>(&mut self, mut apply: F) -> Result<usize, SimulationError>
+    where
+        F: FnMut(&mut Self, E),
+    {
+        while let Some(event) = self.step()? {
+            apply(self, event);
+        }
+        Ok(self.steps)
+    }
+
+    pub fn steps(&self) -> usize {
+        self.steps
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct DeterministicRng {
+    seed: u64,
     state: u64,
 }
 
 impl DeterministicRng {
     pub fn new(seed: u64) -> Self {
         Self {
+            seed,
             state: if seed == 0 {
                 0x9e37_79b9_7f4a_7c15
             } else {
@@ -92,7 +186,7 @@ impl DeterministicRng {
     }
 
     pub fn seed(&self) -> u64 {
-        self.state
+        self.seed
     }
 
     pub fn next_u64(&mut self) -> u64 {
@@ -143,6 +237,10 @@ impl EventTrace {
 
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string_pretty(self)
+    }
+
+    pub fn from_json(value: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str(value)
     }
 }
 
@@ -289,8 +387,17 @@ impl std::error::Error for StorageError {}
 #[derive(Debug, Default, Clone)]
 pub struct SimulatedStorage {
     persisted: BTreeMap<String, Vec<u8>>,
+    pending: Vec<PendingWrite>,
     fail_writes: bool,
     partial_write_bytes: Option<usize>,
+    write_delay_ms: u64,
+}
+
+#[derive(Debug, Clone)]
+struct PendingWrite {
+    ready_at_ms: u64,
+    key: String,
+    value: Vec<u8>,
 }
 
 impl SimulatedStorage {
@@ -302,7 +409,20 @@ impl SimulatedStorage {
         self.partial_write_bytes = bytes;
     }
 
+    pub fn set_write_delay_ms(&mut self, delay_ms: u64) {
+        self.write_delay_ms = delay_ms;
+    }
+
     pub fn write(&mut self, key: impl Into<String>, value: &[u8]) -> Result<(), StorageError> {
+        self.write_at(0, key, value)
+    }
+
+    pub fn write_at(
+        &mut self,
+        now_ms: u64,
+        key: impl Into<String>,
+        value: &[u8],
+    ) -> Result<(), StorageError> {
         if self.fail_writes {
             return Err(StorageError::Failed);
         }
@@ -310,8 +430,36 @@ impl SimulatedStorage {
             || value.to_vec(),
             |limit| value[..value.len().min(limit)].to_vec(),
         );
-        self.persisted.insert(key.into(), value);
+        let key = key.into();
+        if self.write_delay_ms == 0 {
+            self.persisted.insert(key, value);
+        } else {
+            self.pending.push(PendingWrite {
+                ready_at_ms: now_ms.saturating_add(self.write_delay_ms),
+                key,
+                value,
+            });
+        }
         Ok(())
+    }
+
+    pub fn flush(&mut self, now_ms: u64) -> usize {
+        let mut flushed = 0;
+        let mut pending = Vec::with_capacity(self.pending.len());
+        for write in self.pending.drain(..) {
+            if write.ready_at_ms <= now_ms {
+                self.persisted.insert(write.key, write.value);
+                flushed += 1;
+            } else {
+                pending.push(write);
+            }
+        }
+        self.pending = pending;
+        flushed
+    }
+
+    pub fn pending_writes(&self) -> usize {
+        self.pending.len()
     }
 
     pub fn read(&self, key: &str) -> Option<&[u8]> {
@@ -321,8 +469,10 @@ impl SimulatedStorage {
     pub fn restart(&self) -> Self {
         Self {
             persisted: self.persisted.clone(),
+            pending: Vec::new(),
             fail_writes: false,
             partial_write_bytes: None,
+            write_delay_ms: 0,
         }
     }
 
@@ -373,5 +523,42 @@ mod tests {
         assert_eq!(storage.read("wal"), Some(&b"ab"[..]));
         let restarted = storage.restart();
         assert_eq!(restarted.read("wal"), Some(&b"ab"[..]));
+    }
+
+    #[test]
+    fn delayed_storage_flushes_only_after_virtual_time_advances() {
+        let mut storage = SimulatedStorage::default();
+        storage.set_write_delay_ms(10);
+        storage.write_at(0, "wal", b"record").unwrap();
+        assert_eq!(storage.pending_writes(), 1);
+        assert_eq!(storage.flush(9), 0);
+        assert_eq!(storage.read("wal"), None);
+        assert_eq!(storage.flush(10), 1);
+        assert_eq!(storage.read("wal"), Some(&b"record"[..]));
+    }
+
+    #[test]
+    fn traces_round_trip_for_replay() {
+        let mut trace = EventTrace::new(42);
+        trace.record(0, "bootstrap");
+        trace.record(10, "partition:1-2");
+        let replay = EventTrace::from_json(&trace.to_json().unwrap()).unwrap();
+        assert_eq!(replay, trace);
+    }
+
+    #[test]
+    fn simulation_advances_virtual_time_and_replays_scheduled_events() {
+        let mut simulation = Simulation::new(7, 100);
+        simulation.schedule_after(20, "first");
+        simulation.schedule_at(100, "second");
+        let mut events = Vec::new();
+        simulation
+            .run_until_idle(|simulation, event| {
+                events.push((simulation.clock.now_ms(), event));
+            })
+            .unwrap();
+        assert_eq!(events, [(100, "second"), (120, "first")]);
+        assert_eq!(simulation.steps(), 2);
+        assert_eq!(simulation.trace.seed, 7);
     }
 }
