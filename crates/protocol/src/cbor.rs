@@ -188,9 +188,9 @@ fn frame_kind_from_byte(kind: u8) -> Result<(), CborError> {
 
 fn frame_request_id(frame: &Frame) -> u64 {
     match frame {
-        Frame::Request(Request { request_id, .. }) => *request_id,
-        Frame::Response(response) => response.request_id,
-        Frame::Error(error) => error.request_id.unwrap_or(0),
+        Frame::Request(Request { request_id, .. }) => request_id.get(),
+        Frame::Response(response) => response.request_id.get(),
+        Frame::Error(error) => error.request_id.map_or(0, |request_id| request_id.get()),
         Frame::Delivery(_) | Frame::WindowUpdate(_) => 0,
     }
 }
@@ -239,7 +239,7 @@ mod tests {
 
     fn publish_frame(payload: &[u8]) -> Frame {
         Frame::Request(Request {
-            request_id: 42,
+            request_id: crate::model::RequestId::new(42).unwrap(),
             body: RequestBody::Publish(PublishRequest {
                 message: Message {
                     subject: "orders/created".into(),

@@ -50,7 +50,28 @@ impl Capabilities {
     }
 }
 
-pub type RequestId = u64;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+pub struct RequestId(u64);
+
+impl RequestId {
+    pub fn new(value: u64) -> Option<Self> {
+        (value != 0).then_some(Self(value))
+    }
+
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for RequestId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = u64::deserialize(deserializer)?;
+        Self::new(value).ok_or_else(|| serde::de::Error::custom("request ID must be nonzero"))
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Request {
@@ -339,7 +360,7 @@ mod tests {
     #[test]
     fn message_model_round_trips_through_json() {
         let frame = Frame::Request(Request {
-            request_id: 42,
+            request_id: RequestId::new(42).unwrap(),
             body: RequestBody::Publish(PublishRequest {
                 message: Message {
                     subject: "orders/created".into(),
@@ -378,5 +399,13 @@ mod tests {
         assert!(capabilities.supports(PROTOCOL_VERSION, WireEncoding::Text));
         assert!(capabilities.supports(PROTOCOL_VERSION, WireEncoding::Cbor));
         assert!(capabilities.protocol_versions.contains(&2));
+    }
+
+    #[test]
+    fn request_ids_reserve_zero_for_unsolicited_frames() {
+        assert!(RequestId::new(0).is_none());
+        assert_eq!(RequestId::new(42).unwrap().get(), 42);
+        let error = serde_json::from_str::<RequestId>("0").unwrap_err();
+        assert!(error.to_string().contains("nonzero"));
     }
 }
