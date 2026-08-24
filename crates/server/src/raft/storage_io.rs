@@ -205,7 +205,10 @@ where
     let tmp = path.with_extension("tmp");
     let body = serde_json::to_vec(value).map_err(json_io)?;
     std::fs::write(&tmp, body)?;
-    let file = std::fs::OpenOptions::new().read(true).open(&tmp)?;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&tmp)?;
     file.sync_data()?;
     std::fs::rename(&tmp, path)?;
     sync_parent(path)

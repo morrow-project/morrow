@@ -68,6 +68,7 @@ impl SinkTask for ObjectStoreSink {
             std::fs::write(&temporary, &body).map_err(display)?;
             OpenOptions::new()
                 .read(true)
+                .write(true)
                 .open(&temporary)
                 .map_err(display)?
                 .sync_all()
@@ -250,6 +251,7 @@ fn persist_append_index(
     std::fs::write(&temporary, body).map_err(display)?;
     OpenOptions::new()
         .read(true)
+        .write(true)
         .open(&temporary)
         .map_err(display)?
         .sync_data()
