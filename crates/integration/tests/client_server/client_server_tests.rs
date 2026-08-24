@@ -445,6 +445,7 @@ async fn clustered_follower_proxies_client_to_leader() {
 #[tokio::test]
 async fn clustered_partition_metadata_exposes_direct_leader_discovery() {
     let harness = ClusterHarness::start_three_routed().await;
+    harness.wait_for_full_route_mesh().await;
     let leader = harness.wait_for_leader().await;
     let leader_node = harness
         .nodes
