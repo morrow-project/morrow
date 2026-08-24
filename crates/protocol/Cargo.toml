@@ -4,6 +4,8 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+ciborium.workspace = true
+crc32fast.workspace = true
 ed25519-dalek.workspace = true
 getrandom.workspace = true
 serde.workspace = true
