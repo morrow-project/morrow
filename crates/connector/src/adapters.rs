@@ -254,7 +254,7 @@ fn persist_append_index(
         .map_err(display)?
         .sync_data()
         .map_err(display)?;
-    std::fs::rename(temporary, path).map_err(display)?;
+    crate::storage::replace_file(&temporary, path).map_err(display)?;
     Ok(())
 }
 

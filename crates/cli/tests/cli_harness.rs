@@ -186,9 +186,9 @@ impl ClientConfigFile {
                 r#"{{
                     "enabled": true,
                     "server_name": "{TLS_SERVER_NAME}",
-                    "ca_cert_file": "{}"
+                    "ca_cert_file": {}
                 }}"#,
-                path.display()
+                serde_json::to_string(&path.to_string_lossy()).unwrap()
             ),
             None => r#"{"enabled": false}"#.to_string(),
         };
