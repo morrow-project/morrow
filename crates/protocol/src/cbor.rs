@@ -16,6 +16,8 @@ const KIND_RESPONSE: u8 = 2;
 const KIND_DELIVERY: u8 = 3;
 const KIND_WINDOW_UPDATE: u8 = 4;
 const KIND_ERROR: u8 = 5;
+const KIND_PING: u8 = 6;
+const KIND_PONG: u8 = 7;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DecodeLimits {
@@ -179,12 +181,15 @@ fn frame_kind(frame: &Frame) -> Result<u8, CborError> {
         Frame::Delivery(_) => Ok(KIND_DELIVERY),
         Frame::WindowUpdate(_) => Ok(KIND_WINDOW_UPDATE),
         Frame::Error(_) => Ok(KIND_ERROR),
+        Frame::Ping(_) => Ok(KIND_PING),
+        Frame::Pong(_) => Ok(KIND_PONG),
     }
 }
 
 fn frame_kind_from_byte(kind: u8) -> Result<(), CborError> {
     match kind {
-        KIND_REQUEST | KIND_RESPONSE | KIND_DELIVERY | KIND_WINDOW_UPDATE | KIND_ERROR => Ok(()),
+        KIND_REQUEST | KIND_RESPONSE | KIND_DELIVERY | KIND_WINDOW_UPDATE | KIND_ERROR
+        | KIND_PING | KIND_PONG => Ok(()),
         other => Err(CborError::UnknownFrameKind(other)),
     }
 }
@@ -194,7 +199,7 @@ fn frame_request_id(frame: &Frame) -> u64 {
         Frame::Request(Request { request_id, .. }) => request_id.get(),
         Frame::Response(response) => response.request_id.get(),
         Frame::Error(error) => error.request_id.map_or(0, |request_id| request_id.get()),
-        Frame::Delivery(_) | Frame::WindowUpdate(_) => 0,
+        Frame::Delivery(_) | Frame::WindowUpdate(_) | Frame::Ping(_) | Frame::Pong(_) => 0,
     }
 }
 
