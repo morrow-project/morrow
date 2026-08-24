@@ -92,6 +92,7 @@ pub enum RequestBody {
     ConsumerDelete(ConsumerDeleteRequest),
     Fetch(FetchRequest),
     Ack(AckRequest),
+    AckBatch(AckBatchRequest),
     Nack(NackRequest),
     Extend(ExtendRequest),
     Credit(CreditRequest),
@@ -195,20 +196,28 @@ pub struct FetchRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AckRequest {
     pub consumer: String,
-    pub delivery_token: Vec<u8>,
+    pub generation: u64,
+    pub delivery_token: DeliveryToken,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AckBatchRequest {
+    pub acknowledgements: Vec<AckRequest>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NackRequest {
     pub consumer: String,
-    pub delivery_token: Vec<u8>,
+    pub generation: u64,
+    pub delivery_token: DeliveryToken,
     pub delay_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExtendRequest {
     pub consumer: String,
-    pub delivery_token: Vec<u8>,
+    pub generation: u64,
+    pub delivery_token: DeliveryToken,
     pub extension_ms: u64,
 }
 
@@ -266,6 +275,7 @@ pub enum ResponseBody {
     ConsumerDeleted { name: String },
     Fetched { deliveries: Vec<Delivery> },
     Acknowledged,
+    AcknowledgedBatch { count: usize },
     Group(GroupResult),
     Pong,
 }
@@ -299,10 +309,25 @@ pub enum GroupResult {
 pub struct Delivery {
     pub consumer: Option<String>,
     pub subscription_id: Option<String>,
-    pub delivery_token: Vec<u8>,
+    pub generation: u64,
+    pub delivery_token: DeliveryToken,
     pub attempt: u32,
     pub lease_deadline_ms: Option<u64>,
     pub message: Message,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct DeliveryToken(Vec<u8>);
+
+impl DeliveryToken {
+    pub fn new(bytes: Vec<u8>) -> Option<Self> {
+        (!bytes.is_empty()).then_some(Self(bytes))
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -448,7 +473,15 @@ impl Frame {
                 body: RequestBody::PublishBatch(batch),
                 ..
             }) => batch.validate(),
-            Self::Delivery(delivery) => delivery.message.validate(),
+            Self::Delivery(delivery) => {
+                delivery.message.validate()?;
+                if delivery.consumer.is_some() && delivery.delivery_token.as_bytes().is_empty() {
+                    return Err(ModelError(
+                        "durable delivery token must not be empty".into(),
+                    ));
+                }
+                Ok(())
+            }
             _ => Ok(()),
         }
     }
@@ -562,6 +595,24 @@ mod tests {
             }
             .validate()
             .is_err()
+        );
+    }
+
+    #[test]
+    fn delivery_tokens_are_nonempty_and_ack_batches_are_explicit() {
+        assert!(DeliveryToken::new(Vec::new()).is_none());
+        let token = DeliveryToken::new(vec![1, 2, 3]).unwrap();
+        let batch = AckBatchRequest {
+            acknowledgements: vec![AckRequest {
+                consumer: "orders-worker".into(),
+                generation: 7,
+                delivery_token: token,
+            }],
+        };
+        assert_eq!(batch.acknowledgements[0].generation, 7);
+        assert_eq!(
+            batch.acknowledgements[0].delivery_token.as_bytes(),
+            &[1, 2, 3]
         );
     }
 }
