@@ -242,6 +242,92 @@ impl EventTrace {
     pub fn from_json(value: &str) -> Result<Self, serde_json::Error> {
         serde_json::from_str(value)
     }
+
+    pub fn replayer(&self) -> TraceReplayer {
+        TraceReplayer {
+            expected: self.clone(),
+            next_index: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReplayError {
+    UnexpectedEnd {
+        index: usize,
+        actual: TraceEvent,
+    },
+    Mismatch {
+        index: usize,
+        expected: TraceEvent,
+        actual: TraceEvent,
+    },
+    Unconsumed {
+        index: usize,
+        expected: TraceEvent,
+    },
+}
+
+impl fmt::Display for ReplayError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnexpectedEnd { index, actual } => {
+                write!(
+                    formatter,
+                    "trace has an unexpected event at {index}: {actual:?}"
+                )
+            }
+            Self::Mismatch {
+                index,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "trace mismatch at {index}: expected {expected:?}, got {actual:?}"
+            ),
+            Self::Unconsumed { index, expected } => {
+                write!(formatter, "trace ended at {index}, expected {expected:?}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ReplayError {}
+
+#[derive(Debug, Clone)]
+pub struct TraceReplayer {
+    expected: EventTrace,
+    next_index: usize,
+}
+
+impl TraceReplayer {
+    pub fn record(&mut self, actual: TraceEvent) -> Result<(), ReplayError> {
+        let Some(expected) = self.expected.events.get(self.next_index) else {
+            return Err(ReplayError::UnexpectedEnd {
+                index: self.next_index,
+                actual,
+            });
+        };
+        if expected != &actual {
+            return Err(ReplayError::Mismatch {
+                index: self.next_index,
+                expected: expected.clone(),
+                actual,
+            });
+        }
+        self.next_index += 1;
+        Ok(())
+    }
+
+    pub fn finish(self) -> Result<(), ReplayError> {
+        if let Some(expected) = self.expected.events.get(self.next_index) {
+            return Err(ReplayError::Unconsumed {
+                index: self.next_index,
+                expected: expected.clone(),
+            });
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -687,6 +773,11 @@ mod tests {
         trace.record(10, "partition:1-2");
         let replay = EventTrace::from_json(&trace.to_json().unwrap()).unwrap();
         assert_eq!(replay, trace);
+        let mut replayer = trace.replayer();
+        for event in trace.events.clone() {
+            replayer.record(event).unwrap();
+        }
+        replayer.finish().unwrap();
     }
 
     #[test]

@@ -62,6 +62,15 @@ async fn seeded_cluster_scenario_replays_with_the_same_trace() {
         let first = run_seeded_cluster(seed).await;
         let second = run_seeded_cluster(seed).await;
 
+        let mut replayer = first.0.replayer();
+        for event in second.0.events.clone() {
+            replayer
+                .record(event)
+                .unwrap_or_else(|error| panic!("seed {seed:#x} failed replay: {error}"));
+        }
+        replayer
+            .finish()
+            .unwrap_or_else(|error| panic!("seed {seed:#x} ended replay early: {error}"));
         assert_eq!(first.0, second.0, "seed {seed:#x} produced a new trace");
         assert_eq!(first.1, second.1, "seed {seed:#x} produced new state");
         assert_eq!(first.1, 3, "seed {seed:#x} lost a committed record");
