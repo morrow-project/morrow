@@ -86,14 +86,18 @@ impl<E> DeterministicScheduler<E> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SimulationError {
-    StepLimitExceeded { limit: usize },
+    StepLimitExceeded { limit: usize, trace: EventTrace },
 }
 
 impl fmt::Display for SimulationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::StepLimitExceeded { limit } => {
-                write!(formatter, "simulation exceeded step limit {limit}")
+            Self::StepLimitExceeded { limit, trace } => {
+                write!(
+                    formatter,
+                    "simulation exceeded step limit {limit}; {}",
+                    trace.diagnostic()
+                )
             }
         }
     }
@@ -140,6 +144,7 @@ impl<E> Simulation<E> {
         if self.steps >= self.step_limit {
             return Err(SimulationError::StepLimitExceeded {
                 limit: self.step_limit,
+                trace: self.trace.clone(),
             });
         }
         let Some(scheduled_at_ms) = self.scheduler.next_due_at() else {
@@ -242,6 +247,17 @@ impl EventTrace {
 
     pub fn from_json(value: &str) -> Result<Self, serde_json::Error> {
         serde_json::from_str(value)
+    }
+
+    /// Returns a compact, copy-and-pasteable failure report for a scenario.
+    pub fn diagnostic(&self) -> String {
+        match self.to_json() {
+            Ok(json) => format!("seed {:#x}; trace:\n{json}", self.seed),
+            Err(error) => format!(
+                "seed {:#x}; trace serialization failed: {error}; events: {:?}",
+                self.seed, self.events
+            ),
+        }
     }
 
     pub fn replayer(&self) -> TraceReplayer {

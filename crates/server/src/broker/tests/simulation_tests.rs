@@ -46,14 +46,28 @@ async fn virtual_time_drives_durable_redelivery_without_sleeping() {
         if time_ms == 1_024 {
             let inner = scenario.broker().inner.lock().await;
             let consumer = inner.consumers.get("durable-client1-sid1").unwrap();
-            assert!(consumer.pending.is_empty());
-            assert_eq!(consumer.in_flight.get(&1).unwrap().delivery_id, 1);
+            assert!(
+                consumer.pending.is_empty(),
+                "{}",
+                simulation.trace.diagnostic()
+            );
+            assert_eq!(
+                consumer.in_flight.get(&1).unwrap().delivery_id,
+                1,
+                "{}",
+                simulation.trace.diagnostic()
+            );
         }
     }
 
     let second = subscriber.expect_msg().await;
     assert!(second.starts_with("DELIVER orders/created sid1 _MORROW/ACK/durable-client1-sid1/1/2"));
-    assert_eq!(simulation.trace.seed, 0xfeed);
+    assert_eq!(
+        simulation.trace.seed,
+        0xfeed,
+        "{}",
+        simulation.trace.diagnostic()
+    );
 }
 
 #[tokio::test]
@@ -71,7 +85,12 @@ async fn seeded_cluster_scenario_replays_with_the_same_trace() {
         replayer
             .finish()
             .unwrap_or_else(|error| panic!("seed {seed:#x} ended replay early: {error}"));
-        assert_eq!(first.0, second.0, "seed {seed:#x} produced a new trace");
+        assert_eq!(
+            first.0,
+            second.0,
+            "seed {seed:#x} produced a new trace\n{}",
+            second.0.diagnostic()
+        );
         assert_eq!(first.1, second.1, "seed {seed:#x} produced new state");
         assert_eq!(first.1, 3, "seed {seed:#x} lost a committed record");
     }
