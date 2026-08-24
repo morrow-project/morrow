@@ -23,12 +23,15 @@ jobs:
       matrix:
         include:
           - name: linux/amd64
+            id: linux-amd64
             runner: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
           - name: linux/arm64
+            id: linux-arm64
             runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
           - name: macos/arm64
+            id: macos-arm64
             runner: macos-14
             target: aarch64-apple-darwin
     runs-on: ${{ matrix.runner }}
@@ -41,12 +44,34 @@ jobs:
           target: ${{ matrix.target }}
           cache-key: ${{ matrix.name }}-${{ github.event_name }}
           rustflags: ""
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
       - name: Run tests
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
         run: |
-          cargo test --target "${TARGET}" --workspace --locked
+          cargo nextest run \
+            --target "${TARGET}" \
+            --workspace \
+            --locked \
+            --profile ci \
+            --failure-output immediate-final
+
+      - name: Run documentation tests
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          cargo test --target "${TARGET}" --workspace --locked --doc
+
+      - name: Upload Nextest report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nextest-junit-${{ matrix.id }}
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: warn
 
       - name: Build workspace
         shell: bash
