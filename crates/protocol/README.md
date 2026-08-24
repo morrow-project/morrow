@@ -9,5 +9,8 @@ Protocol v1 also exposes a protocol-independent semantic model in
 [`MODEL.md`](MODEL.md) and `src/model.rs`. The CBOR and text codecs are expected
 to map to that model rather than implement separate broker semantics.
 
+The CBOR envelope is specified in [`CBOR.md`](CBOR.md) and implemented in
+`src/cbor.rs`.
+
 The authoritative wire reference is [`PROTOCOL.md`](PROTOCOL.md). Protocol
 changes should update that document and add encoding and rejection tests.

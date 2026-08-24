@@ -22,6 +22,7 @@ edition = "2024"
 
 [workspace.dependencies]
 aws-lc-rs = { version = "1.18.0", default-features = false, features = ["aws-lc-sys", "alloc"] }
+ciborium = "0.2.2"
 client = { path = "crates/client" }
 broker-pem = { path = "crates/pem" }
 cli = { path = "crates/cli" }
