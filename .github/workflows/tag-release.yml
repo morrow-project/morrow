@@ -99,6 +99,11 @@ jobs:
             id: macos-arm64
             runner: macos-14
             target: aarch64-apple-darwin
+          - name: windows/amd64
+            id: windows-amd64
+            runner: windows-2025-vs2026
+            target: x86_64-pc-windows-msvc
+            binary_suffix: .exe
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Check out source
@@ -118,12 +123,13 @@ jobs:
         env:
           VERSION: ${{ needs.tag.outputs.version }}
           PLATFORM: ${{ matrix.id }}
+          BINARY_SUFFIX: ${{ matrix.binary_suffix }}
         run: |
           archive_root="morrow-${VERSION}-${PLATFORM}"
           mkdir -p "${archive_root}/docs"
-          cp target/release/morrow-server "${archive_root}/"
-          cp target/release/morrow-cli "${archive_root}/"
-          cp target/release/morrow-connector "${archive_root}/"
+          cp "target/release/morrow-server${BINARY_SUFFIX}" "${archive_root}/"
+          cp "target/release/morrow-cli${BINARY_SUFFIX}" "${archive_root}/"
+          cp "target/release/morrow-connector${BINARY_SUFFIX}" "${archive_root}/"
           cp morrow.json.example client.json.example LICENSE README.md "${archive_root}/"
           cp docs/building.md docs/operations.md "${archive_root}/docs/"
           tar -czf "${archive_root}.tar.gz" "${archive_root}"
