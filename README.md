@@ -27,16 +27,18 @@ The resulting binaries are in `target/release/`.
 
 ## Run a local broker
 
-Create a configuration and start the server:
+Start the server with the built-in defaults:
 
 ```bash
-cp morrow.json.example morrow.json
-morrow-server morrow.json
+morrow-server
 ```
 
 By default, the client listener is `127.0.0.1:4222` and data is written to
-`./morrow-wal`. Without a configuration argument, the server reads `morrow.json`
-from the current directory.
+`./morrow-wal`. To customize the server, pass a JSON configuration file:
+
+```bash
+morrow-server morrow.json
+```
 
 ## Use the CLI
 

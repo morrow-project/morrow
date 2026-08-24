@@ -7,7 +7,6 @@ use std::{
     path::{Path, PathBuf},
     time::Duration,
 };
-const DEFAULT_CONFIG_PATH: &str = "morrow.json";
 pub const DEFAULT_MAX_ACK_TIMEOUT_MS: u64 = 300_000;
 pub const DEFAULT_MAX_IN_FLIGHT: usize = 4_096;
 pub const DEFAULT_MAX_FETCH_MESSAGES: usize = 1_024;
@@ -131,11 +130,18 @@ impl Config {
     }
 
     pub fn load_from_args() -> Result<Self> {
-        let mut args = std::env::args_os();
+        Self::load_from_args_iter(std::env::args_os())
+    }
+
+    fn load_from_args_iter<I>(args: I) -> Result<Self>
+    where
+        I: IntoIterator<Item = OsString>,
+    {
+        let mut args = args.into_iter();
         let _program = args.next();
         let path = match (args.next(), args.next()) {
             (Some(path), None) => PathBuf::from(path),
-            (None, None) => PathBuf::from(DEFAULT_CONFIG_PATH),
+            (None, None) => return Self::from_json(&serde_json::json!({})),
             _ => {
                 return Err(BrokerError::msg(format!(
                     "{}\n\nexpected at most one config file path",
