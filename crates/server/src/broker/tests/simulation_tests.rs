@@ -13,6 +13,49 @@ enum ClusterEvent {
     Restart,
 }
 
+#[derive(Debug)]
+enum ConsumerEvent {
+    AdvanceTo(u64),
+    TickRedelivery,
+}
+
+#[tokio::test]
+async fn virtual_time_drives_durable_redelivery_without_sleeping() {
+    let scenario = Scenario::new();
+    let mut subscriber = scenario.connect_durable("client1", 25).await;
+    let mut publisher = scenario.connect_durable("publisher1", 25).await;
+    subscriber.subscribe("orders/*", "sid1").await;
+    subscriber.ping_roundtrip().await;
+    publisher.publish("orders/created", b"hello").await;
+    let first = subscriber.expect_msg().await;
+    assert!(first.contains("/1/1 "));
+
+    let mut simulation = Simulation::new(0xfeed, 1_000);
+    simulation.schedule_at(1_024, ConsumerEvent::AdvanceTo(1_024));
+    simulation.schedule_at(1_024, ConsumerEvent::TickRedelivery);
+    simulation.schedule_at(1_025, ConsumerEvent::AdvanceTo(1_025));
+    simulation.schedule_at(1_025, ConsumerEvent::TickRedelivery);
+
+    while let Some(event) = simulation.step().unwrap() {
+        let time_ms = simulation.clock.now_ms();
+        simulation.trace.record(time_ms, format!("{event:?}"));
+        match event {
+            ConsumerEvent::AdvanceTo(time_ms) => scenario.clock.set_ms(time_ms),
+            ConsumerEvent::TickRedelivery => scenario.tick_redelivery().await,
+        }
+        if time_ms == 1_024 {
+            let inner = scenario.broker().inner.lock().await;
+            let consumer = inner.consumers.get("durable-client1-sid1").unwrap();
+            assert!(consumer.pending.is_empty());
+            assert_eq!(consumer.in_flight.get(&1).unwrap().delivery_id, 1);
+        }
+    }
+
+    let second = subscriber.expect_msg().await;
+    assert!(second.starts_with("DELIVER orders/created sid1 _MORROW/ACK/durable-client1-sid1/1/2"));
+    assert_eq!(simulation.trace.seed, 0xfeed);
+}
+
 #[tokio::test]
 async fn seeded_cluster_scenario_replays_with_the_same_trace() {
     for seed in [0x5eed, 1, 2, 3, 0xdead_beef] {
