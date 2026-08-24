@@ -142,9 +142,10 @@ impl<E> Simulation<E> {
                 limit: self.step_limit,
             });
         }
-        let Some(at_ms) = self.scheduler.next_due_at() else {
+        let Some(scheduled_at_ms) = self.scheduler.next_due_at() else {
             return Ok(None);
         };
+        let at_ms = self.clock.now_ms().max(scheduled_at_ms);
         self.clock.set_ms(at_ms);
         let event = self.scheduler.pop_due(at_ms);
         self.steps += 1;
@@ -794,6 +795,14 @@ mod tests {
         assert_eq!(events, [(100, "second"), (120, "first")]);
         assert_eq!(simulation.steps(), 2);
         assert_eq!(simulation.trace.seed, 7);
+    }
+
+    #[test]
+    fn simulation_does_not_move_virtual_time_backwards() {
+        let mut simulation = Simulation::new(7, 100);
+        simulation.schedule_at(50, "late-scheduled");
+        simulation.step().unwrap();
+        assert_eq!(simulation.clock.now_ms(), 100);
     }
 
     #[test]
