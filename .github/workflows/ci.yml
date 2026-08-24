@@ -55,3 +55,29 @@ jobs:
           PROFILE_FLAG: ${{ github.event_name == 'pull_request' && '' || '--release' }}
         run: |
           cargo build --target "${TARGET}" --workspace --locked ${PROFILE_FLAG}
+
+  codeql:
+    name: CodeQL
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+          rustflags: ""
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: rust
+          build-mode: none
+      - name: Analyze
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: /language:rust
