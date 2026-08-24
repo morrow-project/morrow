@@ -309,10 +309,70 @@ pub struct Message {
     pub position: Option<StreamPosition>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelError(pub String);
+
+impl std::fmt::Display for ModelError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for ModelError {}
+
+impl Message {
+    pub fn validate(&self) -> Result<(), ModelError> {
+        if self.subject.is_empty()
+            || self.subject.starts_with('/')
+            || self.subject.ends_with('/')
+            || self.subject.split('/').any(|segment| {
+                segment.is_empty()
+                    || segment.chars().any(char::is_whitespace)
+                    || segment.contains('*')
+            })
+        {
+            return Err(ModelError(
+                "message subject is not a concrete subject".into(),
+            ));
+        }
+        if let Some(reply_to) = &self.reply_to {
+            if reply_to.is_empty() || reply_to.chars().any(char::is_whitespace) {
+                return Err(ModelError("message reply subject is invalid".into()));
+            }
+        }
+        for header in &self.headers {
+            header.validate()?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Header {
     pub name: String,
     pub values: Vec<Vec<u8>>,
+}
+
+impl Header {
+    pub fn single(name: impl Into<String>, value: impl Into<Vec<u8>>) -> Self {
+        Self {
+            name: name.into(),
+            values: vec![value.into()],
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), ModelError> {
+        if self.name.is_empty()
+            || self.name.contains(':')
+            || self.name.contains('\r')
+            || self.name.contains('\n')
+            || self.name.chars().any(char::is_whitespace)
+            || self.values.is_empty()
+        {
+            return Err(ModelError(format!("header {:?} is invalid", self.name)));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -351,6 +411,19 @@ pub enum Frame {
     Delivery(Delivery),
     WindowUpdate(WindowUpdate),
     Error(Error),
+}
+
+impl Frame {
+    pub fn validate(&self) -> Result<(), ModelError> {
+        match self {
+            Self::Request(Request {
+                body: RequestBody::Publish(publish),
+                ..
+            }) => publish.message.validate(),
+            Self::Delivery(delivery) => delivery.message.validate(),
+            _ => Ok(()),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -407,5 +480,28 @@ mod tests {
         assert_eq!(RequestId::new(42).unwrap().get(), 42);
         let error = serde_json::from_str::<RequestId>("0").unwrap_err();
         assert!(error.to_string().contains("nonzero"));
+    }
+
+    #[test]
+    fn message_validation_supports_typed_repeated_headers() {
+        let message = Message {
+            subject: "orders/created".into(),
+            reply_to: None,
+            headers: vec![Header {
+                name: "trace-id".into(),
+                values: vec![b"one".to_vec(), b"two".to_vec()],
+            }],
+            key: None,
+            payload: Vec::new(),
+            message_id: None,
+            timestamp_ms: None,
+            position: None,
+        };
+        assert!(message.validate().is_ok());
+        assert!(
+            Header::single("bad header", b"value".to_vec())
+                .validate()
+                .is_err()
+        );
     }
 }
