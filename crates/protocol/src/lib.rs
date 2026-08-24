@@ -10,8 +10,8 @@ pub mod subject;
 pub use frames::*;
 pub use model::{
     AckBatchRequest, AckRequest, AuthProof, Capabilities, ConnectRequest, ConsumerCreateRequest,
-    ConsumerDeleteRequest, CreditRequest, Delivery, DeliveryToken, Error, ExtendRequest, Frame,
-    GroupRequest, GroupResult, Header, Heartbeat, Message, ModelError, NackRequest,
+    ConsumerDeleteRequest, CreditRequest, Delivery, DeliveryToken, Error, ErrorCode, ExtendRequest,
+    Frame, GroupRequest, GroupResult, Header, Heartbeat, Message, ModelError, NackRequest,
     PROTOCOL_VERSION, ProducerIdentity, PublishBatchRequest, PublishBatchResult, PublishDurability,
     PublishRequest, PublishResult, Request, RequestBody, RequestId, Response, ResponseBody,
     RetryPolicy as ModelRetryPolicy, StartPosition as ModelStartPosition, StreamPosition,

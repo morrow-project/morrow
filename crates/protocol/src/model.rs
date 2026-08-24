@@ -383,10 +383,60 @@ pub struct Heartbeat {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Error {
     pub request_id: Option<RequestId>,
-    pub code: String,
+    pub code: ErrorCode,
     pub retryable: bool,
     pub retry_after_ms: Option<u64>,
     pub message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ErrorCode {
+    InvalidRequest,
+    InvalidFrame,
+    UnsupportedVersion,
+    UnsupportedEncoding,
+    AuthenticationRequired,
+    AuthenticationFailed,
+    PermissionDenied,
+    NotFound,
+    Conflict,
+    ResourceExhausted,
+    Timeout,
+    StorageUnavailable,
+    Overloaded,
+    Internal,
+}
+
+impl ErrorCode {
+    pub const fn retryable(self) -> bool {
+        matches!(
+            self,
+            Self::StorageUnavailable | Self::Overloaded | Self::Timeout
+        )
+    }
+}
+
+impl std::fmt::Display for ErrorCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let value = match self {
+            Self::InvalidRequest => "INVALID_REQUEST",
+            Self::InvalidFrame => "INVALID_FRAME",
+            Self::UnsupportedVersion => "UNSUPPORTED_VERSION",
+            Self::UnsupportedEncoding => "UNSUPPORTED_ENCODING",
+            Self::AuthenticationRequired => "AUTHENTICATION_REQUIRED",
+            Self::AuthenticationFailed => "AUTHENTICATION_FAILED",
+            Self::PermissionDenied => "PERMISSION_DENIED",
+            Self::NotFound => "NOT_FOUND",
+            Self::Conflict => "CONFLICT",
+            Self::ResourceExhausted => "RESOURCE_EXHAUSTED",
+            Self::Timeout => "TIMEOUT",
+            Self::StorageUnavailable => "STORAGE_UNAVAILABLE",
+            Self::Overloaded => "OVERLOADED",
+            Self::Internal => "INTERNAL",
+        };
+        f.write_str(value)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -686,5 +736,17 @@ mod tests {
         );
         assert!(Frame::Ping(Heartbeat { nonce: 0 }).validate().is_err());
         assert!(Frame::Pong(Heartbeat { nonce: 9 }).validate().is_ok());
+    }
+
+    #[test]
+    fn error_codes_have_stable_names_and_retryability() {
+        assert_eq!(
+            ErrorCode::StorageUnavailable.to_string(),
+            "STORAGE_UNAVAILABLE"
+        );
+        assert!(ErrorCode::StorageUnavailable.retryable());
+        assert!(!ErrorCode::PermissionDenied.retryable());
+        let encoded = serde_json::to_string(&ErrorCode::InvalidFrame).unwrap();
+        assert_eq!(encoded, "\"INVALID_FRAME\"");
     }
 }
