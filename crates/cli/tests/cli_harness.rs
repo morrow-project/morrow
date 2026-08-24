@@ -37,6 +37,36 @@ async fn cli_ping_against_server() {
 }
 
 #[tokio::test]
+async fn cli_bench_pubsub_reports_json_results() {
+    let _guard = CLI_TEST_LOCK.lock().await;
+    let harness = Harness::start().await;
+    let output = run_cli([
+        "--server",
+        &harness.addr.to_string(),
+        "bench",
+        "pubsub",
+        "orders/bench",
+        "--messages",
+        "20",
+        "--payload-size",
+        "64",
+        "--publishers",
+        "2",
+        "--subscribers",
+        "2",
+        "--json",
+    ])
+    .await;
+    assert!(output.status.success(), "{}", stderr(&output));
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["messages_published"], 20);
+    assert_eq!(result["messages_received"], 40);
+    assert_eq!(result["duplicates"], 0);
+    assert_eq!(result["network_mode"], "local");
+    harness.shutdown().await;
+}
+
+#[tokio::test]
 async fn cli_pub_and_sub_against_server() {
     let _guard = CLI_TEST_LOCK.lock().await;
     let harness = Harness::start().await;

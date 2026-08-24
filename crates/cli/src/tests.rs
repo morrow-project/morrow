@@ -57,6 +57,76 @@ fn parses_ping_args() {
 }
 
 #[test]
+fn parses_server_override_and_bench_pubsub_args() {
+    let args = Args::parse(
+        [
+            "morrow-cli",
+            "--server",
+            "127.0.0.1:4222",
+            "bench",
+            "pubsub",
+            "orders/bench",
+            "--messages",
+            "20",
+            "--payload-size",
+            "64",
+            "--publishers",
+            "2",
+            "--subscribers",
+            "3",
+            "--concurrency",
+            "2",
+            "--ack",
+            "--json",
+        ]
+        .into_iter()
+        .map(str::to_string),
+    )
+    .unwrap();
+    assert_eq!(args.server, Some("127.0.0.1:4222".parse().unwrap()));
+    assert_eq!(
+        args.command,
+        Command::BenchPubSub {
+            subject: "orders/bench".into(),
+            messages: Some(20),
+            duration_ms: None,
+            payload_size: 64,
+            publishers: 2,
+            subscribers: 3,
+            concurrency: 2,
+            ack: true,
+            durable_id: None,
+            json: true,
+        }
+    );
+}
+
+#[test]
+fn parses_bench_duration() {
+    let args = Args::parse(
+        [
+            "morrow-cli",
+            "bench",
+            "pubsub",
+            "orders",
+            "--duration",
+            "2s",
+        ]
+        .into_iter()
+        .map(str::to_string),
+    )
+    .unwrap();
+    assert!(matches!(
+        args.command,
+        Command::BenchPubSub {
+            duration_ms: Some(2_000),
+            messages: None,
+            ..
+        }
+    ));
+}
+
+#[test]
 fn parses_version_args_without_a_config_path() {
     let args = Args::parse(["morrow-cli", "--version"].into_iter().map(str::to_string)).unwrap();
     assert_eq!(args.config_path, PathBuf::from(DEFAULT_CONFIG_PATH));

@@ -10,6 +10,25 @@ impl CliConfig {
         Self::from_json(&value)
     }
 
+    pub fn load_or_default(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
+        if path == Path::new(DEFAULT_CONFIG_PATH) && !path.exists() {
+            return Self::from_json(&serde_json::json!({}));
+        }
+        Self::load(path)
+    }
+
+    pub(super) fn with_server(mut self, server: Option<SocketAddr>) -> Self {
+        if let Some(server) = server {
+            self.server = server;
+        }
+        self
+    }
+
+    pub(super) fn has_transport_security(&self) -> bool {
+        self.tls.is_some() || self.auth.is_some()
+    }
+
     pub fn from_json(value: &serde_json::Value) -> Result<Self> {
         if !value.is_object() {
             return Err(CliError::msg("client config must be a JSON object"));
@@ -39,6 +58,20 @@ impl CliConfig {
     pub(super) async fn connect_client(&self) -> Result<Client> {
         let options = self.client_options()?;
         Ok(Client::connect_with_options(&options).await?)
+    }
+
+    pub(super) fn client_options_for(&self, suffix: &str) -> Result<ClientOptions> {
+        let mut options = self.client_options()?;
+        let durable_id = format!(
+            "{}-{suffix}",
+            self.connect.durable_id.as_deref().unwrap_or("morrow-cli")
+        );
+        // Keep the configured authenticated client ID: the server's allowlist
+        // may contain that exact ID but not generated benchmark variants.
+        // Durable IDs remain unique per worker so concurrent consumers do not
+        // contend for the same durable state.
+        options.durable_id = Some(durable_id);
+        Ok(options)
     }
 
     pub(super) fn client_options(&self) -> Result<ClientOptions> {

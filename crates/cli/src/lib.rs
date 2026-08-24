@@ -42,10 +42,23 @@ pub enum Command {
         ack: bool,
         max_messages: Option<usize>,
     },
+    BenchPubSub {
+        subject: String,
+        messages: Option<usize>,
+        duration_ms: Option<u64>,
+        payload_size: usize,
+        publishers: usize,
+        subscribers: usize,
+        concurrency: usize,
+        ack: bool,
+        durable_id: Option<String>,
+        json: bool,
+    },
 }
 #[derive(Debug, Clone)]
 pub struct Args {
     pub config_path: PathBuf,
+    pub server: Option<SocketAddr>,
     pub command: Command,
 }
 #[derive(Debug, Clone)]
@@ -76,6 +89,8 @@ struct CliConnectConfig {
 
 #[path = "cli/args.rs"]
 mod args;
+#[path = "cli/bench.rs"]
+mod bench;
 #[path = "cli/config.rs"]
 mod config;
 #[path = "cli/error.rs"]
