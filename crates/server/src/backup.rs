@@ -379,11 +379,12 @@ impl<S: ObjectStore + 'static> BackupEngine<S> {
             let bytes = read_stable_file(&source.join(&relative))
                 .with_context(|| format!("reading backup file {}", relative.display()))?;
             let digest = sha256(&bytes);
-            let key = format!("backups/{backup_id}/{}", relative.to_string_lossy());
+            let relative_path = portable_relative_path(&relative);
+            let key = format!("backups/{backup_id}/{relative_path}");
             self.store.put_immutable(&key, &bytes, &digest)?;
             objects.push(BackupObject {
                 key,
-                relative_path: relative.to_string_lossy().into_owned(),
+                relative_path,
                 bytes: bytes.len() as u64,
                 sha256: digest,
                 sealed,
@@ -433,14 +434,15 @@ impl<S: ObjectStore + 'static> BackupEngine<S> {
             let bytes = read_stable_file(&source.join(&relative))
                 .with_context(|| format!("reading backup file {}", relative.display()))?;
             let digest = sha256(&bytes);
-            if parent_hashes.get(relative.to_string_lossy().as_ref()) == Some(&digest.as_str()) {
+            let relative_path = portable_relative_path(&relative);
+            if parent_hashes.get(relative_path.as_str()) == Some(&digest.as_str()) {
                 continue;
             }
-            let key = format!("backups/{backup_id}/{}", relative.to_string_lossy());
+            let key = format!("backups/{backup_id}/{relative_path}");
             self.store.put_immutable(&key, &bytes, &digest)?;
             objects.push(BackupObject {
                 key,
-                relative_path: relative.to_string_lossy().into_owned(),
+                relative_path,
                 bytes: bytes.len() as u64,
                 sha256: digest,
                 sealed,
@@ -716,18 +718,19 @@ fn collect_files(root: &Path, current: &Path, files: &mut Vec<PathBuf>) -> Resul
     Ok(())
 }
 
+fn portable_relative_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
 fn collect_store_files(root: &Path, current: &Path, files: &mut Vec<String>) -> Result<()> {
     for entry in fs::read_dir(current)? {
         let path = entry?.path();
         if path.is_dir() {
             collect_store_files(root, &path, files)?;
         } else {
-            files.push(
-                path.strip_prefix(root)
-                    .expect("object-store root prefix")
-                    .to_string_lossy()
-                    .into_owned(),
-            );
+            files.push(portable_relative_path(
+                path.strip_prefix(root).expect("object-store root prefix"),
+            ));
         }
     }
     Ok(())

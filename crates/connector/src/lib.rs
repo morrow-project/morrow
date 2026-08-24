@@ -6,6 +6,7 @@ mod config;
 mod control;
 mod runtime;
 mod spi;
+mod storage;
 
 pub use adapters::{AppendDatabaseSink, ObjectStoreSink};
 pub use broker_sink::{BrokerSinkConfig, run_sink_batch};

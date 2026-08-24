@@ -61,7 +61,7 @@ impl CheckpointStore {
             serde_json::to_vec(&self.state).map_err(display)?,
         )
         .map_err(display)?;
-        std::fs::rename(temporary, &self.path).map_err(display)
+        crate::storage::replace_file(&temporary, &self.path).map_err(display)
     }
 
     pub fn path(&self) -> &Path {

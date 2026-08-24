@@ -68,6 +68,7 @@ impl SinkTask for ObjectStoreSink {
             std::fs::write(&temporary, &body).map_err(display)?;
             OpenOptions::new()
                 .read(true)
+                .write(true)
                 .open(&temporary)
                 .map_err(display)?
                 .sync_all()
@@ -75,12 +76,7 @@ impl SinkTask for ObjectStoreSink {
             std::fs::rename(temporary, path).map_err(display)?;
         }
         for directory in directories {
-            OpenOptions::new()
-                .read(true)
-                .open(directory)
-                .map_err(display)?
-                .sync_data()
-                .map_err(display)?;
+            crate::storage::sync_dir(&directory).map_err(display)?;
         }
         Ok(SinkCompletion { offsets })
     }
@@ -255,11 +251,12 @@ fn persist_append_index(
     std::fs::write(&temporary, body).map_err(display)?;
     OpenOptions::new()
         .read(true)
+        .write(true)
         .open(&temporary)
         .map_err(display)?
         .sync_data()
         .map_err(display)?;
-    std::fs::rename(temporary, path).map_err(display)?;
+    crate::storage::replace_file(&temporary, path).map_err(display)?;
     Ok(())
 }
 

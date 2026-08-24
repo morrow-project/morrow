@@ -523,9 +523,7 @@ pub(super) fn remove_tmp_segments(dir: &Path) -> Result<()> {
 }
 
 pub(super) fn fsync_dir(dir: &Path) -> Result<()> {
-    let file = File::open(dir).with_context(|| format!("opening WAL dir {}", dir.display()))?;
-    file.sync_all()
-        .with_context(|| format!("fsyncing WAL dir {}", dir.display()))
+    crate::storage::sync_dir(dir).with_context(|| format!("syncing WAL dir {}", dir.display()))
 }
 
 pub(super) fn millis_since(started: Instant) -> u64 {
