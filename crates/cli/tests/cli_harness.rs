@@ -12,8 +12,15 @@ use server::{
     config::{AuthClientConfig, AuthConfig, TlsConfig},
 };
 use tokio::net::TcpListener;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
+};
 
 const TLS_SERVER_NAME: &str = "localhost";
+const ADMIN_TOKEN: &str = "test-admin-token";
+const CLI_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
+const SUBSCRIPTION_READY_TIMEOUT: Duration = Duration::from_secs(10);
 static CLI_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[tokio::test]
@@ -48,7 +55,7 @@ async fn cli_pub_and_sub_against_server() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    wait_for_subscription(harness.admin_addr, "orders/*", "sid1").await;
 
     let pub_output = run_cli([
         "--config",
@@ -60,7 +67,7 @@ async fn cli_pub_and_sub_against_server() {
     .await;
     assert!(pub_output.status.success(), "{}", stderr(&pub_output));
 
-    let sub_output = wait_output(sub, Duration::from_secs(3)).await;
+    let sub_output = wait_output(sub, CLI_COMMAND_TIMEOUT).await;
     assert!(sub_output.status.success(), "{}", stderr(&sub_output));
     assert_eq!(stdout(&sub_output), "orders/created sid1 hello\n");
     harness.shutdown().await;
@@ -236,6 +243,7 @@ impl ClientConfigFile {
 
 struct Harness {
     addr: SocketAddr,
+    admin_addr: SocketAddr,
     max_payload: usize,
     broker: Morrow,
     server_task: tokio::task::JoinHandle<()>,
@@ -286,11 +294,14 @@ impl Harness {
         let wal_dir = TestDir::new("morrow-cli-wal");
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
+        let admin_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let admin_addr = admin_listener.local_addr().unwrap();
+        drop(admin_listener);
         let max_payload = 1024;
         let config = Config {
             listen: addr,
-            http_listen: None,
-            admin_token: None,
+            http_listen: Some(admin_addr),
+            admin_token: Some(ADMIN_TOKEN.to_string()),
             admin_tls: None,
             quotas: Default::default(),
             wal_dir: wal_dir.path().to_path_buf(),
@@ -320,6 +331,7 @@ impl Harness {
         });
         Self {
             addr,
+            admin_addr,
             max_payload,
             broker,
             server_task,
@@ -331,6 +343,58 @@ impl Harness {
         self.broker.shutdown().await.unwrap();
         self.server_task.abort();
     }
+}
+
+async fn wait_for_subscription(addr: SocketAddr, subject: &str, sid: &str) {
+    let deadline = tokio::time::Instant::now() + SUBSCRIPTION_READY_TIMEOUT;
+    loop {
+        if let Some(response) = admin_subscriptions(addr).await {
+            let ready = response["durable_consumers"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|consumer| {
+                    consumer["filter_subject"] == subject
+                        && consumer["members"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .any(|member| member["sid"] == sid)
+                });
+            if ready {
+                return;
+            }
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "CLI subscription {subject:?} with sid {sid:?} did not become ready"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+async fn admin_subscriptions(addr: SocketAddr) -> Option<serde_json::Value> {
+    let mut stream = tokio::time::timeout(Duration::from_secs(1), TcpStream::connect(addr))
+        .await
+        .ok()?
+        .ok()?;
+    stream
+        .write_all(
+            format!(
+                "GET /subscriptions HTTP/1.1\r\nhost: localhost\r\nauthorization: Bearer {ADMIN_TOKEN}\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .await
+        .ok()?;
+    let mut response = Vec::new();
+    tokio::time::timeout(Duration::from_secs(1), stream.read_to_end(&mut response))
+        .await
+        .ok()?
+        .ok()?;
+    let response = String::from_utf8(response).ok()?;
+    let (_, body) = response.split_once("\r\n\r\n")?;
+    serde_json::from_str(body).ok()
 }
 
 async fn run_cli<const N: usize>(args: [&str; N]) -> Output {

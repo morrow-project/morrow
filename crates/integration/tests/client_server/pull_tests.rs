@@ -171,7 +171,6 @@ async fn client_pull_consumer_supports_bounded_fetch_and_delivery_controls() {
         .extend_lease(&first, Duration::from_secs(1))
         .await
         .unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(
         consumer
             .fetch("worker", 1, 3, Duration::from_millis(5))
@@ -190,13 +189,22 @@ async fn client_pull_consumer_supports_bounded_fetch_and_delivery_controls() {
             .unwrap()
             .is_empty()
     );
-    tokio::time::sleep(Duration::from_millis(250)).await;
-    let redelivery = consumer
-        .fetch("worker", 1, 3, Duration::ZERO)
-        .await
-        .unwrap()
-        .pop()
-        .unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let redelivery = loop {
+        if let Some(delivery) = consumer
+            .fetch("worker", 1, 3, Duration::ZERO)
+            .await
+            .unwrap()
+            .pop()
+        {
+            break delivery;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "nacked delivery was not redelivered"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
     assert_eq!(redelivery.attempt, 2);
     assert_ne!(redelivery.delivery_id, first.delivery_id);
     assert!(consumer.ack_delivery(&first).await.is_err());
