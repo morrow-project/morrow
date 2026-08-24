@@ -25,5 +25,8 @@ command-oriented text grammar remains in `src/protocol.rs`.
 Versioning and extension rules are documented in
 [`../docs/protocol-evolution.md`](../docs/protocol-evolution.md).
 
+Conformance, fuzzing, and benchmark commands are documented in
+[`../docs/protocol-conformance.md`](../docs/protocol-conformance.md).
+
 The authoritative wire reference is [`PROTOCOL.md`](PROTOCOL.md). Protocol
 changes should update that document and add encoding and rejection tests.

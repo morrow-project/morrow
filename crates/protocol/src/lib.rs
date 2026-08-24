@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod cbor;
+pub mod conformance;
 pub mod connector_control;
 mod consumer_commands;
 mod frames;
