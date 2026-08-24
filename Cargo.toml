@@ -7,6 +7,7 @@ members = [
     "crates/pem",
     "crates/protocol",
     "crates/server",
+    "crates/simulation",
     "third_party/byte-unit-compat",
 ]
 resolver = "3"
@@ -40,6 +41,7 @@ opentelemetry_sdk = { version = "0.32.0", default-features = false, features = [
 rustls = { version = "0.23.43", default-features = false, features = ["aws_lc_rs", "std"] }
 serde = { version = "1.0.229", default-features = false, features = ["derive", "std"] }
 serde_json = { version = "1.0.151", default-features = false, features = ["std"] }
+simulation = { path = "crates/simulation" }
 tokio = { version = "1.53.1", default-features = false, features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-rustls = { version = "0.26.4", default-features = false }
 tracing = { version = "0.1.44", default-features = false, features = ["std"] }
