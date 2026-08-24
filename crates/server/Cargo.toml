@@ -29,5 +29,6 @@ wasmtime.workspace = true
 
 [dev-dependencies]
 ed25519-dalek.workspace = true
+simulation.workspace = true
 tempfile = "3.27.0"
 wat = "1.257.1"
