@@ -139,9 +139,26 @@ jobs:
           path: morrow-${{ needs.tag.outputs.version }}-${{ matrix.id }}.tar.gz*
           if-no-files-found: error
 
+  create-release:
+    name: Create GitHub release
+    needs: tag
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.tag.outputs.version }}
+        run: |
+          gh release create "${VERSION}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "Morrow ${VERSION}" \
+            --generate-notes
+
   publish-binaries:
     name: Publish binary release
-    needs: [tag, build]
+    needs: [tag, build, create-release]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -157,7 +174,224 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.tag.outputs.version }}
         run: |
-          gh release create "${VERSION}" dist/* \
+          gh release upload "${VERSION}" dist/* \
             --repo "${GITHUB_REPOSITORY}" \
-            --title "Morrow ${VERSION}" \
-            --generate-notes
+            --clobber
+
+  build-debian:
+    name: Build Debian package (${{ matrix.debian_arch }})
+    needs: [tag, publish-binaries]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - debian_arch: amd64
+            release_arch: amd64
+          - debian_arch: arm64
+            release_arch: arm64
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out Debian packaging repository
+        uses: actions/checkout@v7
+        with:
+          repository: morrow-project/debian-morrow
+
+      - name: Download and verify release archive
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.tag.outputs.version }}
+          RELEASE_ARCH: ${{ matrix.release_arch }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          gh release download "${VERSION}" \
+            --repo morrow-project/morrow \
+            --pattern "morrow-${VERSION}-linux-${RELEASE_ARCH}.tar.gz" \
+            --pattern "morrow-${VERSION}-linux-${RELEASE_ARCH}.tar.gz.sha256" \
+            --dir dist \
+            --clobber
+          (
+            cd dist
+            sha256sum --check "morrow-${VERSION}-linux-${RELEASE_ARCH}.tar.gz.sha256"
+          )
+
+      - name: Build Debian package
+        env:
+          VERSION: ${{ needs.tag.outputs.version }}
+          DEBIAN_ARCH: ${{ matrix.debian_arch }}
+          RELEASE_ARCH: ${{ matrix.release_arch }}
+        run: |
+          bash scripts/build-deb.sh \
+            "${VERSION}" \
+            "${DEBIAN_ARCH}" \
+            "dist/morrow-${VERSION}-linux-${RELEASE_ARCH}.tar.gz" \
+            "dist"
+          dpkg-deb --info "dist/morrow_${VERSION}_${DEBIAN_ARCH}.deb"
+          dpkg-deb --contents "dist/morrow_${VERSION}_${DEBIAN_ARCH}.deb"
+
+      - name: Upload Debian package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: debian-${{ needs.tag.outputs.version }}-${{ matrix.debian_arch }}
+          path: dist/morrow_${{ needs.tag.outputs.version }}_${{ matrix.debian_arch }}.deb
+          if-no-files-found: error
+
+  publish-debian:
+    name: Publish Debian packages
+    needs: [tag, build-debian]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download Debian package artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: debian-${{ needs.tag.outputs.version }}-*
+          merge-multiple: true
+          path: dist
+
+      - name: Publish Debian packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.tag.outputs.version }}
+        run: |
+          gh release upload "${VERSION}" dist/*.deb \
+            --repo "${GITHUB_REPOSITORY}" \
+            --clobber
+
+  build-rpm:
+    name: Build RPM package (${{ matrix.rpm_arch }})
+    needs: [tag, publish-binaries]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - rpm_arch: x86_64
+            release_arch: amd64
+          - rpm_arch: aarch64
+            release_arch: arm64
+    runs-on: ubuntu-24.04
+    container:
+      image: fedora:latest
+    steps:
+      - name: Install runner and RPM tooling
+        run: |
+          dnf install --assumeyes --setopt=install_weak_deps=False \
+            coreutils curl git gh gzip nodejs rpm-build tar
+
+      - name: Check out RPM packaging repository
+        uses: actions/checkout@v7
+        with:
+          repository: morrow-project/rpm-morrow
+
+      - name: Download and verify release archive
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.tag.outputs.version }}
+          RELEASE_ARCH: ${{ matrix.release_arch }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          gh release download "${VERSION}" \
+            --repo morrow-project/morrow \
+            --pattern "morrow-${VERSION}-linux-${RELEASE_ARCH}.tar.gz" \
+            --pattern "morrow-${VERSION}-linux-${RELEASE_ARCH}.tar.gz.sha256" \
+            --dir dist \
+            --clobber
+          (
+            cd dist
+            sha256sum --check "morrow-${VERSION}-linux-${RELEASE_ARCH}.tar.gz.sha256"
+          )
+
+      - name: Build RPM package
+        env:
+          VERSION: ${{ needs.tag.outputs.version }}
+          RPM_ARCH: ${{ matrix.rpm_arch }}
+          RELEASE_ARCH: ${{ matrix.release_arch }}
+        run: |
+          bash scripts/build-rpm.sh \
+            "${VERSION}" \
+            "${RPM_ARCH}" \
+            "${RELEASE_ARCH}" \
+            "dist/morrow-${VERSION}-linux-${RELEASE_ARCH}.tar.gz" \
+            "dist"
+          rpm --checksig "dist/morrow-${VERSION}-1.${RPM_ARCH}.rpm"
+          rpm -qip "dist/morrow-${VERSION}-1.${RPM_ARCH}.rpm"
+          rpm -qlp "dist/morrow-${VERSION}-1.${RPM_ARCH}.rpm"
+
+      - name: Upload RPM package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rpm-${{ needs.tag.outputs.version }}-${{ matrix.rpm_arch }}
+          path: dist/morrow-${{ needs.tag.outputs.version }}-1.${{ matrix.rpm_arch }}.rpm
+          if-no-files-found: error
+
+  publish-rpm:
+    name: Publish RPM packages
+    needs: [tag, build-rpm]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download RPM package artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: rpm-${{ needs.tag.outputs.version }}-*
+          merge-multiple: true
+          path: dist
+
+      - name: Publish RPM packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.tag.outputs.version }}
+        run: |
+          gh release upload "${VERSION}" dist/*.rpm \
+            --repo "${GITHUB_REPOSITORY}" \
+            --clobber
+
+  publish-docker:
+    name: Publish Docker image
+    needs: [tag, publish-binaries]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out Docker image definition
+        uses: actions/checkout@v7
+        with:
+          repository: morrow-project/docker-morrow
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/morrow-project/morrow-server
+          tags: |
+            type=raw,value=${{ needs.tag.outputs.version }}
+            type=raw,value=latest
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ needs.tag.outputs.version }}
