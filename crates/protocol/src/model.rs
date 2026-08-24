@@ -113,9 +113,34 @@ pub struct ConnectRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthProof {
-    pub mechanism: String,
+    pub mechanism: AuthMechanism,
     pub client_id: String,
     pub proof: Vec<u8>,
+    pub channel_binding: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthMechanism {
+    Ed25519,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthChallenge {
+    pub mechanisms: Vec<AuthMechanism>,
+    pub nonce: Vec<u8>,
+    pub channel_binding: Option<Vec<u8>>,
+}
+
+impl AuthProof {
+    pub fn validate(&self) -> Result<(), ModelError> {
+        if self.client_id.is_empty() || self.proof.is_empty() {
+            return Err(ModelError(
+                "authentication proof requires a client ID and proof bytes".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -576,6 +601,10 @@ impl Frame {
                 body: RequestBody::Credit(credit),
                 ..
             }) => credit.validate(),
+            Self::Request(Request {
+                body: RequestBody::Connect(connect),
+                ..
+            }) => connect.auth.as_ref().map_or(Ok(()), AuthProof::validate),
             Self::Delivery(delivery) => {
                 delivery.message.validate()?;
                 if delivery.consumer.is_some() && delivery.delivery_token.as_bytes().is_empty() {
@@ -748,5 +777,25 @@ mod tests {
         assert!(!ErrorCode::PermissionDenied.retryable());
         let encoded = serde_json::to_string(&ErrorCode::InvalidFrame).unwrap();
         assert_eq!(encoded, "\"INVALID_FRAME\"");
+    }
+
+    #[test]
+    fn authentication_mechanisms_and_proofs_are_structured() {
+        let proof = AuthProof {
+            mechanism: AuthMechanism::Ed25519,
+            client_id: "client-1".into(),
+            proof: vec![1, 2, 3],
+            channel_binding: Some(vec![9]),
+        };
+        assert!(proof.validate().is_ok());
+        assert!(
+            AuthProof {
+                client_id: "client-1".into(),
+                proof: Vec::new(),
+                ..proof
+            }
+            .validate()
+            .is_err()
+        );
     }
 }

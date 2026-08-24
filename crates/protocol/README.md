@@ -14,5 +14,7 @@ The CBOR envelope is specified in [`CBOR.md`](CBOR.md) and implemented in
 
 Stable protocol error codes are listed in [`ERRORS.md`](ERRORS.md).
 
+Authentication negotiation is described in [`AUTH.md`](AUTH.md).
+
 The authoritative wire reference is [`PROTOCOL.md`](PROTOCOL.md). Protocol
 changes should update that document and add encoding and rejection tests.
