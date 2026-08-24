@@ -41,12 +41,34 @@ jobs:
           target: ${{ matrix.target }}
           cache-key: ${{ matrix.name }}-${{ github.event_name }}
           rustflags: ""
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
       - name: Run tests
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
         run: |
-          cargo test --target "${TARGET}" --workspace --locked
+          cargo nextest run \
+            --target "${TARGET}" \
+            --workspace \
+            --locked \
+            --profile ci \
+            --failure-output immediate-final
+
+      - name: Run documentation tests
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          cargo test --target "${TARGET}" --workspace --locked --doc
+
+      - name: Upload Nextest report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nextest-junit-${{ matrix.name }}
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: warn
 
       - name: Build workspace
         shell: bash
