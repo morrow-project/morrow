@@ -3,6 +3,11 @@
 Morrow is a WAL-backed message broker with a native text protocol, durable
 consumers, request/reply inboxes, and optional clustered durability.
 
+Morrow is inspired by several years of using Kafka and NATS. Both projects
+have excellent communities, and their ideas have strongly influenced Morrow's
+design. Morrow listens on port `4222` by default, like NATS, because NATS is a
+particular personal favourite.
+
 The repository provides three user-facing binaries:
 
 - `morrow-server`: broker runtime.
