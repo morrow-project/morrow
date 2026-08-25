@@ -147,6 +147,7 @@ impl ClusterHarness {
             let listener = TcpListener::bind(node.client_addr).await.unwrap();
             let config = Config {
                 listen: node.client_addr,
+                websocket: None,
                 http_listen: enable_routes.then_some(node.http_addr),
                 admin_token: enable_routes.then_some("test-admin-token".to_string()),
                 admin_tls: secure.then(tls_config),
@@ -516,6 +517,7 @@ impl Harness {
         let max_payload = 1024;
         let config = Config {
             listen: addr,
+            websocket: None,
             http_listen: None,
             admin_token: None,
             admin_tls: None,

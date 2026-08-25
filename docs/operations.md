@@ -11,10 +11,57 @@ JSON configuration and defaults to:
 - TLS: disabled
 - authentication: disabled
 - clustering: disabled
+- WebSocket listener: disabled
 
-Important fields include `listen`, `http_listen`, `admin_token` or
-`admin_token_file`, `wal_dir`, `tls`, `auth`, `quotas`, and `cluster`. The
+Important fields include `listen`, `websocket`, `http_listen`, `admin_token`
+or `admin_token_file`, `wal_dir`, `tls`, `auth`, `quotas`, and `cluster`. The
 example file contains the complete default shape.
+
+### WebSocket listener
+
+The WebSocket listener is independent from the native TCP listener. Enable it
+with a separate address and an explicit origin allowlist:
+
+```json
+{
+  "listen": "127.0.0.1:4222",
+  "websocket": {
+    "listen": "127.0.0.1:8080",
+    "tls": null,
+    "allowed_origins": ["http://localhost:3000"]
+  }
+}
+```
+
+The listener negotiates `morrow.v1.text` and bridges the existing text session
+protocol, so native TCP session handling, authentication, authorization,
+subscriptions, request/reply, and ACK behavior remain shared. An `Origin`
+header is accepted only when it appears in `allowed_origins`; non-browser
+clients that omit `Origin` are allowed. An unknown requested subprotocol is
+rejected rather than silently downgraded.
+
+For WSS, put the server certificate and key under the nested listener TLS
+configuration:
+
+```json
+{
+  "websocket": {
+    "listen": "0.0.0.0:8443",
+    "tls": {
+      "cert_file": "./secrets/websocket.crt",
+      "key_file": "./secrets/websocket.key",
+      "handshake_timeout_ms": 2000
+    },
+    "allowed_origins": ["https://app.example.com"]
+  }
+}
+```
+
+WebSocket messages are bounded by the server frame/payload limits, and the
+existing per-connection outbound quota provides backpressure for slow clients.
+The separate `morrow_websocket_*` Prometheus metrics cover active and accepted
+connections, message/byte traffic, and transport errors. For browser clients,
+see [`clients/morrow-ws`](../clients/morrow-ws/README.md).
 
 ## Storage
 

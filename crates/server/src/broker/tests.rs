@@ -1,11 +1,16 @@
 use super::*;
-use crate::config::{ClusterConfig, ClusterNodeConfig};
+use crate::config::{ClusterConfig, ClusterNodeConfig, WebSocketConfig};
+use futures_util::{SinkExt, StreamExt};
 use std::{path::Path, sync::Arc, time::Duration};
 use tempfile::TempDir;
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, DuplexStream},
     sync::mpsc,
     task::JoinHandle,
+};
+use tokio_tungstenite::{
+    client_async,
+    tungstenite::{Message, client::IntoClientRequest},
 };
 struct Scenario {
     _dir: TempDir,
@@ -453,6 +458,7 @@ impl TestClient {
 fn test_config(dir: &Path) -> Config {
     Config {
         listen: "127.0.0.1:0".parse().unwrap(),
+        websocket: None,
         http_listen: None,
         admin_token: Some("test-admin-token".to_string()),
         admin_tls: None,
@@ -474,6 +480,93 @@ fn test_config(dir: &Path) -> Config {
         auth: Default::default(),
         cluster: None,
         streams: test_streams(),
+    }
+}
+
+#[tokio::test]
+async fn websocket_listener_bridges_text_protocol_sessions() {
+    let dir = TempDir::new().unwrap();
+    let native_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let websocket_probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let websocket_addr = websocket_probe.local_addr().unwrap();
+    drop(websocket_probe);
+
+    let mut config = test_config(dir.path());
+    config.websocket = Some(WebSocketConfig {
+        listen: websocket_addr,
+        tls: None,
+        allowed_origins: vec!["http://localhost:3000".to_string()],
+    });
+    let broker = Morrow::open(config).unwrap();
+    let server_task = tokio::spawn(broker.serve_listener(native_listener));
+
+    let mut websocket = None;
+    let mut last_error = None;
+    for _ in 0..50 {
+        if let Ok(stream) = TcpStream::connect(websocket_addr).await {
+            let mut request = "ws://localhost/".into_client_request().unwrap();
+            request
+                .headers_mut()
+                .insert("Sec-WebSocket-Protocol", "morrow.v1.text".parse().unwrap());
+            match client_async(request, stream).await {
+                Ok((websocket_stream, response)) => {
+                    assert_eq!(
+                        response
+                            .headers()
+                            .get("Sec-WebSocket-Protocol")
+                            .and_then(|value| value.to_str().ok()),
+                        Some("morrow.v1.text")
+                    );
+                    websocket = Some(websocket_stream);
+                    break;
+                }
+                Err(error) => last_error = Some(error.to_string()),
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let mut websocket = websocket.unwrap_or_else(|| {
+        panic!(
+            "WebSocket listener did not become ready: {}",
+            last_error.unwrap_or_else(|| "no connection attempt completed".to_string())
+        )
+    });
+    let info = next_websocket_text(&mut websocket).await;
+    assert!(info.starts_with("INFO "), "{info:?}");
+    websocket
+        .send(Message::text(
+            "CONN {\"durable_id\":\"ws-test\",\"verbose\":false}\r\n",
+        ))
+        .await
+        .unwrap();
+    websocket
+        .send(Message::text("SUB orders/* sid1\r\n"))
+        .await
+        .unwrap();
+    websocket
+        .send(Message::text("PUB orders/created 5\r\nhello\r\n"))
+        .await
+        .unwrap();
+    assert!(
+        next_websocket_text(&mut websocket)
+            .await
+            .contains("DELIVER orders/created sid1")
+    );
+
+    server_task.abort();
+}
+
+async fn next_websocket_text(
+    websocket: &mut tokio_tungstenite::WebSocketStream<TcpStream>,
+) -> String {
+    loop {
+        match websocket.next().await.unwrap().unwrap() {
+            Message::Text(text) => return text.to_string(),
+            Message::Binary(bytes) => return String::from_utf8(bytes.to_vec()).unwrap(),
+            Message::Ping(_) | Message::Pong(_) => {}
+            Message::Close(_) => panic!("WebSocket closed unexpectedly"),
+            Message::Frame(_) => {}
+        }
     }
 }
 fn test_outbound_queue(

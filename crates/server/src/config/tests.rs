@@ -17,6 +17,7 @@ fn uses_defaults_when_no_config_path_is_supplied() {
     assert_eq!(config.wal_dir, PathBuf::from("./morrow-wal"));
     assert_eq!(config.max_payload, 1_048_576);
     assert!(config.http_listen.is_none());
+    assert!(config.websocket.is_none());
     assert!(config.tls.is_none());
     assert!(!config.auth.enabled);
     assert!(config.cluster.is_none());
@@ -27,6 +28,11 @@ fn parses_json_config() {
     let value = serde_json::json!({
         "listen": "127.0.0.1:4223",
         "http_listen": "127.0.0.1:8223",
+        "websocket": {
+            "listen": "127.0.0.1:8080",
+            "tls": null,
+            "allowed_origins": ["http://localhost:3000"]
+        },
         "admin_token": "admin-secret",
         "wal_dir": "./target/test-wal-config",
         "wal_segment_bytes": 4096,
@@ -46,6 +52,14 @@ fn parses_json_config() {
     let config = Config::from_json(&value).unwrap();
     assert_eq!(config.listen, "127.0.0.1:4223".parse().unwrap());
     assert_eq!(config.http_listen, Some("127.0.0.1:8223".parse().unwrap()));
+    assert_eq!(
+        config.websocket.as_ref().map(|websocket| websocket.listen),
+        Some("127.0.0.1:8080".parse().unwrap())
+    );
+    assert_eq!(
+        config.websocket.as_ref().unwrap().allowed_origins,
+        vec!["http://localhost:3000"]
+    );
     assert_eq!(config.admin_token.as_deref(), Some("admin-secret"));
     assert_eq!(config.wal_dir, PathBuf::from("./target/test-wal-config"));
     assert_eq!(config.wal_segment_bytes, 4096);

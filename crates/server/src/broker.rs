@@ -89,6 +89,7 @@ mod route_tls;
 mod state;
 mod subject_helpers;
 mod wal_runtime;
+mod websocket;
 
 pub use self::broker::Morrow;
 #[allow(unused_imports)]

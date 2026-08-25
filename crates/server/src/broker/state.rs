@@ -410,6 +410,13 @@ pub(super) struct ClusterApplicationMetrics {
 
 #[derive(Debug, Default)]
 pub(super) struct BrokerMetrics {
+    pub(super) websocket_connections: AtomicU64,
+    pub(super) websocket_connections_total: AtomicU64,
+    pub(super) websocket_messages_received_total: AtomicU64,
+    pub(super) websocket_messages_sent_total: AtomicU64,
+    pub(super) websocket_bytes_received_total: AtomicU64,
+    pub(super) websocket_bytes_sent_total: AtomicU64,
+    pub(super) websocket_errors_total: AtomicU64,
     pub(super) publishes_total: AtomicU64,
     pub(super) published_bytes_total: AtomicU64,
     pub(super) rejected_operations_total: AtomicU64,
