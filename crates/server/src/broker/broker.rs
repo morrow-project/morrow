@@ -78,6 +78,7 @@ pub struct Morrow {
     pub(super) hooks: BrokerHooks,
     pub(super) transactions: Arc<Mutex<crate::transaction::TransactionCoordinator>>,
     pub(super) views: Arc<Mutex<HashMap<String, ViewRuntime>>>,
+    pub(super) reassignment: Arc<Mutex<crate::reassignment::ReassignmentController>>,
 }
 
 impl Morrow {
