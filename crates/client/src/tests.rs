@@ -13,6 +13,7 @@ async fn keyed_qos_publish_encodes_partition_key_and_waits_for_commit_ack() {
         durable: true,
         push_credit_messages: 1,
         pending_messages: VecDeque::new(),
+        ack_contract_version: None,
     };
     let server = tokio::spawn(async move {
         let mut server = tokio::io::BufReader::new(server_io);
@@ -60,6 +61,7 @@ async fn ping_roundtrip_buffers_delivery_that_arrives_before_pong() {
         durable: true,
         push_credit_messages: 1,
         pending_messages: VecDeque::new(),
+        ack_contract_version: None,
     };
     let server = tokio::spawn(async move {
         let mut server = tokio::io::BufReader::new(server_io);
@@ -158,8 +160,25 @@ async fn parses_producer_ack_frame() {
             offset: None,
             partitioning_epoch: None,
             leader_epoch: None,
+            ack_contract_version: None,
         })
     );
+}
+
+#[tokio::test]
+async fn parses_negotiated_ack_contract_without_position() {
+    let (_writer, reader) = tokio::io::duplex(64);
+    let mut reader = BufReader::new(Box::new(reader) as Box<dyn ClientStream>);
+    let frame = parse_frame(&mut reader, "P-ACK msg-1 1 OK true 42 contract=1", 1024)
+        .await
+        .unwrap()
+        .unwrap();
+    let ServerFrame::ProducerAck(ack) = frame else {
+        panic!("expected producer ack");
+    };
+    assert_eq!(ack.level, protocol::AckLevel::Durable);
+    assert_eq!(ack.ack_contract_version, Some(1));
+    assert!(ack.stream.is_none());
 }
 
 #[tokio::test]

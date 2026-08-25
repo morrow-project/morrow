@@ -38,6 +38,8 @@ pub(super) struct BenchmarkResult {
     ack: bool,
     requested_ack_level: Option<String>,
     observed_ack_level: Option<String>,
+    ack_contract_version: Option<u16>,
+    requested_ack_contract_version: Option<u16>,
     publish_messages_per_second: f64,
     delivery_messages_per_second: f64,
     publish_latency_us: Percentiles,
@@ -75,6 +77,7 @@ pub(super) async fn run_pubsub(
     let publishers_remaining = Arc::new(AtomicU64::new(publisher_tasks as u64));
     let publish_latencies = Arc::new(Mutex::new(Vec::new()));
     let observed_ack_level = Arc::new(Mutex::new(None));
+    let observed_ack_contract = Arc::new(Mutex::new(None));
     let observed_ack_mismatch = Arc::new(AtomicBool::new(false));
     let start_barrier = Arc::new(Barrier::new(publisher_tasks + options.subscribers));
 
@@ -159,13 +162,17 @@ pub(super) async fn run_pubsub(
         let publishers_remaining = publishers_remaining.clone();
         let publish_latencies = publish_latencies.clone();
         let observed_ack_level = observed_ack_level.clone();
+        let observed_ack_contract = observed_ack_contract.clone();
         let observed_ack_mismatch = observed_ack_mismatch.clone();
         let payload_size = options.payload_size;
         let messages = options.messages.map(|messages| messages as u64);
         let deadline = deadline;
         let ack_level = options.ack_level;
         publishers.push(tokio::spawn(async move {
-            let options = config.client_options_for(&format!("bench-pub-{index}"))?;
+            let mut options = config.client_options_for(&format!("bench-pub-{index}"))?;
+            if ack_level.is_some() {
+                options.ack_contract_version = Some(client::protocol::model::ACK_CONTRACT_VERSION);
+            }
             let mut client = Client::connect_with_options(&options).await?;
             barrier.wait().await;
             loop {
@@ -191,6 +198,7 @@ pub(super) async fn run_pubsub(
                         )
                         .await?;
                     let mut observed = observed_ack_level.lock().await;
+                    *observed_ack_contract.lock().await = producer_ack.ack_contract_version;
                     if let Some(previous) = *observed {
                         if previous != producer_ack.level {
                             observed_ack_mismatch.store(true, Ordering::Release);
@@ -250,6 +258,11 @@ pub(super) async fn run_pubsub(
                 .unwrap_or_else(|| "none".to_string())
         }
     });
+    let ack_contract_version = Arc::try_unwrap(observed_ack_contract)
+        .map_err(|_| {
+            CliError::msg("benchmark acknowledgement contract collection is still in use")
+        })?
+        .into_inner();
     let expected_received = messages_published * options.subscribers as u64;
     if messages_received != expected_received || duplicates != 0 {
         return Err(CliError::msg(format!(
@@ -274,6 +287,10 @@ pub(super) async fn run_pubsub(
         ack: options.ack,
         requested_ack_level: options.ack_level.map(ack_level_name),
         observed_ack_level,
+        ack_contract_version,
+        requested_ack_contract_version: options
+            .ack_level
+            .map(|_| client::protocol::model::ACK_CONTRACT_VERSION),
         publish_messages_per_second: messages_published as f64 * 1_000.0 / elapsed_ms as f64,
         delivery_messages_per_second: messages_received as f64 * 1_000.0 / elapsed_ms as f64,
         publish_latency_us: percentiles(&mut publish_latencies),
@@ -298,9 +315,11 @@ impl BenchmarkResult {
             self.payload_size, self.publishers, self.subscribers, self.concurrency, self.ack
         );
         println!(
-            "publish acknowledgement: requested={} observed={}",
+            "publish acknowledgement: requested={} observed={} contract={}",
             self.requested_ack_level.as_deref().unwrap_or("none"),
-            self.observed_ack_level.as_deref().unwrap_or("none")
+            self.observed_ack_level.as_deref().unwrap_or("none"),
+            self.ack_contract_version
+                .map_or_else(|| "legacy".to_string(), |version| version.to_string())
         );
         print_percentiles("publish latency", &self.publish_latency_us);
         print_percentiles("end-to-end latency", &self.end_to_end_latency_us);

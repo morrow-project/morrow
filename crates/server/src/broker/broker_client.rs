@@ -11,6 +11,7 @@ impl Morrow {
                     ack_timeout_ms,
                     max_in_flight,
                     protocol_version,
+                    ack_contract_version,
                     auth,
                 } => {
                     self.configure_client(
@@ -20,6 +21,7 @@ impl Morrow {
                         ack_timeout_ms,
                         max_in_flight,
                         protocol_version,
+                        ack_contract_version,
                         auth,
                     )
                     .await
@@ -234,6 +236,7 @@ impl Morrow {
                 ack_timeout_ms: DEFAULT_ACK_TIMEOUT_MS,
                 max_in_flight: DEFAULT_MAX_IN_FLIGHT,
                 protocol_version: 1,
+                ack_contract_version: None,
                 quota_tenant: crate::quota::DEFAULT_TENANT.to_string(),
                 quota_usage,
             },
@@ -250,6 +253,7 @@ impl Morrow {
         ack_timeout_ms: Option<u64>,
         max_in_flight: Option<usize>,
         protocol_version: Option<u32>,
+        ack_contract_version: Option<u16>,
         auth: Option<ConnectAuth>,
     ) -> Result<()> {
         let ack_timeout_ms = ack_timeout_ms.unwrap_or(DEFAULT_ACK_TIMEOUT_MS);
@@ -276,6 +280,11 @@ impl Morrow {
         crate::broker_ensure!(
             matches!(protocol_version, 1 | 2),
             "unsupported protocol version {protocol_version}; supported versions are 1 and 2"
+        );
+        crate::broker_ensure!(
+            ack_contract_version
+                .is_none_or(|version| version == protocol::model::ACK_CONTRACT_VERSION),
+            "unsupported acknowledgement contract version"
         );
         let mut connections = self.connections.lock().await;
         let client = connections
@@ -359,6 +368,7 @@ impl Morrow {
         client.ack_timeout_ms = ack_timeout_ms;
         client.max_in_flight = max_in_flight;
         client.protocol_version = protocol_version;
+        client.ack_contract_version = ack_contract_version;
         client.quota_tenant = quota_tenant.to_string();
         client.configured = true;
         Ok(())

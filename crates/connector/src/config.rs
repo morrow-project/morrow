@@ -110,6 +110,7 @@ impl ConnectorConfig {
             verbose: false,
             ack_timeout_ms: 30_000,
             max_in_flight: 256,
+            ack_contract_version: None,
         };
         let mut client = Client::connect_with_options(&options)
             .await

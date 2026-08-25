@@ -49,6 +49,18 @@ The aggregate server metric `morrow_publish_latency_us` is a diagnostic
 cross-check; it must not replace the per-level black-box SLI because it has no
 QoS or payload-size labels.
 
+### Acknowledgement contract negotiation
+
+The legacy numeric levels remain unchanged for clients that omit
+`ack_contract_version` in `CONN`. New clients must first observe
+`ack_contract_versions` in `INFO`, request a supported version explicitly, and
+record the `contract=<version>` token returned with each producer acknowledgement.
+The server rejects an unsupported version; it never silently downgrades a
+requested durability promise. During a rolling upgrade, keep legacy clients on
+the legacy contract and enable the negotiated contract only after every broker
+advertises the same version. Roll back by reconnecting without the field; no
+acknowledged message may be interpreted under a different contract.
+
 | Ack level | Pilot p99 target (small / medium / large) | Future GA p99 target (small / medium / large) | Error budget |
 | --- | --- | --- | ---: |
 | Accepted | 50 / 100 / 250 ms | 25 / 50 / 125 ms | 5% / 1% of samples |

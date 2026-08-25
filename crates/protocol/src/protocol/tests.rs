@@ -227,6 +227,7 @@ async fn parses_connect_durable_metadata() {
             ack_timeout_ms: Some(25),
             max_in_flight: Some(7),
             protocol_version: Some(2),
+            ack_contract_version: None,
             auth: None,
         }
     );
@@ -248,6 +249,7 @@ async fn parses_connect_client_auth() {
             ack_timeout_ms: None,
             max_in_flight: None,
             protocol_version: None,
+            ack_contract_version: None,
             auth: Some(ConnectAuth {
                 client_id: "client1".into(),
                 signature: "1234".into(),

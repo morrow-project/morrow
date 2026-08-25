@@ -21,6 +21,7 @@ pub struct Client {
     durable: bool,
     push_credit_messages: usize,
     pending_messages: VecDeque<Message>,
+    pub(crate) ack_contract_version: Option<u16>,
 }
 #[derive(Debug, Clone)]
 pub struct ClientOptions {
@@ -32,6 +33,8 @@ pub struct ClientOptions {
     pub verbose: bool,
     pub ack_timeout_ms: u64,
     pub max_in_flight: usize,
+    /// Optional negotiated producer acknowledgement contract. `None` keeps the legacy wire contract.
+    pub ack_contract_version: Option<u16>,
 }
 #[derive(Debug, Clone)]
 pub struct ClientTlsOptions {
@@ -47,6 +50,7 @@ pub struct Info {
     pub protocol_versions: Vec<u32>,
     pub encodings: Vec<protocol::WireEncoding>,
     pub features: Vec<String>,
+    pub ack_contract_versions: Vec<u16>,
     pub max_frame_size: usize,
     pub max_metadata_size: usize,
     pub max_payload_size: usize,
@@ -75,6 +79,7 @@ pub struct ProducerAck {
     pub offset: Option<u64>,
     pub partitioning_epoch: Option<u64>,
     pub leader_epoch: Option<u64>,
+    pub ack_contract_version: Option<u16>,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DurableMessage {
