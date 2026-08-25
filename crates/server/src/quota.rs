@@ -10,6 +10,22 @@ use crate::config::ResourceQuotaConfig;
 
 pub(crate) const DEFAULT_TENANT: &str = "default";
 
+pub(crate) fn persistent_record_bytes(envelope: &crate::partition_log::MessageEnvelope) -> u64 {
+    let headers = envelope.headers.iter().fold(0usize, |total, header| {
+        total
+            .saturating_add(header.name.len())
+            .saturating_add(header.value.len())
+    });
+    128u64
+        .saturating_add(envelope.namespace.len() as u64)
+        .saturating_add(envelope.stream.as_str().len() as u64)
+        .saturating_add(envelope.subject.len() as u64)
+        .saturating_add(envelope.key.as_ref().map_or(0, Vec::len) as u64)
+        .saturating_add(headers as u64)
+        .saturating_add(envelope.reply_to.as_ref().map_or(0, String::len) as u64)
+        .saturating_add(envelope.payload.len() as u64)
+}
+
 #[derive(Clone)]
 pub(crate) struct QuotaRuntime {
     limits: ResourceQuotaConfig,

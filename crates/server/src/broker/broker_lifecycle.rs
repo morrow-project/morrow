@@ -79,6 +79,7 @@ impl Morrow {
             .into_iter()
             .map(|envelope| (envelope.legacy_seq, envelope))
             .collect::<HashMap<_, _>>();
+        let recovered_envelopes = envelope_by_seq.values().cloned().collect::<Vec<_>>();
         let compaction_latest = reconcile_replayed_compaction(
             &mut replay,
             envelope_by_seq,
@@ -214,6 +215,48 @@ impl Morrow {
                     max_tasks: limits.max_tasks,
                     max_background_tasks: limits.max_background_tasks,
                 },
+            );
+        }
+        for record in &recovered_envelopes {
+            let tenant = config
+                .tenant_quotas
+                .keys()
+                .find(|tenant| record.subject.starts_with(&format!("{tenant}.")))
+                .map_or(crate::quota::DEFAULT_TENANT, String::as_str);
+            let bytes = crate::quota::persistent_record_bytes(record);
+            if bytes > 0 {
+                crate::broker_ensure!(
+                    tenant_quotas.try_reserve(
+                        tenant,
+                        crate::quota::TenantQuotaUsage {
+                            disk_bytes: bytes,
+                            ..Default::default()
+                        }
+                    ),
+                    "tenant durable disk quota exceeded while rebuilding usage"
+                );
+            }
+        }
+        for consumer in consumers.values() {
+            let tenant = config
+                .tenant_quotas
+                .keys()
+                .find(|tenant| {
+                    consumer
+                        .record
+                        .filter_subject
+                        .starts_with(&format!("{tenant}."))
+                })
+                .map_or(crate::quota::DEFAULT_TENANT, String::as_str);
+            crate::broker_ensure!(
+                tenant_quotas.try_reserve(
+                    tenant,
+                    crate::quota::TenantQuotaUsage {
+                        background_tasks: 1,
+                        ..Default::default()
+                    }
+                ),
+                "tenant background task quota exceeded while rebuilding usage"
             );
         }
         let policy = Arc::new(crate::tenancy::PolicyStore::default());

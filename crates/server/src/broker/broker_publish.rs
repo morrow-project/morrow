@@ -257,7 +257,7 @@ impl Morrow {
             crate::broker_bail!("CLUSTER_DURABLE requires clustered mode");
         }
 
-        let (transient_deliveries, route_interest_changes, verbose, namespace) = {
+        let (transient_deliveries, route_interest_changes, verbose, namespace, quota_tenant) = {
             let connections = self.connections.lock().await;
             let client = connections.clients.get(&publisher_id);
             let verbose = client
@@ -266,6 +266,9 @@ impl Morrow {
             let namespace = client
                 .and_then(|client| client.durable_id.clone())
                 .unwrap_or_else(|| DEFAULT_NAMESPACE.to_string());
+            let quota_tenant = client
+                .map(|client| client.quota_tenant.clone())
+                .unwrap_or_else(|| crate::quota::DEFAULT_TENANT.to_string());
             let (deliveries, route_interest_changes) =
                 self.transient.lock().await.prepare_transient_deliveries(
                     &connections,
@@ -274,7 +277,13 @@ impl Morrow {
                     &headers,
                     &payload,
                 );
-            (deliveries, route_interest_changes, verbose, namespace)
+            (
+                deliveries,
+                route_interest_changes,
+                verbose,
+                namespace,
+                quota_tenant,
+            )
         };
         for delivery in transient_deliveries {
             let _ = delivery.sender.send(delivery.frame).await;
@@ -313,6 +322,27 @@ impl Morrow {
             return Ok(());
         }
         let stream = stream.unwrap();
+
+        let disk_bytes = 128u64
+            .saturating_add(namespace.len() as u64)
+            .saturating_add(stream.name.as_str().len() as u64)
+            .saturating_add(subject_name.len() as u64)
+            .saturating_add(key.as_ref().map_or(0, Vec::len) as u64)
+            .saturating_add(headers.iter().fold(0usize, |total, (name, value)| {
+                total.saturating_add(name.len()).saturating_add(value.len())
+            }) as u64)
+            .saturating_add(reply_to.as_ref().map_or(0, String::len) as u64)
+            .saturating_add(payload.len() as u64);
+        crate::broker_ensure!(
+            self.tenant_quotas.try_reserve(
+                &quota_tenant,
+                crate::quota::TenantQuotaUsage {
+                    disk_bytes,
+                    ..Default::default()
+                }
+            ),
+            "tenant durable disk quota exceeded"
+        );
 
         if let (Some(producer), Some(fingerprint)) =
             (producer_sequence.as_ref(), producer_fingerprint)
@@ -359,10 +389,23 @@ impl Morrow {
                 legacy_seq: seq,
             };
             let fsync = ack.is_none_or(|ack| ack.level == protocol::AckLevel::HighDurability);
-            let envelope = cluster
+            let envelope = match cluster
                 .replicate_partition(envelope, fsync)
                 .instrument(tracing::info_span!("morrow.cluster.commit"))
-                .await?;
+                .await
+            {
+                Ok(envelope) => envelope,
+                Err(error) => {
+                    self.tenant_quotas.release(
+                        &quota_tenant,
+                        crate::quota::TenantQuotaUsage {
+                            disk_bytes,
+                            ..Default::default()
+                        },
+                    );
+                    return Err(error);
+                }
+            };
             cluster.enforce_retention(self.hooks.clock.now_ms())?;
             self.apply_cluster_partition(envelope.clone()).await?;
             let _storage_operation = self.storage_gate.read().await;
@@ -435,13 +478,38 @@ impl Morrow {
                 .acquire_owned()
                 .await
                 .map_err(|_| BrokerError::msg("storage worker pool closed"))?;
-            let envelope = tokio::task::spawn_blocking(move || {
+            let append_result = tokio::task::spawn_blocking(move || {
                 let _permit = permit;
                 partition_logs.append_envelope(pending_envelope)
             })
             .instrument(tracing::info_span!("morrow.partition.write"))
-            .await
-            .map_err(|err| BrokerError::with_source("partition append worker failed", err))??;
+            .await;
+            let envelope = match append_result {
+                Ok(Ok(envelope)) => envelope,
+                Ok(Err(error)) => {
+                    self.tenant_quotas.release(
+                        &quota_tenant,
+                        crate::quota::TenantQuotaUsage {
+                            disk_bytes,
+                            ..Default::default()
+                        },
+                    );
+                    return Err(error);
+                }
+                Err(error) => {
+                    self.tenant_quotas.release(
+                        &quota_tenant,
+                        crate::quota::TenantQuotaUsage {
+                            disk_bytes,
+                            ..Default::default()
+                        },
+                    );
+                    return Err(BrokerError::with_source(
+                        "partition append worker failed",
+                        error,
+                    ));
+                }
+            };
             self.metrics
                 .partition_writes_total
                 .fetch_add(1, Ordering::Relaxed);

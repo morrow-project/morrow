@@ -86,13 +86,41 @@ impl Morrow {
             !self.inner.lock().await.consumers.contains_key(&consumer_id),
             "consumer already exists"
         );
+        let quota_tenant = self
+            .connections
+            .lock()
+            .await
+            .clients
+            .get(&connection_id)
+            .map(|client| client.quota_tenant.clone())
+            .ok_or_else(|| BrokerError::msg("unknown connection"))?;
+        if !self.tenant_quotas.try_reserve(
+            &quota_tenant,
+            crate::quota::TenantQuotaUsage {
+                background_tasks: 1,
+                ..Default::default()
+            },
+        ) {
+            crate::broker_bail!("tenant background task quota exceeded");
+        }
 
         if let Some(cluster) = self.cluster_runtime().await {
-            self.cluster_write(
-                &cluster,
-                BrokerCommand::CursorConsumerUpsert { record, cursors },
-            )
-            .await?;
+            if let Err(error) = self
+                .cluster_write(
+                    &cluster,
+                    BrokerCommand::CursorConsumerUpsert { record, cursors },
+                )
+                .await
+            {
+                self.tenant_quotas.release(
+                    &quota_tenant,
+                    crate::quota::TenantQuotaUsage {
+                        background_tasks: 1,
+                        ..Default::default()
+                    },
+                );
+                return Err(error);
+            }
         } else {
             let mut inner = self.inner.lock().await;
             crate::broker_ensure!(
@@ -160,6 +188,22 @@ impl Morrow {
             self.wal.flush_due().await?;
         }
         self.pull_waiters.cancel_consumer(&consumer_id);
+        let quota_tenant = self
+            .connections
+            .lock()
+            .await
+            .clients
+            .get(&connection_id)
+            .map(|client| client.quota_tenant.clone());
+        if let Some(quota_tenant) = quota_tenant {
+            self.tenant_quotas.release(
+                &quota_tenant,
+                crate::quota::TenantQuotaUsage {
+                    background_tasks: 1,
+                    ..Default::default()
+                },
+            );
+        }
         self.send_to(connection_id, protocol::consumer_ok("DELETE", &name))
             .await
     }
