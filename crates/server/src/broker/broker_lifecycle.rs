@@ -198,11 +198,24 @@ impl Morrow {
         let tenant_quotas =
             crate::quota::TenantQuotaRuntime::new(crate::quota::TenantQuotaLimits {
                 max_connections: config.quotas.max_connections,
-                max_memory_bytes: config.quotas.max_outbound_bytes_per_connection as u64,
+                max_memory_bytes: (config.quotas.max_outbound_bytes_per_connection as u64)
+                    .saturating_mul(config.quotas.max_connections as u64),
                 max_disk_bytes: u64::MAX,
                 max_tasks: config.quotas.max_durable_consumers,
                 max_background_tasks: config.quotas.max_transient_subscriptions,
             });
+        for (tenant, limits) in &config.tenant_quotas {
+            tenant_quotas.set_tenant_limits(
+                tenant,
+                crate::quota::TenantQuotaLimits {
+                    max_connections: limits.max_connections,
+                    max_memory_bytes: limits.max_memory_bytes,
+                    max_disk_bytes: limits.max_disk_bytes,
+                    max_tasks: limits.max_tasks,
+                    max_background_tasks: limits.max_background_tasks,
+                },
+            );
+        }
         let policy = Arc::new(crate::tenancy::PolicyStore::default());
         let audit = Arc::new(std::sync::Mutex::new(crate::tenancy::AuditLog::open(
             config.wal_dir.join("audit.log"),
@@ -1086,6 +1099,7 @@ impl Morrow {
                 .config
                 .quotas
                 .max_outbound_bytes_per_connection,
+            tenant_quotas: self.tenant_quotas.status_snapshot(),
         }
     }
 
@@ -1114,18 +1128,7 @@ impl Morrow {
     }
 
     pub(super) fn spawn_accepted(&self, stream: TcpStream) {
-        const DEFAULT_TENANT: &str = "default";
-        if !self.tenant_quotas.try_connection(DEFAULT_TENANT) {
-            tokio::spawn(async move {
-                let mut stream = stream;
-                let _ = stream
-                    .write_all(&protocol::err("tenant connection quota exceeded"))
-                    .await;
-            });
-            return;
-        }
         let Some(permit) = self.quotas.try_client() else {
-            self.tenant_quotas.release_connection(DEFAULT_TENANT);
             tokio::spawn(async move {
                 let mut stream = stream;
                 let _ = stream
@@ -1140,7 +1143,6 @@ impl Morrow {
             if let Err(err) = broker.handle_accepted(stream).await {
                 error!(error = ?err, "client error");
             }
-            broker.tenant_quotas.release_connection(DEFAULT_TENANT);
         });
     }
 

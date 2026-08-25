@@ -20,6 +20,7 @@ pub struct Config {
     pub admin_token: Option<String>,
     pub admin_tls: Option<TlsConfig>,
     pub quotas: ResourceQuotaConfig,
+    pub tenant_quotas: HashMap<String, TenantQuotaConfig>,
     pub wal_dir: PathBuf,
     pub encryption_key_dir: Option<PathBuf>,
     pub encryption_active_key_version: u32,
@@ -71,6 +72,14 @@ pub struct ResourceQuotaConfig {
     pub max_route_connections: usize,
     pub client_idle_timeout_ms: u64,
     pub http_header_timeout_ms: u64,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TenantQuotaConfig {
+    pub max_connections: usize,
+    pub max_memory_bytes: u64,
+    pub max_disk_bytes: u64,
+    pub max_tasks: usize,
+    pub max_background_tasks: usize,
 }
 #[derive(Debug, Clone, Default)]
 pub struct AuthConfig {
@@ -179,6 +188,7 @@ impl Config {
         let admin_token = get_secret(value, "admin_token", "admin_token_file")?;
         let admin_tls = get_named_tls_config(value, "admin_tls")?;
         let quotas = get_resource_quotas(value)?;
+        let tenant_quotas = get_tenant_quotas(value)?;
         let wal_dir = PathBuf::from(get_string(value, "wal_dir")?.unwrap_or("./morrow-wal"));
         let encryption_key_dir = get_string(value, "encryption_key_dir")?.map(PathBuf::from);
         let encryption_active_key_version = get_u64(value, "encryption_active_key_version")?
@@ -214,6 +224,7 @@ impl Config {
             admin_token,
             admin_tls,
             quotas,
+            tenant_quotas,
             wal_dir,
             encryption_key_dir,
             encryption_active_key_version,
@@ -656,7 +667,7 @@ use cluster_config::get_cluster_config;
 
 #[path = "config/quota_config.rs"]
 mod quota_config;
-use quota_config::get_resource_quotas;
+use quota_config::{get_resource_quotas, get_tenant_quotas};
 
 impl From<OsString> for BrokerError {
     fn from(value: OsString) -> Self {

@@ -21,8 +21,10 @@ does not require a restart.
 - Audit records form an append-only SHA-256 chain. Verification checks sequence,
   links, and event hashes, detecting deletion, modification, insertion, and
   reordering.
-- Tenant quota accounting bounds connections, memory, disk, foreground tasks,
-  and background tasks independently of global listener quotas.
+- Tenant quota configuration defines independent connection, memory, disk,
+  foreground-task, and background-task budgets. Connection admission and
+  authenticated-tenant transfer are enforced today; the other dimensions are
+  reported as reserved budget until their owning allocation paths opt in.
 
 ## Operational threat model
 
@@ -42,6 +44,10 @@ the broker, set `encryption_key_dir` to a directory containing exact
 `encryption_active_key_version`; startup then passes one key ring to both WAL
 and partition-log recovery and append paths. The key directory contains key
 material and must be protected separately from the broker configuration.
+
+Tenant quota usage is node-local. It is not a cluster-wide aggregate unless a
+deployment applies the same limits and aggregates usage externally; replicated
+data does not make admission counters globally consistent.
 
 Break-glass access is explicitly out of band: an operator must use a separate
 identity, a tenant-scoped policy snapshot, and an audited change window. The

@@ -162,6 +162,34 @@ fn listener_semaphores_bound_connection_floods_and_release() {
     }
 }
 
+#[test]
+fn tenant_connection_transfer_is_bounded_and_reversible() {
+    let runtime = crate::quota::TenantQuotaRuntime::new(crate::quota::TenantQuotaLimits {
+        max_connections: 10,
+        max_memory_bytes: u64::MAX,
+        max_disk_bytes: u64::MAX,
+        max_tasks: 100,
+        max_background_tasks: 100,
+    });
+    runtime.set_tenant_limits(
+        "tenant-a",
+        crate::quota::TenantQuotaLimits {
+            max_connections: 1,
+            max_memory_bytes: u64::MAX,
+            max_disk_bytes: u64::MAX,
+            max_tasks: 100,
+            max_background_tasks: 100,
+        },
+    );
+    assert!(runtime.try_connection(crate::quota::DEFAULT_TENANT));
+    assert!(runtime.transfer_connection(crate::quota::DEFAULT_TENANT, "tenant-a"));
+    assert!(!runtime.try_connection("tenant-a"));
+    assert_eq!(runtime.snapshot()["default"].connections, 0);
+    assert_eq!(runtime.snapshot()["tenant-a"].connections, 1);
+    runtime.release_connection("tenant-a");
+    assert_eq!(runtime.snapshot()["tenant-a"].connections, 0);
+}
+
 #[tokio::test]
 async fn configured_idle_client_is_closed_at_deadline() {
     let mut limits = quotas();

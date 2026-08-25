@@ -17,6 +17,7 @@
     "client_idle_timeout_ms": 300000,
     "http_header_timeout_ms": 5000
   },
+  "tenant_quotas": {},
   "wal_dir": "./morrow-wal",
   "wal_segment_bytes": 67108864,
   "fsync_interval_ms": 5,

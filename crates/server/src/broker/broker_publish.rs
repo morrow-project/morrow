@@ -710,17 +710,46 @@ impl Morrow {
     pub(super) async fn remove_client(&self, connection_id: u64) -> Result<()> {
         self.pull_waiters.cancel_connection(connection_id);
         self.group_sessions.lock().await.remove(&connection_id);
-        self.connections.lock().await.clients.remove(&connection_id);
-        let route_interest_changes = self
-            .transient
-            .lock()
-            .await
-            .remove_connection_interests(connection_id);
+        let removed_client = self.connections.lock().await.clients.remove(&connection_id);
+        if let Some(client) = &removed_client {
+            self.tenant_quotas
+                .release(&client.quota_tenant, client.quota_usage);
+        }
+        let (route_interest_changes, transient_task_count) = {
+            let mut transient = self.transient.lock().await;
+            let count = transient
+                .subscriptions
+                .keys()
+                .filter(|(client_id, _)| *client_id == connection_id)
+                .count();
+            (transient.remove_connection_interests(connection_id), count)
+        };
+        if let Some(client) = &removed_client {
+            self.tenant_quotas.release(
+                &client.quota_tenant,
+                crate::quota::TenantQuotaUsage {
+                    tasks: transient_task_count,
+                    ..Default::default()
+                },
+            );
+        }
         let mut inner = self.inner.lock().await;
+        let mut durable_task_count = 0;
         for consumer in inner.consumers.values_mut() {
-            consumer.members.remove(&connection_id);
+            if consumer.members.remove(&connection_id).is_some() {
+                durable_task_count += 1;
+            }
         }
         drop(inner);
+        if let Some(client) = &removed_client {
+            self.tenant_quotas.release(
+                &client.quota_tenant,
+                crate::quota::TenantQuotaUsage {
+                    tasks: durable_task_count,
+                    ..Default::default()
+                },
+            );
+        }
         self.update_route_interests(route_interest_changes).await;
         Ok(())
     }
