@@ -279,6 +279,7 @@ impl Morrow {
             cluster_application_metrics: Arc::new(ClusterApplicationMetrics::default()),
             metrics: Arc::new(BrokerMetrics::default()),
             storage_failure: Arc::new(AtomicBool::new(false)),
+            shutting_down: Arc::new(AtomicBool::new(false)),
             redelivery_notify: Arc::new(Notify::new()),
             pull_waiters: PullWaiterRegistry::default(),
             compaction_running: Arc::new(AtomicBool::new(false)),
@@ -304,6 +305,9 @@ impl Morrow {
         listener: TcpListener,
         handle_shutdown: bool,
     ) -> Result<()> {
+        #[cfg(unix)]
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .context("installing SIGTERM handler")?;
         let http_listener = match self.config.http_listen {
             Some(listen) => Some(
                 TcpListener::bind(listen)
@@ -361,8 +365,21 @@ impl Morrow {
                     accepted = listener.accept() => {
                         self.spawn_accepted(accepted.context("accepting client connection")?.0);
                     }
-                    signal = tokio::signal::ctrl_c() => {
+                    signal = async {
+                        #[cfg(unix)]
+                        {
+                            tokio::select! {
+                                signal = tokio::signal::ctrl_c() => signal,
+                                _ = sigterm.recv() => Ok(()),
+                            }
+                        }
+                        #[cfg(not(unix))]
+                        {
+                            tokio::signal::ctrl_c().await
+                        }
+                    } => {
                         signal.context("waiting for shutdown signal")?;
+                        self.shutting_down.store(true, Ordering::Release);
                         self.shutdown().await?;
                         return Ok(());
                     }
@@ -378,6 +395,7 @@ impl Morrow {
     }
 
     pub async fn shutdown(&self) -> Result<()> {
+        self.shutting_down.store(true, Ordering::Release);
         self.pull_waiters.shutdown();
         let _shutdown = self.storage_gate.write().await;
         let inner = self.inner.lock().await;
@@ -449,7 +467,9 @@ impl Morrow {
         } else {
             false
         };
-        let (status, reason) = if self.storage_failure.load(Ordering::Relaxed) {
+        let (status, reason) = if self.shutting_down.load(Ordering::Acquire) {
+            ("degraded", Some("shutting_down"))
+        } else if self.storage_failure.load(Ordering::Relaxed) {
             ("degraded", Some("storage_failure"))
         } else if route_degraded {
             ("degraded", Some("route_degraded"))

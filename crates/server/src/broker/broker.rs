@@ -27,6 +27,7 @@ pub struct Morrow {
     pub(super) cluster_application_metrics: Arc<ClusterApplicationMetrics>,
     pub(super) metrics: Arc<BrokerMetrics>,
     pub(super) storage_failure: Arc<AtomicBool>,
+    pub(super) shutting_down: Arc<AtomicBool>,
     pub(super) redelivery_notify: Arc<Notify>,
     pub(super) pull_waiters: PullWaiterRegistry,
     pub(super) compaction_running: Arc<AtomicBool>,

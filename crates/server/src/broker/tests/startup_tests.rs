@@ -17,3 +17,15 @@ async fn configured_http_listener_bind_failure_fails_server_startup() {
         .expect_err("startup should fail when the configured HTTP listener is occupied");
     assert!(error.to_string().contains("HTTP status listener"));
 }
+
+#[tokio::test]
+async fn shutdown_marks_readiness_unavailable_before_cleanup() {
+    let dir = TempDir::new().unwrap();
+    let broker = Morrow::open(test_config(dir.path())).unwrap();
+
+    broker.shutdown().await.unwrap();
+
+    let health = broker.health_response().await;
+    assert_eq!(health.status, "degraded");
+    assert_eq!(health.reason, Some("shutting_down"));
+}

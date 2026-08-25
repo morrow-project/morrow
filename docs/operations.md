@@ -89,6 +89,19 @@ listeners in a cluster. Do not enable
 
 ## Administration
 
+### Process shutdown
+
+`morrow-server` treats SIGINT and SIGTERM as the same graceful shutdown
+request. Readiness reports `503` with reason `shutting_down` before the broker
+stops accepting new client connections. The shutdown path cancels pull waiters,
+flushes partition logs, checkpoints the control WAL, and flushes the WAL before
+the process exits; a storage error is returned as a non-zero process result.
+
+Service managers should send SIGTERM and wait for the service stop timeout
+before forcefully terminating the process. Keep the process's WAL and
+partition directories on persistent storage so a subsequent start can replay
+the checkpoint and recover durable state.
+
 When `http_listen` is configured, the admin listener exposes two health
 endpoints that do not require the admin bearer token:
 
