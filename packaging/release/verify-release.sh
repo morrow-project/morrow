@@ -3,8 +3,8 @@ set -euo pipefail
 
 dist_dir="${1:?usage: verify-release.sh DIST VERSION}"
 version="${2:?usage: verify-release.sh DIST VERSION}"
-identity_regex='^https://github.com/morrow-project/morrow/.github/workflows/tag-release.yml@refs/(heads/(main|maintain/.+)|pull/[0-9]+/merge)$'
-issuer="https://token.actions.githubusercontent.com"
+repo_root="$(cd "$(dirname "$0")/../.." && pwd)"
+source "${repo_root}/packaging/release/cosign-policy.env"
 
 shopt -s nullglob
 subjects=("${dist_dir}"/*.tar.gz "${dist_dir}"/*.deb "${dist_dir}"/*.rpm)
@@ -20,11 +20,11 @@ for subject in "${subjects[@]}"; do
   test -s "${subject}.spdx.json.sig"
   test -s "${subject}.spdx.json.bundle"
   cosign verify-blob --bundle "${subject}.bundle" \
-    --certificate-identity-regexp "${identity_regex}" \
-    --certificate-oidc-issuer "${issuer}" "${subject}"
+    --certificate-identity-regexp "${COSIGN_CERTIFICATE_IDENTITY_REGEXP}" \
+    --certificate-oidc-issuer "${COSIGN_CERTIFICATE_OIDC_ISSUER}" "${subject}"
   cosign verify-blob --bundle "${subject}.spdx.json.bundle" \
-    --certificate-identity-regexp "${identity_regex}" \
-    --certificate-oidc-issuer "${issuer}" "${subject}.spdx.json"
+    --certificate-identity-regexp "${COSIGN_CERTIFICATE_IDENTITY_REGEXP}" \
+    --certificate-oidc-issuer "${COSIGN_CERTIFICATE_OIDC_ISSUER}" "${subject}.spdx.json"
 done
 
 for checksum in "${dist_dir}"/*.tar.gz.sha256 "${dist_dir}"/*.deb.sha256 "${dist_dir}"/*.rpm.sha256; do

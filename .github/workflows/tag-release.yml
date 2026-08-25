@@ -608,10 +608,11 @@ jobs:
           IMAGE: ghcr.io/morrow-project/morrow-server
         run: |
           set -euo pipefail
+          source packaging/release/cosign-policy.env
           printf '%s\n' "${IMAGE_DIGEST}" | grep -Eq '^sha256:[0-9a-f]{64}$'
           cosign verify "${IMAGE}@${IMAGE_DIGEST}" \
-            --certificate-identity-regexp '^https://github.com/morrow-project/morrow/.github/workflows/tag-release.yml@refs/(heads/(main|maintain/.+)|pull/[0-9]+/merge)$' \
-            --certificate-oidc-issuer https://token.actions.githubusercontent.com
+            --certificate-identity-regexp "${COSIGN_CERTIFICATE_IDENTITY_REGEXP}" \
+            --certificate-oidc-issuer "${COSIGN_CERTIFICATE_OIDC_ISSUER}"
           gh attestation verify "oci://${IMAGE}@${IMAGE_DIGEST}" \
             --repo "${GITHUB_REPOSITORY}" \
             --signer-workflow "morrow-project/morrow/.github/workflows/tag-release.yml"

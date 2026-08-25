@@ -15,13 +15,13 @@ download the release assets, and verify a subject and its SBOM:
 cosign verify-blob \
   --bundle morrow-0.1.1-linux-amd64.tar.gz.bundle \
   --certificate-identity-regexp \
-  '^https://github.com/morrow-project/morrow/.github/workflows/tag-release.yml@refs/(heads/(main|maintain/.+)|pull/[0-9]+/merge)$' \
+  '^https://github.com/morrow-project/morrow/.github/workflows/tag-release.yml@refs/heads/(main|maintain/.+)$' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   morrow-0.1.1-linux-amd64.tar.gz
 cosign verify-blob \
   --bundle morrow-0.1.1-linux-amd64.tar.gz.spdx.json.bundle \
   --certificate-identity-regexp \
-  '^https://github.com/morrow-project/morrow/.github/workflows/tag-release.yml@refs/(heads/(main|maintain/.+)|pull/[0-9]+/merge)$' \
+  '^https://github.com/morrow-project/morrow/.github/workflows/tag-release.yml@refs/heads/(main|maintain/.+)$' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   morrow-0.1.1-linux-amd64.tar.gz.spdx.json
 sha256sum --check morrow-0.1.1-linux-amd64.tar.gz.sha256
@@ -39,7 +39,7 @@ SBOM attachment:
 ```sh
 digest="$(docker buildx imagetools inspect ghcr.io/morrow-project/morrow-server:0.1.1 --format '{{json .Manifest.Digest}}' | tr -d '\"')"
 cosign verify \
-  --certificate-identity-regexp 'https://github.com/morrow-project/morrow/.github/workflows/tag-release.yml@refs/tags/0.1.1' \
+  --certificate-identity-regexp '^https://github.com/morrow-project/morrow/.github/workflows/tag-release.yml@refs/heads/(main|maintain/.+)$' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   "ghcr.io/morrow-project/morrow-server@${digest}"
 cosign download sbom "ghcr.io/morrow-project/morrow-server@${digest}" > image.spdx.json
@@ -51,12 +51,14 @@ exportable signing key is stored in the repository or its secrets.
 
 ## Rotation and incident response
 
-The identity is the reviewed workflow path and its protected release branch or
-pull-request ref, while every signature is over an immutable subject digest and
-the release jobs check out the created tag. The OIDC issuer is fixed to
-Sigstore's GitHub Actions issuer. A workflow-path change is a deliberate
-trust-boundary change: update the identity regex and this document in the same
-reviewed pull request. For a suspected compromise, stop release
+The identity is the reviewed workflow path at the protected base branch that
+runs the release workflow, while every signature is over an immutable subject
+digest and the release jobs check out the created tag. The authoritative
+identity and OIDC issuer are stored in `packaging/release/cosign-policy.env`.
+CI verifies that every copy-paste command above uses that same policy. A
+workflow-path or release-branch change is a deliberate trust-boundary change:
+update the policy and this document in the same reviewed pull request. For a
+suspected compromise, stop release
 publishing, revoke or quarantine the affected GitHub release and container
 digest, preserve workflow logs and attestation bundles, and publish a security
 notice listing affected immutable digests. Rotate repository and package
