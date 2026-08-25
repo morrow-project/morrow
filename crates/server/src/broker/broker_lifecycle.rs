@@ -2,6 +2,32 @@ use super::delivery_index::scheduled_at_ms;
 use super::*;
 
 impl Morrow {
+    pub(super) async fn rebuild_tenant_disk_usage(&self) -> Result<()> {
+        let records = self
+            .inner
+            .lock()
+            .await
+            .messages
+            .values()
+            .filter(|record| record.stream.is_some())
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut disk_usage = HashMap::new();
+        for record in records {
+            let record = self.partition_logs.load_record(&record)?;
+            let tenant = self
+                .config
+                .tenant_quotas
+                .keys()
+                .find(|tenant| record.subject.starts_with(&format!("{tenant}.")))
+                .map_or(crate::quota::DEFAULT_TENANT, String::as_str);
+            let entry = disk_usage.entry(tenant.to_string()).or_insert(0u64);
+            *entry = entry.saturating_add(crate::quota::persistent_publish_record_bytes(&record));
+        }
+        self.tenant_quotas.replace_disk_usage(disk_usage);
+        Ok(())
+    }
+
     pub fn open(config: Config) -> Result<Self> {
         Self::open_with_hooks(config, BrokerHooks::default())
     }

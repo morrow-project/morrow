@@ -22,9 +22,10 @@ does not require a restart.
   links, and event hashes, detecting deletion, modification, insertion, and
   reordering.
 - Tenant quota configuration defines independent connection, memory, disk,
-  foreground-task, and background-task budgets. Connection admission and
-  authenticated-tenant transfer are enforced today; the other dimensions are
-  reported as reserved budget until their owning allocation paths opt in.
+  foreground-task, and background-task budgets. Connection admission,
+  authenticated-tenant transfer, outbound memory, durable appends/recovery,
+  transient and durable subscriptions, and pull-consumer workers are enforced
+  today. Retention rebuilds disk usage after records are removed.
 
 ## Operational threat model
 

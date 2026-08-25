@@ -414,6 +414,7 @@ impl Morrow {
                 &self.config.streams,
                 self.hooks.clock.now_ms(),
             )?;
+            self.rebuild_tenant_disk_usage().await?;
             let committed_record = PublishRecord::from(envelope.clone());
             if let (Some(producer), Some(fingerprint)) =
                 (producer_sequence.as_ref(), producer_fingerprint)
@@ -537,6 +538,7 @@ impl Morrow {
             inner.apply_record_compaction(record.seq, &self.config.streams);
             record
         };
+        self.rebuild_tenant_disk_usage().await?;
 
         if let (Some(producer), Some(fingerprint)) =
             (producer_sequence.as_ref(), producer_fingerprint)

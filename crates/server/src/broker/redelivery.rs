@@ -43,6 +43,7 @@ impl Morrow {
             let expired = inner.expire_due_leases(now, MAX_EXPIRED_LEASES_PER_TICK)?;
             (expired, inner.dead_letters.len().saturating_sub(before))
         };
+        self.rebuild_tenant_disk_usage().await?;
         self.metrics
             .dead_letter_writes_total
             .fetch_add(dead_letter_writes as u64, Ordering::Relaxed);

@@ -26,6 +26,22 @@ pub(crate) fn persistent_record_bytes(envelope: &crate::partition_log::MessageEn
         .saturating_add(envelope.payload.len() as u64)
 }
 
+pub(crate) fn persistent_publish_record_bytes(record: &crate::wal::PublishRecord) -> u64 {
+    let headers = record.headers.iter().fold(0usize, |total, header| {
+        total
+            .saturating_add(header.name.len())
+            .saturating_add(header.value.len())
+    });
+    128u64
+        .saturating_add(record.namespace.len() as u64)
+        .saturating_add(record.stream.as_ref().map_or(0, String::len) as u64)
+        .saturating_add(record.subject.len() as u64)
+        .saturating_add(record.key.as_ref().map_or(0, Vec::len) as u64)
+        .saturating_add(headers as u64)
+        .saturating_add(record.reply_to.as_ref().map_or(0, String::len) as u64)
+        .saturating_add(record.payload.len() as u64)
+}
+
 #[derive(Clone)]
 pub(crate) struct QuotaRuntime {
     limits: ResourceQuotaConfig,
@@ -267,6 +283,16 @@ impl TenantQuotaRuntime {
             .lock()
             .expect("tenant quota lock poisoned")
             .clone()
+    }
+
+    pub(crate) fn replace_disk_usage(&self, disk_usage: HashMap<String, u64>) {
+        let mut usage = self.usage.lock().expect("tenant quota lock poisoned");
+        for (tenant, entry) in usage.iter_mut() {
+            entry.disk_bytes = disk_usage.get(tenant).copied().unwrap_or_default();
+        }
+        for (tenant, disk_bytes) in disk_usage {
+            usage.entry(tenant).or_default().disk_bytes = disk_bytes;
+        }
     }
 
     pub(crate) fn status_snapshot(&self) -> HashMap<String, TenantQuotaStatus> {
