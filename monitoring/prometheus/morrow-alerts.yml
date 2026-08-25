@@ -1,0 +1,333 @@
+groups:
+  - name: morrow.readiness
+    interval: 30s
+    rules:
+      - alert: MorrowReadinessUnavailable
+        expr: morrow_cluster_ready == 0
+        for: 5m
+        labels:
+          severity: critical
+          component: readiness
+        annotations:
+          summary: Morrow readiness is unavailable
+          description: The broker has reported a non-ready state continuously for five minutes.
+          affected_component: client-data-plane
+          runbook_url: docs/runbooks/quorum-loss.md
+      - alert: MorrowReadinessFlapping
+        expr: changes(morrow_cluster_ready[15m]) >= 4
+        for: 5m
+        labels:
+          severity: warning
+          component: readiness
+        annotations:
+          summary: Morrow readiness is flapping
+          description: Readiness changed at least four times in fifteen minutes.
+          affected_component: client-data-plane
+          runbook_url: docs/runbooks/quorum-loss.md
+
+  - name: morrow.cluster
+    interval: 30s
+    rules:
+      - alert: MorrowMetadataQuorumLoss
+        expr: morrow_cluster_peers > 1 and morrow_cluster_ready == 0
+        for: 2m
+        labels:
+          severity: critical
+          component: metadata-quorum
+        annotations:
+          summary: Morrow metadata quorum is unavailable
+          description: A clustered broker has peers configured but is not ready to serve durable metadata.
+          affected_component: raft-metadata
+          runbook_url: docs/runbooks/quorum-loss.md
+      - alert: MorrowLeaderElectionProlonged
+        expr: morrow_cluster_peers > 1 and morrow_cluster_ready == 0
+        for: 2m
+        labels:
+          severity: warning
+          component: leader-election
+        annotations:
+          summary: Morrow leader election is prolonged
+          description: A clustered broker has remained non-ready for longer than the election window.
+          affected_component: raft-leader
+          runbook_url: docs/runbooks/quorum-loss.md
+      - alert: MorrowLeaderChangeRateHigh
+        expr: changes(morrow_cluster_ready[15m]) >= 3
+        for: 5m
+        labels:
+          severity: warning
+          component: leader-election
+        annotations:
+          summary: Morrow leader-change proxy rate is high
+          description: Readiness transitions indicate repeated leadership or quorum churn; confirm with cluster diagnostics.
+          affected_component: raft-leader
+          runbook_url: docs/runbooks/quorum-loss.md
+
+  - name: morrow.routes
+    interval: 30s
+    rules:
+      - alert: MorrowRouteMeshDegraded
+        expr: morrow_cluster_peers > 1 and morrow_route_peers_connected < (morrow_cluster_peers - 1)
+        for: 5m
+        labels:
+          severity: warning
+          component: route-mesh
+        annotations:
+          summary: Morrow route mesh is degraded
+          description: The number of connected route peers is below the expected clustered peer count.
+          affected_component: route-mesh
+          runbook_url: docs/runbooks/node-replacement.md
+      - alert: MorrowRouteRejections
+        expr: rate(morrow_quota_rejections_total{resource="route_connections"}[10m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+          component: route-mesh
+        annotations:
+          summary: Morrow route connections are being rejected
+          description: Route connection quota rejections have continued for five minutes.
+          affected_component: route-mesh
+          runbook_url: docs/runbooks/quorum-loss.md
+
+  - name: morrow.storage
+    interval: 30s
+    rules:
+      - alert: MorrowWALGrowthWarning
+        expr: morrow_wal_bytes > 50 * 1024 * 1024 * 1024
+        for: 15m
+        labels:
+          severity: warning
+          component: wal
+        annotations:
+          summary: Morrow WAL is growing beyond the warning budget
+          description: WAL usage is above 50 GiB; investigate retention, consumers, and available storage.
+          affected_component: wal-storage
+          runbook_url: docs/runbooks/disk-full.md
+      - alert: MorrowWALGrowthCritical
+        expr: morrow_wal_bytes > 80 * 1024 * 1024 * 1024
+        for: 10m
+        labels:
+          severity: critical
+          component: wal
+        annotations:
+          summary: Morrow WAL is approaching the critical storage budget
+          description: WAL usage is above 80 GiB and requires immediate capacity or retention action.
+          affected_component: wal-storage
+          runbook_url: docs/runbooks/disk-full.md
+      - alert: MorrowWALCheckpointStalled
+        expr: morrow_publishes_total > 0 and increase(morrow_wal_checkpoints_total[15m]) == 0
+        for: 15m
+        labels:
+          severity: critical
+          component: wal
+        annotations:
+          summary: Morrow WAL checkpoints are stalled
+          description: The broker is receiving publishes but has recorded no WAL checkpoint for fifteen minutes.
+          affected_component: wal-checkpointing
+          runbook_url: docs/runbooks/storage-corruption.md
+      - alert: MorrowFilesystemCapacityLow
+        expr: node_filesystem_avail_bytes{mountpoint=~"/var/lib/morrow|/var/lib/morrow/.*",fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes{mountpoint=~"/var/lib/morrow|/var/lib/morrow/.*",fstype!~"tmpfs|overlay"} < 0.10
+        for: 10m
+        labels:
+          severity: critical
+          component: storage
+        annotations:
+          summary: Morrow storage filesystem is nearly full
+          description: The Morrow data filesystem has less than ten percent free capacity.
+          affected_component: filesystem
+          runbook_url: docs/runbooks/disk-full.md
+      - alert: MorrowFilesystemInodesLow
+        expr: node_filesystem_files_free{mountpoint=~"/var/lib/morrow|/var/lib/morrow/.*",fstype!~"tmpfs|overlay"} / node_filesystem_files{mountpoint=~"/var/lib/morrow|/var/lib/morrow/.*",fstype!~"tmpfs|overlay"} < 0.10
+        for: 10m
+        labels:
+          severity: warning
+          component: storage
+        annotations:
+          summary: Morrow storage filesystem has low inode headroom
+          description: The Morrow data filesystem has less than ten percent free inodes.
+          affected_component: filesystem
+          runbook_url: docs/runbooks/disk-full.md
+
+  - name: morrow.performance
+    interval: 30s
+    rules:
+      - alert: MorrowFsyncLatencyHigh
+        expr: morrow_wal_last_fsync_duration_us > 50000
+        for: 10m
+        labels:
+          severity: warning
+          component: wal
+        annotations:
+          summary: Morrow WAL fsync latency is high
+          description: The latest WAL fsync has exceeded 50 milliseconds for ten minutes.
+          affected_component: durable-storage
+          runbook_url: docs/runbooks/disk-full.md
+      - alert: MorrowDurablePublishLatencyHigh
+        expr: histogram_quantile(0.99, sum by (le) (rate(morrow_publish_latency_us_bucket[10m]))) > 100000
+        for: 10m
+        labels:
+          severity: warning
+          component: publish-latency
+        annotations:
+          summary: Morrow publish latency is high
+          description: The rolling p99 publish latency has exceeded 100 milliseconds.
+          affected_component: durable-publish
+          runbook_url: docs/runbooks/disk-full.md
+
+  - name: morrow.rejections
+    interval: 30s
+    rules:
+      - alert: MorrowConnectionRejections
+        expr: rate(morrow_quota_rejections_total{resource="connections"}[10m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+          component: connections
+        annotations:
+          summary: Morrow client connections are being rejected
+          description: Client connection quota rejections have continued for five minutes.
+          affected_component: client-connections
+          runbook_url: docs/runbooks/disk-full.md
+      - alert: MorrowHTTPRejections
+        expr: rate(morrow_quota_rejections_total{resource="http_connections"}[10m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+          component: http
+        annotations:
+          summary: Morrow admin HTTP connections are being rejected
+          description: Admin HTTP connection quota rejections have continued for five minutes.
+          affected_component: admin-http
+          runbook_url: docs/runbooks/disk-full.md
+      - alert: MorrowOutboundRejections
+        expr: rate(morrow_quota_rejections_total{resource="outbound"}[10m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+          component: outbound
+        annotations:
+          summary: Morrow outbound queues are rejecting work
+          description: Outbound quota rejections have continued for five minutes.
+          affected_component: outbound-delivery
+          runbook_url: docs/runbooks/disk-full.md
+      - alert: MorrowRaftConnectionRejections
+        expr: rate(morrow_quota_rejections_total{resource="raft_connections"}[10m]) > 0
+        for: 5m
+        labels:
+          severity: critical
+          component: raft
+        annotations:
+          summary: Morrow Raft connections are being rejected
+          description: Raft connection quota rejections have continued for five minutes.
+          affected_component: raft-network
+          runbook_url: docs/runbooks/quorum-loss.md
+      - alert: MorrowStateRejections
+        expr: rate(morrow_quota_rejections_total{resource="state"}[10m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+          component: state
+        annotations:
+          summary: Morrow state operations are being rejected
+          description: State quota rejections have continued for five minutes.
+          affected_component: broker-state
+          runbook_url: docs/runbooks/disk-full.md
+
+  - name: morrow.consumers
+    interval: 30s
+    rules:
+      - alert: MorrowConsumerLagHigh
+        expr: morrow_consumer_lag_messages > 10000
+        for: 10m
+        labels:
+          severity: warning
+          component: consumers
+        annotations:
+          summary: Morrow consumer lag is high
+          description: Aggregate consumer backlog has exceeded ten thousand messages for ten minutes.
+          affected_component: durable-consumers
+          runbook_url: docs/runbooks/node-replacement.md
+      - alert: MorrowScheduledDeliveryLagHigh
+        expr: morrow_scheduled_delivery_due_lag_ms > 300000
+        for: 10m
+        labels:
+          severity: warning
+          component: scheduled-delivery
+        annotations:
+          summary: Morrow scheduled-delivery lag is high
+          description: The oldest due scheduled message is more than five minutes late.
+          affected_component: scheduled-delivery
+          runbook_url: docs/runbooks/node-replacement.md
+      - alert: MorrowRedeliveryRateHigh
+        expr: rate(morrow_redeliveries_total[10m]) > 10
+        for: 10m
+        labels:
+          severity: warning
+          component: consumers
+        annotations:
+          summary: Morrow redelivery rate is high
+          description: More than ten lease-expiry redeliveries per second have continued for ten minutes.
+          affected_component: durable-consumers
+          runbook_url: docs/runbooks/node-replacement.md
+      - alert: MorrowDeadLetterRateHigh
+        expr: rate(morrow_dead_letter_writes_total[10m]) > 1
+        for: 10m
+        labels:
+          severity: warning
+          component: dead-letter
+        annotations:
+          summary: Morrow dead-letter rate is high
+          description: More than one durable dead-letter write per second has continued for ten minutes.
+          affected_component: dead-lettering
+          runbook_url: docs/runbooks/node-replacement.md
+
+  - name: morrow.audit
+    interval: 30s
+    rules:
+      - alert: MorrowAuditFailure
+        expr: morrow_audit_failure == 1 or rate(morrow_audit_write_failures_total[10m]) > 0
+        for: 2m
+        labels:
+          severity: critical
+          component: audit
+        annotations:
+          summary: Morrow audit logging is failing
+          description: Audit failure state is set or audit writes have failed recently.
+          affected_component: audit-log
+          runbook_url: docs/runbooks/credential-compromise.md
+
+  - name: morrow.scrape
+    interval: 30s
+    rules:
+      - alert: MorrowMetricsMissing
+        expr: absent(morrow_cluster_ready)
+        for: 5m
+        labels:
+          severity: critical
+          component: monitoring
+        annotations:
+          summary: Morrow metrics are missing
+          description: The core readiness metric is absent; treat this as a scrape failure or incompatible exporter.
+          affected_component: prometheus-scrape
+          runbook_url: docs/runbooks/index.md
+      - alert: MorrowNodeExporterMissing
+        expr: absent(node_filesystem_avail_bytes)
+        for: 10m
+        labels:
+          severity: warning
+          component: monitoring
+        annotations:
+          summary: Node filesystem metrics are missing
+          description: Capacity and inode alerts cannot evaluate because node-exporter filesystem metrics are absent.
+          affected_component: node-exporter
+          runbook_url: docs/runbooks/disk-full.md
+      - alert: MorrowWALMetricsMissing
+        expr: absent(morrow_wal_bytes) or absent(morrow_wal_checkpoints_total) or absent(morrow_wal_last_fsync_duration_us)
+        for: 10m
+        labels:
+          severity: warning
+          component: monitoring
+        annotations:
+          summary: Morrow WAL metrics are incomplete
+          description: WAL capacity, checkpoint, or fsync metrics are absent; storage alerts are not trustworthy.
+          affected_component: wal-monitoring
+          runbook_url: docs/runbooks/storage-corruption.md

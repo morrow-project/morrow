@@ -1,0 +1,77 @@
+rule_files:
+  - morrow-alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  - interval: 1m
+    input_series:
+      - series: 'morrow_cluster_ready{instance="node-1"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+      - series: 'morrow_cluster_peers{instance="node-1"}'
+        values: '3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3'
+      - series: 'morrow_wal_bytes{instance="node-1"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+      - series: 'morrow_wal_checkpoints_total{instance="node-1"}'
+        values: '1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1'
+      - series: 'morrow_wal_last_fsync_duration_us{instance="node-1"}'
+        values: '60000 60000 60000 60000 60000 60000 60000 60000 60000 60000 60000 60000 60000 60000 60000 60000'
+      - series: 'morrow_publishes_total{instance="node-1"}'
+        values: '1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16'
+      - series: 'morrow_consumer_lag_messages{instance="node-1"}'
+        values: '12000 12000 12000 12000 12000 12000 12000 12000 12000 12000 12000 12000 12000 12000 12000 12000'
+      - series: 'morrow_quota_rejections_total{instance="node-1",resource="route_connections"}'
+        values: '0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15'
+      - series: 'morrow_audit_failure{instance="node-1"}'
+        values: '1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: MorrowReadinessUnavailable
+        exp_alerts:
+          - exp_labels:
+              instance: node-1
+              severity: critical
+              component: readiness
+      - eval_time: 5m
+        alertname: MorrowMetadataQuorumLoss
+        exp_alerts:
+          - exp_labels:
+              instance: node-1
+              severity: critical
+              component: metadata-quorum
+      - eval_time: 10m
+        alertname: MorrowWALCheckpointStalled
+        exp_alerts:
+          - exp_labels:
+              instance: node-1
+              severity: critical
+              component: wal
+      - eval_time: 10m
+        alertname: MorrowFsyncLatencyHigh
+        exp_alerts:
+          - exp_labels:
+              instance: node-1
+              severity: warning
+              component: wal
+      - eval_time: 10m
+        alertname: MorrowConsumerLagHigh
+        exp_alerts:
+          - exp_labels:
+              instance: node-1
+              severity: warning
+              component: consumers
+      - eval_time: 5m
+        alertname: MorrowRouteRejections
+        exp_alerts:
+          - exp_labels:
+              instance: node-1
+              resource: route_connections
+              severity: warning
+              component: route-mesh
+      - eval_time: 2m
+        alertname: MorrowAuditFailure
+        exp_alerts:
+          - exp_labels:
+              instance: node-1
+              severity: critical
+              component: audit
