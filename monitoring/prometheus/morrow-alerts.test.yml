@@ -7,23 +7,23 @@ tests:
   - interval: 1m
     input_series:
       - series: 'morrow_cluster_ready{instance="node-1"}'
-        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
       - series: 'morrow_cluster_peers{instance="node-1"}'
-        values: '3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3'
+        values: '3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3'
       - series: 'morrow_wal_bytes{instance="node-1"}'
-        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
       - series: 'morrow_wal_checkpoints_total{instance="node-1"}'
-        values: '1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1'
+        values: '1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1'
       - series: 'morrow_wal_last_fsync_duration_us{instance="node-1"}'
-        values: '60000 60000 60000 60000 60000 60000 60000 60000 60000 60000 60000 60000 60000 60000 60000 60000'
+        values: '60000 60000 60000 60000 60000 60000 60000 60000 60000 60000 60000 60000 60000 60000 60000 60000 60000 60000'
       - series: 'morrow_publishes_total{instance="node-1"}'
-        values: '1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16'
+        values: '1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18'
       - series: 'morrow_consumer_lag_messages{instance="node-1"}'
-        values: '12000 12000 12000 12000 12000 12000 12000 12000 12000 12000 12000 12000 12000 12000 12000 12000'
+        values: '12000 12000 12000 12000 12000 12000 12000 12000 12000 12000 12000 12000 12000 12000 12000 12000 12000 12000'
       - series: 'morrow_quota_rejections_total{instance="node-1",resource="route_connections"}'
-        values: '0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15'
+        values: '0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17'
       - series: 'morrow_audit_failure{instance="node-1"}'
-        values: '1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1'
+        values: '1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1'
     alert_rule_test:
       - eval_time: 5m
         alertname: MorrowReadinessUnavailable
@@ -49,7 +49,7 @@ tests:
               description: A clustered broker has peers configured but is not ready to serve durable metadata.
               runbook_url: docs/runbooks/quorum-loss.md
               summary: Morrow metadata quorum is unavailable
-      - eval_time: 15m
+      - eval_time: 16m
         alertname: MorrowWALCheckpointStalled
         exp_alerts:
           - exp_labels:
