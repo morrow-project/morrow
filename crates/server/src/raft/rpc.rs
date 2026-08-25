@@ -11,6 +11,9 @@ pub(super) enum RaftRequest {
     },
     DataAppend(DataAppendRequest),
     DataProgress(DataProgressRequest),
+    DataManifest(DataManifestRequest),
+    DataHeartbeat(DataHeartbeatRequest),
+    DataSnapshotChunk(DataSnapshotChunk),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -27,6 +30,9 @@ pub(super) enum RaftResponse {
     FullSnapshot(SnapshotResponse<u64>),
     DataAppend(DataAppendResponse),
     DataProgress(Option<u64>),
+    DataManifest(DataManifestResponse),
+    DataHeartbeat(DataHeartbeatResponse),
+    DataSnapshotChunkAck { offset: u64, checksum: u32 },
     Error(String),
 }
 
@@ -140,9 +146,17 @@ where
                     || assignment.is_none_or(|assignment| {
                         assignment.leader_id != request.leader_id
                             || assignment.leader_epoch != request.leader_epoch
+                            || assignment.replica_set_generation != request.replica_set_generation
                     })
                 {
                     RaftResponse::Error("fenced partition leader epoch".to_string())
+                } else if request.batch_digest
+                    != crate::partition_log::committed_envelope_checksum(&request.envelope)
+                        .unwrap_or_default()
+                {
+                    RaftResponse::Error(
+                        "partition predecessor or batch digest mismatch".to_string(),
+                    )
                 } else {
                     request.committed_high_watermark =
                         committed.map(|commit| commit.high_watermark);
@@ -154,6 +168,47 @@ where
             }
             RaftRequest::DataProgress(request) => {
                 RaftResponse::DataProgress(partition_data.lock().unwrap().progress(&request))
+            }
+            RaftRequest::DataManifest(request) => {
+                let metadata = state_machine.durable_state();
+                RaftResponse::DataManifest(
+                    partition_data.lock().unwrap().manifest(&request, &metadata),
+                )
+            }
+            RaftRequest::DataHeartbeat(request) => {
+                let metadata = state_machine.durable_state();
+                let key = partition_key(&request.stream, request.partition.0);
+                let assignment = metadata.partition_assignments.get(&key);
+                let commit = metadata.partition_commits.get(&key);
+                if assignment.is_none_or(|assignment| {
+                    assignment.replica_set_generation != request.replica_set_generation
+                        || assignment.leader_id != request.leader_id
+                        || assignment.leader_epoch != request.leader_epoch
+                }) {
+                    RaftResponse::Error("fenced partition heartbeat".to_string())
+                } else {
+                    RaftResponse::DataHeartbeat(DataHeartbeatResponse {
+                        replica_set_generation: request.replica_set_generation,
+                        leader_id: request.leader_id,
+                        leader_epoch: request.leader_epoch,
+                        high_watermark: commit.map(|commit| commit.high_watermark),
+                    })
+                }
+            }
+            RaftRequest::DataSnapshotChunk(chunk) => {
+                crate::broker_ensure!(
+                    chunk.data.len() <= MAX_RAFT_SNAPSHOT_CHUNK,
+                    "partition snapshot chunk exceeds maximum size"
+                );
+                let checksum = crc32fast::hash(&chunk.data);
+                if checksum != chunk.checksum {
+                    RaftResponse::Error("partition snapshot chunk checksum mismatch".to_string())
+                } else {
+                    RaftResponse::DataSnapshotChunkAck {
+                        offset: chunk.offset,
+                        checksum,
+                    }
+                }
             }
         };
         write_frame(&mut stream, &response).await?;
@@ -187,7 +242,11 @@ where
     W: AsyncWrite + Unpin,
     T: Serialize,
 {
-    let body = serde_json::to_vec(value).context("serializing Raft frame")?;
+    // CBOR preserves byte strings as bytes (rather than JSON integer arrays)
+    // while retaining deterministic, length-delimited incremental framing.
+    let mut body = Vec::new();
+    ciborium::into_writer(value, &mut body).context("serializing Raft frame")?;
+    body.insert(0, RAFT_PROTOCOL_VERSION);
     crate::broker_ensure!(
         body.len() <= MAX_RAFT_FRAME,
         "Raft frame exceeds maximum size"
@@ -221,5 +280,12 @@ where
     )
     .await
     .map_err(|_| BrokerError::msg("Raft frame read timed out"))??;
-    serde_json::from_slice(&body).context("decoding Raft frame")
+    let (version, payload) = body
+        .split_first()
+        .ok_or_else(|| BrokerError::msg("empty Raft frame"))?;
+    crate::broker_ensure!(
+        *version == RAFT_PROTOCOL_VERSION,
+        "unsupported Raft protocol version"
+    );
+    ciborium::from_reader(payload).context("decoding Raft frame")
 }

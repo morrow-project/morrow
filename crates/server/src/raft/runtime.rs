@@ -286,8 +286,17 @@ impl RaftRuntime {
         let request = DataAppendRequest {
             leader_id: self.node_id,
             leader_epoch,
+            replica_set_generation: assignment.replica_set_generation,
             fsync,
             committed_high_watermark: previous.map(|commit| commit.high_watermark),
+            predecessor_offset: previous.map(|commit| commit.high_watermark),
+            predecessor_checksum: previous.map(|commit| commit.checksum),
+            batch_digest: crate::partition_log::committed_envelope_checksum(&envelope)?,
+            durability: if fsync {
+                DurabilityBoundary::LocalFlush
+            } else {
+                DurabilityBoundary::Memory
+            },
             envelope: envelope.clone(),
         };
         let quorum = self.nodes.len() / 2 + 1;
@@ -337,8 +346,15 @@ impl RaftRuntime {
                         DataAppendRequest {
                             leader_id: request.leader_id,
                             leader_epoch: request.leader_epoch,
+                            replica_set_generation: request.replica_set_generation,
                             fsync: request.fsync,
                             committed_high_watermark: request.committed_high_watermark,
+                            predecessor_offset: record.offset.checked_sub(1),
+                            predecessor_checksum: None,
+                            batch_digest: crate::partition_log::committed_envelope_checksum(
+                                &record,
+                            )?,
+                            durability: request.durability,
                             envelope: record,
                         },
                     )

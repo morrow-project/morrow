@@ -13,6 +13,7 @@ path = "src/bin/morrow-backup.rs"
 
 [dependencies]
 aws-lc-rs.workspace = true
+ciborium.workspace = true
 crc32fast.workspace = true
 futures-util.workspace = true
 openraft.workspace = true

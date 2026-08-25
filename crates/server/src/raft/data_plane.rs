@@ -9,9 +9,21 @@ use std::sync::Mutex as StdMutex;
 pub(super) struct DataAppendRequest {
     pub(super) leader_id: u64,
     pub(super) leader_epoch: u64,
+    pub(super) replica_set_generation: u64,
     pub(super) fsync: bool,
     pub(super) committed_high_watermark: Option<u64>,
+    pub(super) predecessor_offset: Option<u64>,
+    pub(super) predecessor_checksum: Option<u32>,
+    pub(super) batch_digest: u32,
+    pub(super) durability: DurabilityBoundary,
     pub(super) envelope: MessageEnvelope,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub(super) enum DurabilityBoundary {
+    Memory,
+    LocalFlush,
+    QuorumFlush,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -24,6 +36,51 @@ pub(super) struct DataAppendResponse {
 pub(super) struct DataProgressRequest {
     pub(super) stream: String,
     pub(super) partition: PartitionId,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(super) struct DataManifestRequest {
+    pub(super) stream: String,
+    pub(super) partition: PartitionId,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub(super) struct DataManifestResponse {
+    pub(super) replica_set_generation: u64,
+    pub(super) leader_id: u64,
+    pub(super) leader_epoch: u64,
+    pub(super) high_watermark: Option<u64>,
+    pub(super) last_offset: Option<u64>,
+    pub(super) last_checksum: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(super) struct DataHeartbeatRequest {
+    pub(super) stream: String,
+    pub(super) partition: PartitionId,
+    pub(super) replica_set_generation: u64,
+    pub(super) leader_id: u64,
+    pub(super) leader_epoch: u64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub(super) struct DataHeartbeatResponse {
+    pub(super) replica_set_generation: u64,
+    pub(super) leader_id: u64,
+    pub(super) leader_epoch: u64,
+    pub(super) high_watermark: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(super) struct DataSnapshotChunk {
+    pub(super) stream: String,
+    pub(super) partition: PartitionId,
+    pub(super) replica_set_generation: u64,
+    pub(super) leader_epoch: u64,
+    pub(super) offset: u64,
+    pub(super) final_chunk: bool,
+    pub(super) checksum: u32,
+    pub(super) data: Vec<u8>,
 }
 
 pub(super) struct ReplicaDataStore {
@@ -53,6 +110,16 @@ impl ReplicaDataStore {
             request.envelope.stream.as_str().to_string(),
             request.envelope.partition,
         );
+        let current_offset = self
+            .records
+            .get(&key)
+            .and_then(|records| records.keys().next_back().copied());
+        if let Some(predecessor_offset) = request.predecessor_offset {
+            crate::broker_ensure!(
+                current_offset == Some(predecessor_offset),
+                "partition append has a gap or stale predecessor"
+            );
+        }
         let existing = self
             .records
             .get(&key)
@@ -159,6 +226,40 @@ impl ReplicaDataStore {
         self.records
             .get(&(request.stream.clone(), request.partition))
             .and_then(|records| records.keys().next_back().copied())
+    }
+
+    pub(super) fn manifest(
+        &self,
+        request: &DataManifestRequest,
+        metadata: &DurableState,
+    ) -> DataManifestResponse {
+        let key = partition_key(&request.stream, request.partition.0);
+        let assignment = metadata.partition_assignments.get(&key);
+        let commit = metadata.partition_commits.get(&key);
+        let last_offset = self.progress(&DataProgressRequest {
+            stream: request.stream.clone(),
+            partition: request.partition,
+        });
+        let last_checksum = last_offset.and_then(|offset| {
+            self.record(&request.stream, request.partition, offset)
+                .ok()
+                .flatten()
+                .and_then(|record| crate::partition_log::committed_envelope_checksum(&record).ok())
+        });
+        DataManifestResponse {
+            replica_set_generation: assignment
+                .map(|assignment| assignment.replica_set_generation)
+                .unwrap_or_default(),
+            leader_id: assignment
+                .map(|assignment| assignment.leader_id)
+                .unwrap_or_default(),
+            leader_epoch: assignment
+                .map(|assignment| assignment.leader_epoch)
+                .unwrap_or_default(),
+            high_watermark: commit.map(|commit| commit.high_watermark),
+            last_offset,
+            last_checksum,
+        }
     }
 
     pub(super) fn catch_up_records(
@@ -289,5 +390,32 @@ pub(super) async fn send_data_progress(
         RaftResponse::DataProgress(progress) => Ok(progress),
         RaftResponse::Error(message) => Err(BrokerError::msg(message)),
         _ => Err(BrokerError::msg("unexpected partition progress response")),
+    }
+}
+
+pub(super) async fn send_data_manifest(
+    addr: &str,
+    auth_token: String,
+    node_id: u64,
+    target: u64,
+    tls: Option<RaftTlsRuntime>,
+    request: DataManifestRequest,
+) -> Result<DataManifestResponse> {
+    let client = NetworkClient {
+        addr: addr.to_string(),
+        auth_token,
+        node_id,
+        target,
+        tls,
+        connection: Arc::new(tokio::sync::Mutex::new(None)),
+    };
+    match client
+        .request(RaftRequest::DataManifest(request))
+        .await
+        .map_err(|err| BrokerError::msg(err.to_string()))?
+    {
+        RaftResponse::DataManifest(response) => Ok(response),
+        RaftResponse::Error(message) => Err(BrokerError::msg(message)),
+        _ => Err(BrokerError::msg("unexpected partition manifest response")),
     }
 }

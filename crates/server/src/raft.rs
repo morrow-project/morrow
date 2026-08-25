@@ -39,7 +39,11 @@ const LEGACY_LOG_FILE: &str = "raft-log.json";
 const LEGACY_STATE_FILE: &str = "raft-state.json";
 const LEGACY_SNAPSHOT_FILE: &str = "raft-snapshot.json";
 const MAX_RAFT_FRAME: usize = 16 * 1024 * 1024;
+const MAX_RAFT_SNAPSHOT_CHUNK: usize = 1024 * 1024;
 const RAFT_FRAME_READ_TIMEOUT_MS: u64 = 5_000;
+/// Versioned binary peer protocol. Unknown versions are rejected rather than
+/// silently falling back to a weaker JSON contract.
+const RAFT_PROTOCOL_VERSION: u8 = 1;
 openraft::declare_raft_types!(
     pub BrokerRaftConfig:
         D = BrokerCommand,
