@@ -357,6 +357,7 @@ impl Harness {
             auth,
             cluster: None,
             streams: test_streams(),
+            views: Default::default(),
         };
         let broker = Morrow::open(config).unwrap();
         let server = broker.clone();

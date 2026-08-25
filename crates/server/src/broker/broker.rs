@@ -1,6 +1,46 @@
 use super::*;
 use crate::consumer_group::GroupCoordinator;
 
+pub(super) struct ViewRuntime {
+    pub(super) definition: crate::config::ViewConfig,
+    pub(super) view: crate::materialized_view::MaterializedView,
+    pub(super) paused: bool,
+}
+
+pub(super) fn view_update(
+    definition: &crate::config::ViewConfig,
+    record: &crate::wal::PublishRecord,
+) -> Option<crate::materialized_view::ViewUpdate> {
+    if record.stream.as_deref() != Some(definition.source_stream.as_str())
+        || definition
+            .source_subject
+            .as_deref()
+            .is_some_and(|subject| !protocol::subject::matches(subject, &record.subject))
+    {
+        return None;
+    }
+    let key = definition
+        .key_header
+        .as_deref()
+        .and_then(|header| {
+            record
+                .headers
+                .iter()
+                .find(|header_value| header_value.name.eq_ignore_ascii_case(header))
+                .map(|header_value| header_value.value.clone())
+        })
+        .unwrap_or_else(|| record.subject.clone());
+    Some(crate::materialized_view::ViewUpdate {
+        key,
+        value: Some(record.payload.clone()),
+        position: crate::materialized_view::ViewPosition {
+            stream: record.stream.clone().unwrap_or_default(),
+            partition: crate::stream::PartitionId(record.partition.unwrap_or_default()),
+            offset: record.offset.unwrap_or_default(),
+        },
+    })
+}
+
 #[derive(Clone)]
 pub struct Morrow {
     pub(super) inner: Arc<Mutex<DurableBrokerState>>,
@@ -36,6 +76,7 @@ pub struct Morrow {
     pub(super) middleware: MiddlewareRuntime,
     pub(super) hooks: BrokerHooks,
     pub(super) transactions: Arc<Mutex<crate::transaction::TransactionCoordinator>>,
+    pub(super) views: Arc<Mutex<HashMap<String, ViewRuntime>>>,
 }
 
 impl Morrow {

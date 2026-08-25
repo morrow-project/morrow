@@ -218,6 +218,22 @@ impl Morrow {
                 .await;
             }
         }
+        if method == "GET" {
+            if let Some((name, key)) = path
+                .strip_prefix("/api/v1/views/")
+                .or_else(|| path.strip_prefix("/views/"))
+                .and_then(|value| value.split_once('/'))
+            {
+                return match self.view_query(name, key).await {
+                    Some(view) => {
+                        let body = serde_json::to_vec(&view)
+                            .context("serializing HTTP view query response")?;
+                        write_http_response(&mut stream, "200 OK", "application/json", &body).await
+                    }
+                    None => write_http_not_found(&mut stream).await,
+                };
+            }
+        }
         match path {
             "/cluster" | "/api/v1/cluster" => self.write_cluster_response(&mut stream).await,
             "/connections" => self.write_connections_response(&mut stream, None).await,
@@ -236,6 +252,7 @@ impl Morrow {
                     .await
             }
             "/streams" | "/api/v1/streams" => self.write_streams_response(&mut stream).await,
+            "/views" | "/api/v1/views" => self.write_views_response(&mut stream).await,
             "/dead-letters" | "/api/v1/dead-letters" => {
                 self.write_dead_letters_response(&mut stream, parse_page(query))
                     .await
@@ -252,6 +269,12 @@ impl Morrow {
             "/metrics" | "/api/v1/metrics" => self.write_metrics_response(&mut stream).await,
             _ => write_http_not_found(&mut stream).await,
         }
+    }
+
+    async fn write_views_response<W: AsyncWrite + Unpin>(&self, stream: &mut W) -> Result<()> {
+        let body = serde_json::to_vec(&self.views_response().await)
+            .context("serializing HTTP views response")?;
+        write_http_response(stream, "200 OK", "application/json", &body).await
     }
 
     async fn write_cluster_response<W: AsyncWrite + Unpin>(&self, stream: &mut W) -> Result<()> {

@@ -520,6 +520,25 @@ pub(super) struct QuotasResponse {
 }
 
 #[derive(Debug, serde::Serialize)]
+pub(super) struct ViewStatusResponse {
+    pub(super) name: String,
+    pub(super) tenant: String,
+    pub(super) source_stream: String,
+    pub(super) paused: bool,
+    pub(super) entries: usize,
+    pub(super) positions: std::collections::BTreeMap<String, u64>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub(super) struct ViewQueryResponse {
+    pub(super) name: String,
+    pub(super) tenant: String,
+    pub(super) key: String,
+    pub(super) value: Option<Vec<u8>>,
+    pub(super) positions: std::collections::BTreeMap<String, u64>,
+}
+
+#[derive(Debug, serde::Serialize)]
 pub(super) struct StateQuotaUsage {
     pub(super) used: usize,
     pub(super) limit: usize,

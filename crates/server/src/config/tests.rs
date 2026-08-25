@@ -93,7 +93,6 @@ fn parses_per_tenant_quota_limits() {
         }
     }))
     .unwrap();
-
     assert_eq!(
         config.tenant_quotas.get("tenant-a"),
         Some(&TenantQuotaConfig {
@@ -117,6 +116,29 @@ fn rejects_unknown_per_tenant_quota_fields() {
             .to_string()
             .contains("unknown field tenant_quotas.tenant-a.typo")
     );
+}
+
+#[test]
+fn parses_configured_materialized_view() {
+    let config = Config::from_json(&serde_json::json!({
+        "views": {
+            "orders-by-id": {
+                "tenant": "tenant-a",
+                "source_stream": "orders",
+                "source_subject": "orders/*",
+                "key_header": "view-key",
+                "max_entries": 10,
+                "max_value_bytes": 1024,
+                "watch_capacity": 20
+            }
+        }
+    }))
+    .unwrap();
+    let view = &config.views["orders-by-id"];
+    assert_eq!(view.tenant, "tenant-a");
+    assert_eq!(view.source_stream, "orders");
+    assert_eq!(view.key_header.as_deref(), Some("view-key"));
+    assert_eq!(view.max_entries, 10);
 }
 
 #[test]

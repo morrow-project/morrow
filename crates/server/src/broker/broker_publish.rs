@@ -413,6 +413,7 @@ impl Morrow {
             )?;
             self.rebuild_tenant_disk_usage().await?;
             let committed_record = PublishRecord::from(envelope.clone());
+            self.apply_materialized_views(&committed_record).await?;
             if let (Some(producer), Some(fingerprint)) =
                 (producer_sequence.as_ref(), producer_fingerprint)
             {
@@ -539,6 +540,7 @@ impl Morrow {
         }
 
         self.pull_waiters.notify_subject(&record.subject);
+        self.apply_materialized_views(&record).await?;
         self.run_after_commit_middleware(publisher_id, &record)
             .await?;
 

@@ -28,6 +28,56 @@ impl Morrow {
         Ok(())
     }
 
+    pub(super) async fn apply_materialized_views(
+        &self,
+        record: &crate::wal::PublishRecord,
+    ) -> Result<()> {
+        let mut views = self.views.lock().await;
+        for runtime in views.values_mut() {
+            if runtime.paused {
+                continue;
+            }
+            if let Some(update) = crate::broker::broker::view_update(&runtime.definition, record) {
+                runtime.view.apply(update)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) async fn views_response(&self) -> Vec<crate::broker::state::ViewStatusResponse> {
+        self.views
+            .lock()
+            .await
+            .values()
+            .map(|runtime| crate::broker::state::ViewStatusResponse {
+                name: runtime.view.name().to_string(),
+                tenant: runtime.view.tenant().to_string(),
+                source_stream: runtime.definition.source_stream.clone(),
+                paused: runtime.paused,
+                entries: runtime.view.entry_count(),
+                positions: runtime.view.consistency_positions(),
+            })
+            .collect()
+    }
+
+    pub(super) async fn view_query(
+        &self,
+        name: &str,
+        key: &str,
+    ) -> Option<crate::broker::state::ViewQueryResponse> {
+        self.views
+            .lock()
+            .await
+            .get(name)
+            .map(|runtime| crate::broker::state::ViewQueryResponse {
+                name: name.to_string(),
+                tenant: runtime.view.tenant().to_string(),
+                key: key.to_string(),
+                value: runtime.view.point_read(key).map(ToOwned::to_owned),
+                positions: runtime.view.consistency_positions(),
+            })
+    }
+
     pub fn open(config: Config) -> Result<Self> {
         Self::open_with_hooks(config, BrokerHooks::default())
     }
@@ -285,6 +335,52 @@ impl Morrow {
                 "tenant background task quota exceeded while rebuilding usage"
             );
         }
+        let mut views = HashMap::new();
+        for (name, definition) in &config.views {
+            let path = config
+                .wal_dir
+                .join("views")
+                .join(&definition.tenant)
+                .join(format!("{name}.json"));
+            let mut view = crate::materialized_view::MaterializedView::open(
+                path,
+                &definition.tenant,
+                name,
+                crate::materialized_view::ViewLimits {
+                    max_entries: definition.max_entries,
+                    max_value_bytes: definition.max_value_bytes,
+                    watch_capacity: definition.watch_capacity,
+                },
+            )?;
+            let mut records = replay
+                .messages
+                .values()
+                .filter(|record| {
+                    record.stream.as_deref() == Some(definition.source_stream.as_str())
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            records.sort_by_key(|record| {
+                (
+                    record.partition.unwrap_or_default(),
+                    record.offset.unwrap_or_default(),
+                )
+            });
+            for record in records {
+                let record = partition_logs.load_record(&record)?;
+                if let Some(update) = crate::broker::broker::view_update(definition, &record) {
+                    view.apply(update)?;
+                }
+            }
+            views.insert(
+                name.clone(),
+                crate::broker::broker::ViewRuntime {
+                    definition: definition.clone(),
+                    view,
+                    paused: false,
+                },
+            );
+        }
         let policy = Arc::new(crate::tenancy::PolicyStore::default());
         let audit = Arc::new(std::sync::Mutex::new(
             crate::tenancy::AuditLog::open_with_segment_bytes(
@@ -385,6 +481,7 @@ impl Morrow {
             middleware: hooks.middleware.clone(),
             hooks,
             transactions: Arc::new(Mutex::new(transactions)),
+            views: Arc::new(Mutex::new(views)),
         })
     }
 
