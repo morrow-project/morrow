@@ -17,6 +17,7 @@ pub(super) fn reject_unknown_fields(value: &Value) -> Result<()> {
             "admin_tls",
             "quotas",
             "tenant_quotas",
+            "views",
             "wal_dir",
             "encryption_key_dir",
             "encryption_active_key_version",
