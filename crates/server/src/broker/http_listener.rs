@@ -234,6 +234,39 @@ impl Morrow {
                 };
             }
         }
+        if let Some((name, action)) = path
+            .strip_prefix("/api/v1/views/")
+            .or_else(|| path.strip_prefix("/views/"))
+            .and_then(|value| value.split_once('/'))
+        {
+            if method == "POST" && matches!(action, "pause" | "resume" | "rebuild") {
+                let updated = match action {
+                    "pause" => self.set_view_paused(name, true).await,
+                    "resume" => self.set_view_paused(name, false).await,
+                    "rebuild" => self.rebuild_view(name).await?,
+                    _ => false,
+                };
+                return if updated {
+                    write_http_response(&mut stream, "202 Accepted", "application/json", b"{}")
+                        .await
+                } else {
+                    write_http_not_found(&mut stream).await
+                };
+            }
+        }
+        if method == "DELETE" {
+            if let Some(name) = path
+                .strip_prefix("/api/v1/views/")
+                .or_else(|| path.strip_prefix("/views/"))
+            {
+                return if self.delete_view(name).await {
+                    write_http_response(&mut stream, "204 No Content", "application/json", &[])
+                        .await
+                } else {
+                    write_http_not_found(&mut stream).await
+                };
+            }
+        }
         match path {
             "/cluster" | "/api/v1/cluster" => self.write_cluster_response(&mut stream).await,
             "/connections" => self.write_connections_response(&mut stream, None).await,

@@ -27,6 +27,10 @@ async fn configured_materialized_view_projects_committed_records() {
         Some(&b"hello"[..])
     );
     assert_eq!(views["orders-view"].view.entry_count(), 1);
+    drop(views);
+    assert!(broker.set_view_paused("orders-view", true).await);
+    assert!(broker.rebuild_view("orders-view").await.unwrap());
+    assert!(broker.set_view_paused("orders-view", false).await);
 }
 
 #[tokio::test]

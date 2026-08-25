@@ -535,6 +535,95 @@ impl Morrow {
         id: &str,
     ) -> Option<crate::transaction::TransactionStatus> {
         self.transactions.lock().await.status(id).cloned()
+    pub(super) async fn set_view_paused(&self, name: &str, paused: bool) -> bool {
+        let mut views = self.views.lock().await;
+        let Some(runtime) = views.get_mut(name) else {
+            return false;
+        };
+        runtime.paused = paused;
+        self.record_audit_event(crate::tenancy::AuditEvent {
+            sequence: 0,
+            timestamp_ms: self.hooks.clock.now_ms(),
+            actor: "admin".to_string(),
+            tenant: crate::tenancy::TenantId::new(runtime.view.tenant().to_string()).ok(),
+            action: if paused {
+                "view.pause".to_string()
+            } else {
+                "view.resume".to_string()
+            },
+            resource: format!("view/{name}"),
+            outcome: "success".to_string(),
+            details: std::collections::BTreeMap::new(),
+        });
+        true
+    }
+
+    pub(super) async fn rebuild_view(&self, name: &str) -> Result<bool> {
+        let definition = {
+            let views = self.views.lock().await;
+            let Some(runtime) = views.get(name) else {
+                return Ok(false);
+            };
+            runtime.definition.clone()
+        };
+        let mut records = self
+            .inner
+            .lock()
+            .await
+            .messages
+            .values()
+            .filter(|record| record.stream.as_deref() == Some(definition.source_stream.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        records.sort_by_key(|record| {
+            (
+                record.partition.unwrap_or_default(),
+                record.offset.unwrap_or_default(),
+            )
+        });
+        let mut updates = Vec::new();
+        for record in records {
+            let record = self.partition_logs.load_record(&record)?;
+            if let Some(update) = crate::broker::broker::view_update(&definition, &record) {
+                updates.push(update);
+            }
+        }
+        let mut views = self.views.lock().await;
+        let Some(runtime) = views.get_mut(name) else {
+            return Ok(false);
+        };
+        runtime.view.rebuild(&updates)?;
+        self.record_audit_event(crate::tenancy::AuditEvent {
+            sequence: 0,
+            timestamp_ms: self.hooks.clock.now_ms(),
+            actor: "admin".to_string(),
+            tenant: crate::tenancy::TenantId::new(runtime.view.tenant().to_string()).ok(),
+            action: "view.rebuild".to_string(),
+            resource: format!("view/{name}"),
+            outcome: "success".to_string(),
+            details: [("updates".to_string(), updates.len().to_string())]
+                .into_iter()
+                .collect(),
+        });
+        Ok(true)
+    }
+
+    pub(super) async fn delete_view(&self, name: &str) -> bool {
+        let mut views = self.views.lock().await;
+        let Some(runtime) = views.remove(name) else {
+            return false;
+        };
+        self.record_audit_event(crate::tenancy::AuditEvent {
+            sequence: 0,
+            timestamp_ms: self.hooks.clock.now_ms(),
+            actor: "admin".to_string(),
+            tenant: crate::tenancy::TenantId::new(runtime.view.tenant().to_string()).ok(),
+            action: "view.delete".to_string(),
+            resource: format!("view/{name}"),
+            outcome: "success".to_string(),
+            details: std::collections::BTreeMap::new(),
+        });
+        true
     }
 
     pub async fn serve(self) -> Result<()> {
