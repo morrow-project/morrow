@@ -1138,6 +1138,7 @@ dependencies = [
  "rustls",
  "serde_json",
  "server",
+ "tempfile",
  "tokio",
  "tokio-rustls",
  "wat",
