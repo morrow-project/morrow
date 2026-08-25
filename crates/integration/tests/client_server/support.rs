@@ -211,6 +211,7 @@ impl ClusterHarness {
                     snapshot_threshold: 100,
                 }),
                 streams: test_streams(),
+                views: Default::default(),
             };
             let broker = Morrow::open(config).unwrap();
             let server = broker.clone();
@@ -549,6 +550,7 @@ impl Harness {
             auth,
             cluster: None,
             streams: test_streams(),
+            views: Default::default(),
         };
         let broker = Morrow::open(config).unwrap();
         let server = broker.clone();

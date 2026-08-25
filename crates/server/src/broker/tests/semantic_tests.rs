@@ -1,6 +1,78 @@
 use super::*;
 
 #[tokio::test]
+async fn configured_materialized_view_projects_committed_records() {
+    let dir = TempDir::new().unwrap();
+    let mut config = test_config(dir.path());
+    config.views.insert(
+        "orders-view".to_string(),
+        crate::config::ViewConfig {
+            tenant: "default".to_string(),
+            source_stream: "orders".to_string(),
+            source_subject: Some("orders/*".to_string()),
+            key_header: None,
+            max_entries: 10,
+            max_value_bytes: 1024,
+            watch_capacity: 10,
+        },
+    );
+    let broker = deterministic_broker(config, Arc::new(ManualClock::new(1_000)), None);
+    let mut publisher = TestClient::connect_durable(&broker, "publisher", 25).await;
+    publisher.publish("orders/created", b"hello").await;
+    publisher.ping_roundtrip().await;
+
+    let views = broker.views.lock().await;
+    assert_eq!(
+        views["orders-view"].view.point_read("orders/created"),
+        Some(&b"hello"[..])
+    );
+    assert_eq!(views["orders-view"].view.entry_count(), 1);
+    drop(views);
+    assert!(broker.set_view_paused("orders-view", true).await);
+    assert!(broker.rebuild_view("orders-view").await.unwrap());
+    assert!(broker.set_view_paused("orders-view", false).await);
+}
+
+#[tokio::test]
+async fn dynamic_materialized_view_persists_definition_and_exposes_watch_cursor() {
+    let dir = TempDir::new().unwrap();
+    let config = test_config(dir.path());
+    let broker = deterministic_broker(config.clone(), Arc::new(ManualClock::new(1_000)), None);
+    assert!(
+        broker
+            .create_view(
+                "orders-watch",
+                crate::broker::state::ViewCreateRequest {
+                    tenant: "default".to_string(),
+                    source_stream: "orders".to_string(),
+                    source_subject: Some("orders/*".to_string()),
+                    key_header: None,
+                    max_entries: 10,
+                    max_value_bytes: 1024,
+                    watch_capacity: 10,
+                },
+            )
+            .await
+            .unwrap()
+    );
+    let mut publisher = TestClient::connect_durable(&broker, "publisher", 25).await;
+    publisher.publish("orders/created", b"hello").await;
+    publisher.ping_roundtrip().await;
+    let watch = broker.view_watch("orders-watch", 0).await.unwrap().unwrap();
+    assert_eq!(watch.events.len(), 1);
+    assert_eq!(watch.events[0].sequence, 1);
+    assert_eq!(watch.events[0].update.value, Some(b"hello".to_vec()));
+    drop(broker);
+
+    let reopened = Morrow::open(config).unwrap();
+    let views = reopened.views.lock().await;
+    assert_eq!(
+        views["orders-watch"].view.point_read("orders/created"),
+        Some(&b"hello"[..])
+    );
+}
+
+#[tokio::test]
 async fn auth_enabled_generates_fresh_nonce_per_connection() {
     let dir = TempDir::new().unwrap();
     let mut config = test_config(dir.path());

@@ -101,12 +101,16 @@ impl Morrow {
         let Some(request_target) = http_request_path(request_line) else {
             return write_http_not_found(&mut stream).await;
         };
-        let method = http_request_method(request_line).unwrap_or("GET");
+        let method = http_request_method(request_line)
+            .unwrap_or("GET")
+            .to_string();
         let (path, query) = request_target
             .split_once('?')
             .unwrap_or((request_target, ""));
+        let path = path.to_string();
+        let query = query.to_string();
 
-        if matches!(path, "/health/live" | "/api/v1/health/live") {
+        if matches!(path.as_str(), "/health/live" | "/api/v1/health/live") {
             return write_http_response(
                 &mut stream,
                 "200 OK",
@@ -116,7 +120,7 @@ impl Morrow {
             .await;
         }
 
-        if matches!(path, "/health/ready" | "/api/v1/health/ready") {
+        if matches!(path.as_str(), "/health/ready" | "/api/v1/health/ready") {
             let health = self.health_response().await;
             let status = if health.status == "ready" {
                 "200 OK"
@@ -133,12 +137,12 @@ impl Morrow {
         if !http_authorized(&request, admin_token) {
             return write_http_unauthorized(&mut stream).await;
         }
-        if method == "GET" && matches!(path, "/audit/status" | "/api/v1/audit/status") {
+        if method == "GET" && matches!(path.as_str(), "/audit/status" | "/api/v1/audit/status") {
             let body = serde_json::to_vec(&self.audit_status())
                 .context("serializing HTTP audit status response")?;
             return write_http_response(&mut stream, "200 OK", "application/json", &body).await;
         }
-        if method == "POST" && matches!(path, "/audit/verify" | "/api/v1/audit/verify") {
+        if method == "POST" && matches!(path.as_str(), "/audit/verify" | "/api/v1/audit/verify") {
             return match self.verify_audit_log() {
                 Ok(()) => {
                     write_http_response(
@@ -163,10 +167,11 @@ impl Morrow {
                 }
             };
         }
-        if method == "GET" && matches!(path, "/audit/export" | "/api/v1/audit/export") {
+        if method == "GET" && matches!(path.as_str(), "/audit/export" | "/api/v1/audit/export") {
             let body = self.export_audit_log()?;
             return write_http_response(&mut stream, "200 OK", "application/x-ndjson", &body).await;
         }
+        let body = read_http_body(&mut stream, &mut request).await?;
         if method == "DELETE" {
             if let Some(id) = path
                 .strip_prefix("/api/v1/dead-letters/")
@@ -218,11 +223,125 @@ impl Morrow {
                 .await;
             }
         }
-        match path {
+        if method == "GET" {
+            if let Some(name) = path
+                .strip_prefix("/api/v1/views/")
+                .or_else(|| path.strip_prefix("/views/"))
+                .and_then(|value| value.strip_suffix("/watch"))
+            {
+                let since = http_query_parameter(&query, "since")
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(0);
+                return match self.view_watch(name, since).await {
+                    Ok(Some(view)) => {
+                        let body = serde_json::to_vec(&view)
+                            .context("serializing HTTP view watch response")?;
+                        write_http_response(&mut stream, "200 OK", "application/json", &body).await
+                    }
+                    Ok(None) => write_http_not_found(&mut stream).await,
+                    Err(error) => {
+                        write_http_response(
+                            &mut stream,
+                            "409 Conflict",
+                            "application/json",
+                            error.to_string().as_bytes(),
+                        )
+                        .await
+                    }
+                };
+            }
+            if let Some((name, key)) = path
+                .strip_prefix("/api/v1/views/")
+                .or_else(|| path.strip_prefix("/views/"))
+                .and_then(|value| value.split_once('/'))
+            {
+                return match self.view_query(name, key).await {
+                    Some(view) => {
+                        let body = serde_json::to_vec(&view)
+                            .context("serializing HTTP view query response")?;
+                        write_http_response(&mut stream, "200 OK", "application/json", &body).await
+                    }
+                    None => write_http_not_found(&mut stream).await,
+                };
+            }
+        }
+        if method == "POST" {
+            if let Some(name) = path
+                .strip_prefix("/api/v1/views/")
+                .or_else(|| path.strip_prefix("/views/"))
+                .and_then(|value| value.strip_suffix("/create"))
+                .or_else(|| {
+                    path.strip_prefix("/api/v1/views/")
+                        .or_else(|| path.strip_prefix("/views/"))
+                        .filter(|value| !value.contains('/'))
+                })
+            {
+                let request: crate::broker::state::ViewCreateRequest =
+                    serde_json::from_slice(body).context("decoding view create request")?;
+                return match self.create_view(name, request).await {
+                    Ok(true) => {
+                        write_http_response(&mut stream, "201 Created", "application/json", b"{}")
+                            .await
+                    }
+                    Ok(false) => {
+                        write_http_response(
+                            &mut stream,
+                            "409 Conflict",
+                            "application/json",
+                            br#"{"error":"view already exists"}"#,
+                        )
+                        .await
+                    }
+                    Err(error) => {
+                        write_http_response(
+                            &mut stream,
+                            "400 Bad Request",
+                            "application/json",
+                            error.to_string().as_bytes(),
+                        )
+                        .await
+                    }
+                };
+            }
+        }
+        if let Some((name, action)) = path
+            .strip_prefix("/api/v1/views/")
+            .or_else(|| path.strip_prefix("/views/"))
+            .and_then(|value| value.split_once('/'))
+        {
+            if method == "POST" && matches!(action, "pause" | "resume" | "rebuild") {
+                let updated = match action {
+                    "pause" => self.set_view_paused(name, true).await,
+                    "resume" => self.set_view_paused(name, false).await,
+                    "rebuild" => self.rebuild_view(name).await?,
+                    _ => false,
+                };
+                return if updated {
+                    write_http_response(&mut stream, "202 Accepted", "application/json", b"{}")
+                        .await
+                } else {
+                    write_http_not_found(&mut stream).await
+                };
+            }
+        }
+        if method == "DELETE" {
+            if let Some(name) = path
+                .strip_prefix("/api/v1/views/")
+                .or_else(|| path.strip_prefix("/views/"))
+            {
+                return if self.delete_view(name).await {
+                    write_http_response(&mut stream, "204 No Content", "application/json", &[])
+                        .await
+                } else {
+                    write_http_not_found(&mut stream).await
+                };
+            }
+        }
+        match path.as_str() {
             "/cluster" | "/api/v1/cluster" => self.write_cluster_response(&mut stream).await,
             "/connections" => self.write_connections_response(&mut stream, None).await,
             "/api/v1/connections" => {
-                self.write_connections_response(&mut stream, Some(parse_page(query)))
+                self.write_connections_response(&mut stream, Some(parse_page(&query)))
                     .await
             }
             "/quotas" | "/api/v1/quotas" => self.write_quotas_response(&mut stream).await,
@@ -232,16 +351,17 @@ impl Morrow {
             "/routes" | "/api/v1/routes" => self.write_routes_response(&mut stream).await,
             "/subscriptions" => self.write_subscriptions_response(&mut stream, None).await,
             "/api/v1/subscriptions" => {
-                self.write_subscriptions_response(&mut stream, Some(parse_page(query)))
+                self.write_subscriptions_response(&mut stream, Some(parse_page(&query)))
                     .await
             }
             "/streams" | "/api/v1/streams" => self.write_streams_response(&mut stream).await,
+            "/views" | "/api/v1/views" => self.write_views_response(&mut stream).await,
             "/dead-letters" | "/api/v1/dead-letters" => {
-                self.write_dead_letters_response(&mut stream, parse_page(query))
+                self.write_dead_letters_response(&mut stream, parse_page(&query))
                     .await
             }
             "/producers" | "/api/v1/producers" => {
-                self.write_producers_response(&mut stream, parse_page(query))
+                self.write_producers_response(&mut stream, parse_page(&query))
                     .await
             }
             "/groups" | "/api/v1/groups" => self.write_groups_response(&mut stream).await,
@@ -252,6 +372,12 @@ impl Morrow {
             "/metrics" | "/api/v1/metrics" => self.write_metrics_response(&mut stream).await,
             _ => write_http_not_found(&mut stream).await,
         }
+    }
+
+    async fn write_views_response<W: AsyncWrite + Unpin>(&self, stream: &mut W) -> Result<()> {
+        let body = serde_json::to_vec(&self.views_response().await)
+            .context("serializing HTTP views response")?;
+        write_http_response(stream, "200 OK", "application/json", &body).await
     }
 
     async fn write_cluster_response<W: AsyncWrite + Unpin>(&self, stream: &mut W) -> Result<()> {
@@ -368,4 +494,36 @@ fn parse_page(query: &str) -> (usize, usize) {
         .and_then(|value| value.parse().ok())
         .unwrap_or(100);
     (offset, limit.clamp(1, 1_000))
+}
+
+async fn read_http_body<'a, S>(stream: &mut S, request: &'a mut Vec<u8>) -> Result<&'a [u8]>
+where
+    S: AsyncRead + Unpin,
+{
+    let header_end = request
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|position| position + 4)
+        .unwrap_or(request.len());
+    let content_length = request[..header_end]
+        .split(|byte| *byte == b'\n')
+        .filter_map(|line| std::str::from_utf8(line).ok()?.split_once(':'))
+        .find_map(|(name, value)| {
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse::<usize>().ok())
+                .flatten()
+        })
+        .unwrap_or(0);
+    crate::broker_ensure!(
+        content_length <= 64 * 1024,
+        "HTTP request body is too large"
+    );
+    let body_end = header_end.saturating_add(content_length);
+    while request.len() < body_end {
+        let mut buffer = [0_u8; 1024];
+        let read = stream.read(&mut buffer).await?;
+        crate::broker_ensure!(read > 0, "HTTP request body ended early");
+        request.extend_from_slice(&buffer[..read]);
+    }
+    Ok(&request[header_end..body_end])
 }

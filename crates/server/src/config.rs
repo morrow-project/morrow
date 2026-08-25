@@ -1,5 +1,6 @@
 use crate::error::{BrokerError, Result, ResultExt};
 use crate::stream::StreamCatalog;
+mod view_config;
 use std::{
     collections::HashMap,
     ffi::OsString,
@@ -7,6 +8,7 @@ use std::{
     path::{Path, PathBuf},
     time::Duration,
 };
+use view_config::get_views;
 pub const DEFAULT_MAX_ACK_TIMEOUT_MS: u64 = 300_000;
 pub const DEFAULT_MAX_IN_FLIGHT: usize = 4_096;
 pub const DEFAULT_MAX_FETCH_MESSAGES: usize = 1_024;
@@ -42,6 +44,7 @@ pub struct Config {
     pub auth: AuthConfig,
     pub cluster: Option<ClusterConfig>,
     pub streams: StreamCatalog,
+    pub views: HashMap<String, ViewConfig>,
 }
 #[derive(Debug, Clone)]
 pub struct TlsConfig {
@@ -84,6 +87,16 @@ pub struct TenantQuotaConfig {
     pub max_disk_bytes: u64,
     pub max_tasks: usize,
     pub max_background_tasks: usize,
+}
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ViewConfig {
+    pub tenant: String,
+    pub source_stream: String,
+    pub source_subject: Option<String>,
+    pub key_header: Option<String>,
+    pub max_entries: usize,
+    pub max_value_bytes: usize,
+    pub watch_capacity: usize,
 }
 #[derive(Debug, Clone, Default)]
 pub struct AuthConfig {
@@ -257,6 +270,7 @@ impl Config {
         let auth = get_auth_config(value)?;
         let cluster = get_cluster_config(value)?;
         let streams = get_streams_config(value)?;
+        let views = get_views(value)?;
 
         let config = Self {
             production,
@@ -291,6 +305,7 @@ impl Config {
             auth,
             cluster,
             streams,
+            views,
         };
         config.validate_impl(create_dirs)?;
         Ok(config)

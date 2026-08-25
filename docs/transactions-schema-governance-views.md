@@ -30,13 +30,12 @@ the contract.
 
 ## Materialized views
 
-A view is a bounded key/value projection over a compacted stream. Each update
-records its source stream, partition, and offset; the view exposes these
-consistency positions with point reads. Snapshots include the complete bounded
-map and positions. Rebuild sorts retained history by source position, making
-recovery deterministic. Watch cursors are bounded and expire explicitly rather
-than causing unbounded replay. View values, entries, and watch events are
-quota-limited and persisted atomically.
+A view is intended to be a bounded key/value projection over a compacted
+stream. The standalone `MaterializedView` library primitive supports update,
+snapshot, rebuild, point-read, and bounded-watch behavior, but the current
+`morrow-server` does not yet expose view definitions, projection workers, or
+administration/query endpoints. Views are therefore experimental/library-only
+until the server integration and real-process recovery tests are complete.
 
 Administration should audit schema changes, transaction terminal transitions,
 view rebuilds, and snapshot restores. Tenant authorization and storage

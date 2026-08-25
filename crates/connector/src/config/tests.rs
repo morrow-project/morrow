@@ -124,6 +124,7 @@ async fn secure_secret_permissions_are_used_for_tls_authentication() {
         },
         cluster: None,
         streams: server::stream::StreamCatalog::new(Vec::new()).unwrap(),
+        views: Default::default(),
     })
     .unwrap();
     let server = broker.clone();

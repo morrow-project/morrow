@@ -520,6 +520,45 @@ pub(super) struct QuotasResponse {
 }
 
 #[derive(Debug, serde::Serialize)]
+pub(super) struct ViewStatusResponse {
+    pub(super) name: String,
+    pub(super) tenant: String,
+    pub(super) source_stream: String,
+    pub(super) paused: bool,
+    pub(super) entries: usize,
+    pub(super) positions: std::collections::BTreeMap<String, u64>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub(super) struct ViewQueryResponse {
+    pub(super) name: String,
+    pub(super) tenant: String,
+    pub(super) key: String,
+    pub(super) value: Option<Vec<u8>>,
+    pub(super) positions: std::collections::BTreeMap<String, u64>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub(super) struct ViewCreateRequest {
+    pub(super) tenant: String,
+    pub(super) source_stream: String,
+    pub(super) source_subject: Option<String>,
+    pub(super) key_header: Option<String>,
+    pub(super) max_entries: usize,
+    pub(super) max_value_bytes: usize,
+    pub(super) watch_capacity: usize,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub(super) struct ViewWatchResponse {
+    pub(super) name: String,
+    pub(super) tenant: String,
+    pub(super) since: u64,
+    pub(super) events: Vec<crate::materialized_view::ViewEvent>,
+    pub(super) positions: std::collections::BTreeMap<String, u64>,
+}
+
+#[derive(Debug, serde::Serialize)]
 pub(super) struct StateQuotaUsage {
     pub(super) used: usize,
     pub(super) limit: usize,
