@@ -79,6 +79,7 @@ pub struct Morrow {
     pub(super) transactions: Arc<Mutex<crate::transaction::TransactionCoordinator>>,
     pub(super) views: Arc<Mutex<HashMap<String, ViewRuntime>>>,
     pub(super) reassignment: Arc<Mutex<crate::reassignment::ReassignmentController>>,
+    pub(super) cross_region: Arc<Mutex<crate::cross_region::CrossRegionReplicator>>,
 }
 
 impl Morrow {

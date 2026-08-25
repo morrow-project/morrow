@@ -621,6 +621,14 @@ impl Morrow {
             config.wal_dir.join("reassignments.json"),
             broker_capacities,
         )?;
+        let cross_region = crate::cross_region::CrossRegionReplicator::open(
+            config.wal_dir.join("cross-region.json"),
+            crate::cross_region::ReplicationPolicy {
+                max_lag_offsets: 10_000,
+                max_bandwidth_bytes_per_second: 64 * 1_048_576,
+                max_in_flight_chunks: 16,
+            },
+        )?;
         let wal = WalRuntime::new(wal);
         Ok(Self {
             inner: Arc::new(Mutex::new(DurableBrokerState {
@@ -680,6 +688,7 @@ impl Morrow {
             transactions: Arc::new(Mutex::new(transactions)),
             views: Arc::new(Mutex::new(views)),
             reassignment: Arc::new(Mutex::new(reassignment)),
+            cross_region: Arc::new(Mutex::new(cross_region)),
         })
     }
 
@@ -733,6 +742,26 @@ impl Morrow {
         id: &str,
     ) -> Option<crate::transaction::TransactionStatus> {
         self.transactions.lock().await.status(id).cloned()
+    }
+
+    pub async fn cross_region_promote(&self, expected_token: u64) -> Result<u64> {
+        self.cross_region.lock().await.promote(expected_token)
+    }
+
+    pub async fn cross_region_fence(&self) -> Result<u64> {
+        self.cross_region.lock().await.fence()
+    }
+
+    pub async fn cross_region_status(
+        &self,
+        stream: &str,
+        partition: crate::stream::PartitionId,
+        primary_high_watermark: u64,
+    ) -> crate::cross_region::ReplicationStatus {
+        self.cross_region
+            .lock()
+            .await
+            .status(stream, partition, primary_high_watermark)
     }
 
     pub(super) async fn set_view_paused(&self, name: &str, paused: bool) -> bool {
