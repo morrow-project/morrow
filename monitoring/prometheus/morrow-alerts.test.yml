@@ -1,0 +1,112 @@
+rule_files:
+  - morrow-alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  - interval: 1m
+    input_series:
+      - series: 'morrow_cluster_ready{instance="node-1"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+      - series: 'morrow_cluster_peers{instance="node-1"}'
+        values: '3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3'
+      - series: 'morrow_wal_bytes{instance="node-1"}'
+        values: '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+      - series: 'morrow_wal_checkpoints_total{instance="node-1"}'
+        values: '1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1'
+      - series: 'morrow_wal_last_fsync_duration_us{instance="node-1"}'
+        values: '60000 60000 60000 60000 60000 60000 60000 60000 60000 60000 60000 60000 60000 60000 60000 60000 60000 60000'
+      - series: 'morrow_publishes_total{instance="node-1"}'
+        values: '1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18'
+      - series: 'morrow_consumer_lag_messages{instance="node-1"}'
+        values: '12000 12000 12000 12000 12000 12000 12000 12000 12000 12000 12000 12000 12000 12000 12000 12000 12000 12000'
+      - series: 'morrow_quota_rejections_total{instance="node-1",resource="route_connections"}'
+        values: '0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17'
+      - series: 'morrow_audit_failure{instance="node-1"}'
+        values: '1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: MorrowReadinessUnavailable
+        exp_alerts:
+          - exp_labels:
+              instance: node-1
+              severity: critical
+              component: readiness
+            exp_annotations:
+              affected_component: client-data-plane
+              description: The broker has reported a non-ready state continuously for five minutes.
+              runbook_url: docs/runbooks/quorum-loss.md
+              summary: Morrow readiness is unavailable
+      - eval_time: 5m
+        alertname: MorrowMetadataQuorumLoss
+        exp_alerts:
+          - exp_labels:
+              instance: node-1
+              severity: critical
+              component: metadata-quorum
+            exp_annotations:
+              affected_component: raft-metadata
+              description: A clustered broker has peers configured but is not ready to serve durable metadata.
+              runbook_url: docs/runbooks/quorum-loss.md
+              summary: Morrow metadata quorum is unavailable
+      - eval_time: 16m
+        alertname: MorrowWALCheckpointStalled
+        exp_alerts:
+          - exp_labels:
+              instance: node-1
+              severity: critical
+              component: wal
+            exp_annotations:
+              affected_component: wal-checkpointing
+              description: The broker is receiving publishes but has recorded no WAL checkpoint for fifteen minutes.
+              runbook_url: docs/runbooks/storage-corruption.md
+              summary: Morrow WAL checkpoints are stalled
+      - eval_time: 10m
+        alertname: MorrowFsyncLatencyHigh
+        exp_alerts:
+          - exp_labels:
+              instance: node-1
+              severity: warning
+              component: wal
+            exp_annotations:
+              affected_component: durable-storage
+              description: The latest WAL fsync has exceeded 50 milliseconds for ten minutes.
+              runbook_url: docs/runbooks/disk-full.md
+              summary: Morrow WAL fsync latency is high
+      - eval_time: 10m
+        alertname: MorrowConsumerLagHigh
+        exp_alerts:
+          - exp_labels:
+              instance: node-1
+              severity: warning
+              component: consumers
+            exp_annotations:
+              affected_component: durable-consumers
+              description: Aggregate consumer backlog has exceeded ten thousand messages for ten minutes.
+              runbook_url: docs/runbooks/node-replacement.md
+              summary: Morrow consumer lag is high
+      - eval_time: 10m
+        alertname: MorrowRouteRejections
+        exp_alerts:
+          - exp_labels:
+              instance: node-1
+              resource: route_connections
+              severity: warning
+              component: route-mesh
+            exp_annotations:
+              affected_component: route-mesh
+              description: Route connection quota rejections have continued for five minutes.
+              runbook_url: docs/runbooks/quorum-loss.md
+              summary: Morrow route connections are being rejected
+      - eval_time: 2m
+        alertname: MorrowAuditFailure
+        exp_alerts:
+          - exp_labels:
+              instance: node-1
+              severity: critical
+              component: audit
+            exp_annotations:
+              affected_component: audit-log
+              description: Audit failure state is set or audit writes have failed recently.
+              runbook_url: docs/runbooks/credential-compromise.md
+              summary: Morrow audit logging is failing
