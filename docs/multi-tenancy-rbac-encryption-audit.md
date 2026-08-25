@@ -26,6 +26,8 @@ does not require a restart.
   authenticated-tenant transfer, outbound memory, durable appends/recovery,
   transient and durable subscriptions, and pull-consumer workers are enforced
   today. Retention rebuilds disk usage after records are removed.
+  The durable stream continues beyond the bounded in-memory recent record
+  window; startup verification and export scan the complete history.
 
 ## Operational threat model
 
@@ -34,7 +36,10 @@ must fail closed when a referenced key cannot be loaded; rotation is safe when
 the new key is available, and old data remains readable until its version is
 revoked. Operators should verify exported audit chains before shipping them to
 an external audit stream and should treat a failed verification as an
-integrity incident.
+integrity incident. Monitor audit filesystem capacity and archive without
+removing a prefix unless a separately preserved chain checkpoint and its
+verification evidence are retained. Policy mutation paths return audit append
+failures so operators can treat them as a degraded security state.
 
 The current default bootstrap maps unauthenticated connection admission to the
 `default` tenant. Authenticated clients can declare a bounded tenant,

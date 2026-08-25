@@ -80,12 +80,17 @@ impl Morrow {
         )
     }
 
-    pub(super) fn record_audit_event(&self, event: crate::tenancy::AuditEvent) {
-        let _ = self
+    pub(super) fn record_audit_event(&self, event: crate::tenancy::AuditEvent) -> Result<()> {
+        let result = self
             .audit
             .lock()
             .expect("audit log lock poisoned")
-            .append(event);
+            .append(event)
+            .map(|_| ());
+        if result.is_err() {
+            self.audit_failure.store(true, Ordering::Relaxed);
+        }
+        result
     }
 
     pub(super) fn record_authorization_denial(
@@ -108,7 +113,9 @@ impl Morrow {
             outcome: "denied".to_string(),
             details,
         };
-        self.record_audit_event(event);
+        if let Err(error) = self.record_audit_event(event) {
+            error!(%error, "audit append failed while recording authorization denial");
+        }
     }
 
     pub(super) async fn authorize_publish(

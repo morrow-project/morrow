@@ -28,6 +28,13 @@ admin TLS on a non-loopback admin listener. The explicit
 `allow_insecure_development` override is intended only for isolated local
 testing.
 
+Audit durability is configured with `audit_max_records`, the bounded recent
+in-memory window, and `audit_segment_bytes`, the on-disk rotation threshold.
+The durable audit chain is never truncated by the in-memory window; archive
+segments only with their chain verification evidence. Morrow does not perform
+automatic audit retention or deletion, so operators must provision storage and
+retain the segment sequence needed for full-chain verification.
+
 ### WebSocket listener
 
 The WebSocket listener is independent from the native TCP listener. Enable it

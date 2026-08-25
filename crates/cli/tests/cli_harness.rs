@@ -350,6 +350,8 @@ impl Harness {
             max_fetch_messages: server::config::DEFAULT_MAX_FETCH_MESSAGES,
             max_fetch_bytes: server::config::DEFAULT_MAX_FETCH_BYTES,
             max_encoded_batch_bytes: server::config::DEFAULT_MAX_ENCODED_BATCH_BYTES,
+            audit_max_records: 10_000,
+            audit_segment_bytes: 16 * 1_048_576,
             verbose: false,
             tls,
             auth,

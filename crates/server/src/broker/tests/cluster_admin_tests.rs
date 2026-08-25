@@ -209,6 +209,18 @@ async fn http_readiness_reports_and_recovers_from_storage_failure() {
 }
 
 #[tokio::test]
+async fn http_readiness_fails_closed_on_audit_failure() {
+    let scenario = Scenario::new();
+    scenario
+        .broker()
+        .audit_failure
+        .store(true, Ordering::Relaxed);
+    let degraded = http_request(scenario.broker(), "/health/ready").await;
+    assert!(degraded.starts_with("HTTP/1.1 503 Service Unavailable\r\n"));
+    assert!(degraded.contains(r#""reason":"audit_failure""#));
+}
+
+#[tokio::test]
 async fn successful_maintenance_does_not_clear_storage_failure() {
     let scenario = Scenario::new();
     scenario
@@ -261,6 +273,8 @@ async fn http_metrics_endpoint_is_authenticated_and_bounded() {
     assert!(response.contains("morrow_publish_latency_us_bucket{le=\"+Inf\"} 0\n"));
     assert!(response.contains("morrow_middleware_executions_total 0\n"));
     assert!(response.contains("morrow_wal_rotations_total 0\n"));
+    assert!(response.contains("morrow_audit_records_written_total 0\n"));
+    assert!(response.contains("morrow_audit_rotations_total 0\n"));
     assert!(response.contains("morrow_cluster_delta_applications_total 0\n"));
     assert!(response.contains("morrow_wal_last_fsync_duration_us 0\n"));
     assert!(response.contains("morrow_partition_retained_messages 0\n"));
@@ -270,6 +284,21 @@ async fn http_metrics_endpoint_is_authenticated_and_bounded() {
     assert!(response.contains("morrow_connectors_connected 0\n"));
     assert!(!response.contains("subject="));
     assert!(!response.contains("client_id="));
+}
+
+#[tokio::test]
+async fn authenticated_audit_status_and_export_endpoints_are_bounded() {
+    let scenario = Scenario::new();
+    let unauthorized = http_request_with_auth(scenario.broker(), "/audit/status", None).await;
+    let status = http_request(scenario.broker(), "/api/v1/audit/status").await;
+    let export = http_request(scenario.broker(), "/api/v1/audit/export").await;
+
+    assert!(unauthorized.starts_with("HTTP/1.1 401 Unauthorized\r\n"));
+    assert!(status.starts_with("HTTP/1.1 200 OK\r\n"));
+    assert!(status.contains("\"records_written\":0"));
+    assert!(status.contains("\"rotations\":0"));
+    assert!(export.starts_with("HTTP/1.1 200 OK\r\n"));
+    assert!(export.contains("content-type: application/x-ndjson"));
 }
 
 #[tokio::test]

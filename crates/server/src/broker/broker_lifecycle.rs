@@ -286,10 +286,13 @@ impl Morrow {
             );
         }
         let policy = Arc::new(crate::tenancy::PolicyStore::default());
-        let audit = Arc::new(std::sync::Mutex::new(crate::tenancy::AuditLog::open(
-            config.wal_dir.join("audit.log"),
-            10_000,
-        )?));
+        let audit = Arc::new(std::sync::Mutex::new(
+            crate::tenancy::AuditLog::open_with_segment_bytes(
+                config.wal_dir.join("audit.log"),
+                config.audit_max_records,
+                config.audit_segment_bytes,
+            )?,
+        ));
         let transaction_limits = crate::transaction::TransactionLimits {
             max_messages: 10_000,
             max_bytes: 64 * 1_048_576,
@@ -373,6 +376,7 @@ impl Morrow {
             cluster_application_metrics: Arc::new(ClusterApplicationMetrics::default()),
             metrics: Arc::new(BrokerMetrics::default()),
             storage_failure: Arc::new(AtomicBool::new(false)),
+            audit_failure: Arc::new(AtomicBool::new(false)),
             shutting_down: Arc::new(AtomicBool::new(false)),
             redelivery_notify: Arc::new(Notify::new()),
             pull_waiters: PullWaiterRegistry::default(),
@@ -618,6 +622,8 @@ impl Morrow {
             ("degraded", Some("shutting_down"))
         } else if self.storage_failure.load(Ordering::Relaxed) {
             ("degraded", Some("storage_failure"))
+        } else if self.audit_failure.load(Ordering::Relaxed) {
+            ("degraded", Some("audit_failure"))
         } else if route_degraded {
             ("degraded", Some("route_degraded"))
         } else if quorum_lost {
@@ -718,6 +724,7 @@ impl Morrow {
             .iter()
             .map(|stream| stream.partition_status.len())
             .sum::<usize>();
+        let audit = self.audit_status();
         let mut metrics = String::new();
         metrics.push_str("# HELP morrow_connections Current client connections.\n");
         metrics.push_str("# TYPE morrow_connections gauge\n");
@@ -1109,6 +1116,57 @@ impl Morrow {
         metrics.push_str(&format!(
             "morrow_tenant_memory_bytes {tenant_memory_bytes}\n"
         ));
+        metrics
+            .push_str("# HELP morrow_audit_records_written_total Durable audit records written.\n");
+        metrics.push_str("# TYPE morrow_audit_records_written_total counter\n");
+        metrics.push_str(&format!(
+            "morrow_audit_records_written_total {}\n",
+            audit.records_written
+        ));
+        metrics.push_str("# HELP morrow_audit_bytes_written_total Durable audit bytes written.\n");
+        metrics.push_str("# TYPE morrow_audit_bytes_written_total counter\n");
+        metrics.push_str(&format!(
+            "morrow_audit_bytes_written_total {}\n",
+            audit.bytes_written
+        ));
+        metrics.push_str("# HELP morrow_audit_rotations_total Audit segment rotations.\n");
+        metrics.push_str("# TYPE morrow_audit_rotations_total counter\n");
+        metrics.push_str(&format!(
+            "morrow_audit_rotations_total {}\n",
+            audit.rotations
+        ));
+        metrics.push_str("# HELP morrow_audit_export_position Current audit export position.\n");
+        metrics.push_str("# TYPE morrow_audit_export_position gauge\n");
+        metrics.push_str(&format!(
+            "morrow_audit_export_position {}\n",
+            audit.export_position
+        ));
+        metrics.push_str("# HELP morrow_audit_write_failures_total Audit write failures.\n");
+        metrics.push_str("# TYPE morrow_audit_write_failures_total counter\n");
+        metrics.push_str(&format!(
+            "morrow_audit_write_failures_total {}\n",
+            audit.write_failures
+        ));
+        metrics.push_str(
+            "# HELP morrow_audit_verification_failures_total Audit verification failures.\n",
+        );
+        metrics.push_str("# TYPE morrow_audit_verification_failures_total counter\n");
+        metrics.push_str(&format!(
+            "morrow_audit_verification_failures_total {}\n",
+            audit.verification_failures
+        ));
+        metrics.push_str("# HELP morrow_audit_failure Whether audit writes have failed.\n");
+        metrics.push_str("# TYPE morrow_audit_failure gauge\n");
+        metrics.push_str(&format!(
+            "morrow_audit_failure {}\n",
+            self.audit_failure.load(Ordering::Relaxed) as u8
+        ));
+        if let Some(oldest) = audit.oldest_retained_sequence {
+            metrics.push_str(&format!("morrow_audit_oldest_retained_sequence {oldest}\n"));
+        }
+        if let Some(newest) = audit.newest_retained_sequence {
+            metrics.push_str(&format!("morrow_audit_newest_retained_sequence {newest}\n"));
+        }
         metrics
     }
 

@@ -27,6 +27,7 @@ pub struct Morrow {
     pub(super) cluster_application_metrics: Arc<ClusterApplicationMetrics>,
     pub(super) metrics: Arc<BrokerMetrics>,
     pub(super) storage_failure: Arc<AtomicBool>,
+    pub(super) audit_failure: Arc<AtomicBool>,
     pub(super) shutting_down: Arc<AtomicBool>,
     pub(super) redelivery_notify: Arc<Notify>,
     pub(super) pull_waiters: PullWaiterRegistry,
@@ -59,6 +60,10 @@ impl Morrow {
 
     pub fn verify_audit_log(&self) -> Result<()> {
         self.audit.lock().expect("audit log lock poisoned").verify()
+    }
+
+    pub fn audit_status(&self) -> crate::tenancy::AuditStatus {
+        self.audit.lock().expect("audit log lock poisoned").status()
     }
 
     pub fn policy_snapshot(&self) -> crate::tenancy::PolicySnapshot {
@@ -96,7 +101,7 @@ impl Morrow {
             details: [("generation".to_string(), generation.to_string())]
                 .into_iter()
                 .collect(),
-        });
+        })?;
         Ok(())
     }
 

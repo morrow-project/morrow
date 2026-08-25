@@ -28,6 +28,8 @@
   "max_fetch_messages": 1024,
   "max_fetch_bytes": 16777216,
   "max_encoded_batch_bytes": 20971520,
+  "audit_max_records": 10000,
+  "audit_segment_bytes": 16777216,
   "verbose": false,
   "tls": null,
   "auth": {

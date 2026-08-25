@@ -133,6 +133,40 @@ impl Morrow {
         if !http_authorized(&request, admin_token) {
             return write_http_unauthorized(&mut stream).await;
         }
+        if method == "GET" && matches!(path, "/audit/status" | "/api/v1/audit/status") {
+            let body = serde_json::to_vec(&self.audit_status())
+                .context("serializing HTTP audit status response")?;
+            return write_http_response(&mut stream, "200 OK", "application/json", &body).await;
+        }
+        if method == "POST" && matches!(path, "/audit/verify" | "/api/v1/audit/verify") {
+            return match self.verify_audit_log() {
+                Ok(()) => {
+                    write_http_response(
+                        &mut stream,
+                        "200 OK",
+                        "application/json",
+                        br#"{"verified":true}"#,
+                    )
+                    .await
+                }
+                Err(error) => {
+                    let body = serde_json::json!({"verified": false, "error": error.to_string()});
+                    let body = serde_json::to_vec(&body)
+                        .context("serializing HTTP audit verification response")?;
+                    write_http_response(
+                        &mut stream,
+                        "500 Internal Server Error",
+                        "application/json",
+                        &body,
+                    )
+                    .await
+                }
+            };
+        }
+        if method == "GET" && matches!(path, "/audit/export" | "/api/v1/audit/export") {
+            let body = self.export_audit_log()?;
+            return write_http_response(&mut stream, "200 OK", "application/x-ndjson", &body).await;
+        }
         if method == "DELETE" {
             if let Some(id) = path
                 .strip_prefix("/api/v1/dead-letters/")
