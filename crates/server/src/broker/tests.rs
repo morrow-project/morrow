@@ -702,5 +702,6 @@ mod retention_limit_tests;
 mod route_interest_tests;
 mod semantic_tests;
 mod simulation_tests;
+mod startup_tests;
 mod state_sharding_tests;
 mod stream_retention_tests;

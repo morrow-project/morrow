@@ -1,22 +1,19 @@
 use super::*;
 
 impl Morrow {
-    pub(super) fn spawn_http_status_listener(&self) {
-        let Some(listen) = self.config.http_listen else {
+    pub(super) fn spawn_http_status_listener(&self, listener: Option<TcpListener>) {
+        let Some(listener) = listener else {
             return;
         };
         let broker = self.clone();
         tokio::spawn(async move {
-            if let Err(err) = broker.serve_http_status(listen).await {
+            if let Err(err) = broker.serve_http_status(listener).await {
                 error!(error = ?err, "http status error");
             }
         });
     }
 
-    pub(super) async fn serve_http_status(&self, listen: SocketAddr) -> Result<()> {
-        let listener = TcpListener::bind(listen)
-            .await
-            .with_context(|| format!("binding HTTP status listener {listen}"))?;
+    pub(super) async fn serve_http_status(&self, listener: TcpListener) -> Result<()> {
         loop {
             let (stream, _) = listener
                 .accept()

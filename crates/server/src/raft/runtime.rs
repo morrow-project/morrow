@@ -170,7 +170,7 @@ impl RaftRuntime {
         })
     }
 
-    pub fn spawn_listener(&self, listen: SocketAddr) {
+    pub fn spawn_listener(&self, listener: TcpListener) {
         let raft = self.raft.clone();
         let state_machine = self.state_machine.clone();
         let auth_token = self.auth_token.clone();
@@ -181,7 +181,7 @@ impl RaftRuntime {
             if let Err(err) = serve_raft(
                 raft,
                 state_machine,
-                listen,
+                listener,
                 auth_token,
                 partition_data,
                 tls,

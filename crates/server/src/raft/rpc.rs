@@ -33,15 +33,12 @@ pub(super) enum RaftResponse {
 pub(super) async fn serve_raft(
     raft: BrokerRaft,
     state_machine: StateMachineStore,
-    listen: SocketAddr,
+    listener: TcpListener,
     auth_token: String,
     partition_data: SharedReplicaData,
     tls: Option<RaftTlsRuntime>,
     quotas: Arc<crate::quota::QuotaRuntime>,
 ) -> Result<()> {
-    let listener = TcpListener::bind(listen)
-        .await
-        .with_context(|| format!("binding Raft listener {listen}"))?;
     loop {
         let (stream, _) = listener.accept().await.context("accepting Raft RPC")?;
         let Some(permit) = quotas.try_raft() else {

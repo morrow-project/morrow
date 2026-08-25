@@ -66,14 +66,11 @@ impl RouteMesh {
         }))
     }
 
-    pub(super) async fn start(&self, broker: Morrow) -> Result<()> {
-        let (listen, reconnect_ms) = {
+    pub(super) async fn start(&self, broker: Morrow, listener: TcpListener) -> Result<()> {
+        let reconnect_ms = {
             let state = self.inner.lock().await;
-            (state.route_listen, state.reconnect_ms)
+            state.reconnect_ms
         };
-        let listener = TcpListener::bind(listen)
-            .await
-            .with_context(|| format!("binding route listener {listen}"))?;
         let accept_mesh = self.clone();
         let accept_broker = broker.clone();
         let accept_auth_token = self.auth_token.clone();
