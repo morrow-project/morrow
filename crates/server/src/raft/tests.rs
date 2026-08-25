@@ -1,4 +1,6 @@
 use super::*;
+use crate::partition_log::MessageEnvelope;
+use crate::stream::PartitionId;
 use crate::stream::{
     PartitionFallback, PartitioningPolicy, PartitioningStrategy, RetentionPolicy, StoragePolicy,
     StreamDefinition, StreamId,
@@ -133,6 +135,48 @@ async fn raft_request_rejects_node_id_that_differs_from_certificate() {
     assert!(
         err.to_string()
             .contains("Raft request node ID does not match peer certificate")
+    );
+}
+
+#[tokio::test]
+async fn binary_partition_frames_preserve_byte_strings_and_reject_unknown_versions() {
+    let request = RaftRequest::DataAppend(DataAppendRequest {
+        leader_id: 1,
+        leader_epoch: 2,
+        fsync: true,
+        committed_high_watermark: Some(4),
+        envelope: MessageEnvelope {
+            namespace: "default".into(),
+            stream: StreamId::new("orders").unwrap(),
+            partition: PartitionId(0),
+            offset: 5,
+            subject: "orders.created".into(),
+            key: Some(vec![0, 1, 255]),
+            headers: Vec::new(),
+            timestamp_ms: 1,
+            reply_to: None,
+            schema_id: None,
+            payload: vec![0, 127, 255],
+            partitioning_epoch: 1,
+            leader_epoch: 2,
+            legacy_seq: 0,
+        },
+    });
+    let mut frame = Vec::new();
+    write_frame(&mut frame, &request).await.unwrap();
+    assert_eq!(frame[4], RAFT_PROTOCOL_VERSION);
+    assert!(!frame.windows(3).any(|window| window == [0, b',', 1]));
+    let mut reader = &frame[..];
+    let decoded: RaftRequest = read_frame(&mut reader).await.unwrap();
+    assert!(matches!(decoded, RaftRequest::DataAppend(_)));
+
+    frame[4] = RAFT_PROTOCOL_VERSION.saturating_add(1);
+    let mut reader = &frame[..];
+    let error = read_frame::<_, RaftRequest>(&mut reader).await.unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("unsupported Raft protocol version")
     );
 }
 

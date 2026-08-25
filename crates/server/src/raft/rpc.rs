@@ -187,7 +187,11 @@ where
     W: AsyncWrite + Unpin,
     T: Serialize,
 {
-    let body = serde_json::to_vec(value).context("serializing Raft frame")?;
+    // CBOR preserves byte strings as bytes (rather than JSON integer arrays)
+    // while retaining deterministic, length-delimited incremental framing.
+    let mut body = Vec::new();
+    ciborium::into_writer(value, &mut body).context("serializing Raft frame")?;
+    body.insert(0, RAFT_PROTOCOL_VERSION);
     crate::broker_ensure!(
         body.len() <= MAX_RAFT_FRAME,
         "Raft frame exceeds maximum size"
@@ -221,5 +225,12 @@ where
     )
     .await
     .map_err(|_| BrokerError::msg("Raft frame read timed out"))??;
-    serde_json::from_slice(&body).context("decoding Raft frame")
+    let (version, payload) = body
+        .split_first()
+        .ok_or_else(|| BrokerError::msg("empty Raft frame"))?;
+    crate::broker_ensure!(
+        *version == RAFT_PROTOCOL_VERSION,
+        "unsupported Raft protocol version"
+    );
+    ciborium::from_reader(payload).context("decoding Raft frame")
 }

@@ -22,6 +22,12 @@ offset and digest match the controller's partition commit; non-stable phases
 fence foreground partition commits. Legacy snapshots normalize missing fields
 to generation 1, the full replica set, and `Stable`.
 
+Peer partition RPCs use the versioned, length-delimited binary Raft frame
+codec. CBOR byte strings carry payloads and keys without JSON integer-array
+expansion; the configured frame limit and read deadline bound allocation and
+slowloris exposure. Unknown protocol versions are rejected before decoding,
+so rolling upgrades cannot silently fall back to a weaker contract.
+
 The placement planner orders partitions deterministically and scores brokers by
 disk utilization, partition count, leader count, throughput, and node ID. It
 filters draining/decommissioned brokers and applies allowed-region and replica
