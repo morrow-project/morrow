@@ -55,6 +55,7 @@ install -D -m 0644 LICENSE %{buildroot}%{_docdir}/morrow/LICENSE
 install -D -m 0644 README.md %{buildroot}%{_docdir}/morrow/README.md
 install -D -m 0644 docs/building.md %{buildroot}%{_docdir}/morrow/building.md
 install -D -m 0644 docs/operations.md %{buildroot}%{_docdir}/morrow/operations.md
+install -D -m 0644 docs/release-supply-chain.md %{buildroot}%{_docdir}/morrow/release-supply-chain.md
 install -D -m 0644 docs/packaging-systemd.md %{buildroot}%{_docdir}/morrow/packaging-systemd.md
 install -d -m 0750 %{buildroot}/var/lib/morrow
 install -D -m 0644 %{SOURCE1} %{buildroot}%{_unitdir}/morrow.service
