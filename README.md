@@ -97,6 +97,8 @@ Read the complete wire reference in
 - [WebSocket client](clients/morrow-ws/README.md)
 - [Contributing](docs/contributing.md)
 - [Operations and deployment](docs/operations.md)
+- [Service SLOs and error budgets](docs/service-slos.md)
+- [Prometheus alert rules](docs/prometheus-alerts.md)
 - [Dynamic consumer groups](docs/consumer-groups.md)
 - [Server architecture](crates/server/ARCHITECTURE.md)
 - [Protocol crate](crates/protocol/README.md)
