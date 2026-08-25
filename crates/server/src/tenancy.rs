@@ -282,6 +282,8 @@ pub struct AuditRecord {
 pub struct AuditLog {
     records: Vec<AuditRecord>,
     max_records: usize,
+    next_sequence: u64,
+    last_hash: String,
     path: Option<PathBuf>,
 }
 
@@ -290,6 +292,8 @@ impl Default for AuditLog {
         Self {
             records: Vec::new(),
             max_records: 10_000,
+            next_sequence: 0,
+            last_hash: "0".repeat(64),
             path: None,
         }
     }
@@ -301,6 +305,8 @@ impl AuditLog {
         Ok(Self {
             records: Vec::new(),
             max_records,
+            next_sequence: 0,
+            last_hash: "0".repeat(64),
             path: None,
         })
     }
@@ -309,6 +315,8 @@ impl AuditLog {
         crate::broker_ensure!(max_records > 0, "audit log capacity must be positive");
         let path = path.as_ref().to_path_buf();
         let mut records = Vec::new();
+        let mut next_sequence = 0;
+        let mut last_hash = "0".repeat(64);
         if path.exists() {
             let file = File::open(&path)
                 .map_err(|error| BrokerError::with_source("opening audit log", error))?;
@@ -318,32 +326,29 @@ impl AuditLog {
                 if line.trim().is_empty() {
                     continue;
                 }
-                records.push(
-                    serde_json::from_str(&line).map_err(|error| {
-                        BrokerError::with_source("decoding audit record", error)
-                    })?,
-                );
-                crate::broker_ensure!(records.len() <= max_records, "audit log capacity exceeded");
+                let record: AuditRecord = serde_json::from_str(&line)
+                    .map_err(|error| BrokerError::with_source("decoding audit record", error))?;
+                verify_audit_record(&record, next_sequence, &last_hash)?;
+                next_sequence = next_sequence.saturating_add(1);
+                last_hash = record.hash.clone();
+                records.push(record);
+                if records.len() > max_records {
+                    records.remove(0);
+                }
             }
         }
-        Self::verify_export(&records)?;
         Ok(Self {
             records,
             max_records,
+            next_sequence,
+            last_hash,
             path: Some(path),
         })
     }
 
     pub fn append(&mut self, mut event: AuditEvent) -> Result<&AuditRecord> {
-        crate::broker_ensure!(
-            self.records.len() < self.max_records,
-            "audit log capacity exceeded"
-        );
-        event.sequence = self.records.len() as u64;
-        let previous_hash = self
-            .records
-            .last()
-            .map_or_else(|| "0".repeat(64), |record| record.hash.clone());
+        event.sequence = self.next_sequence;
+        let previous_hash = self.last_hash.clone();
         let hash = audit_hash(&event, &previous_hash)?;
         let record = AuditRecord {
             event,
@@ -363,7 +368,12 @@ impl AuditLog {
             file.sync_data()
                 .map_err(|error| BrokerError::with_source("syncing audit record", error))?;
         }
+        self.next_sequence = self.next_sequence.saturating_add(1);
+        self.last_hash = record.hash.clone();
         self.records.push(record);
+        if self.records.len() > self.max_records {
+            self.records.remove(0);
+        }
         Ok(self.records.last().expect("record was appended"))
     }
 
@@ -380,7 +390,11 @@ impl AuditLog {
     }
 
     pub fn verify(&self) -> Result<()> {
-        verify_audit_records(&self.records)
+        if let Some(path) = &self.path {
+            verify_audit_file(path)
+        } else {
+            verify_audit_records(&self.records)
+        }
     }
 
     pub fn verify_export(records: &[AuditRecord]) -> Result<()> {
@@ -390,10 +404,23 @@ impl AuditLog {
     pub fn export_json(&self) -> Result<Vec<u8>> {
         self.verify()?;
         let mut output = Vec::new();
-        for record in &self.records {
-            serde_json::to_writer(&mut output, record)
-                .map_err(|error| BrokerError::with_source("encoding audit export", error))?;
-            output.push(b'\n');
+        if let Some(path) = &self.path {
+            let file = File::open(path)
+                .map_err(|error| BrokerError::with_source("opening audit export", error))?;
+            for line in BufReader::new(file).lines() {
+                let line =
+                    line.map_err(|error| BrokerError::with_source("reading audit export", error))?;
+                if !line.trim().is_empty() {
+                    output.extend_from_slice(line.as_bytes());
+                    output.push(b'\n');
+                }
+            }
+        } else {
+            for record in &self.records {
+                serde_json::to_writer(&mut output, record)
+                    .map_err(|error| BrokerError::with_source("encoding audit export", error))?;
+                output.push(b'\n');
+            }
         }
         Ok(output)
     }
@@ -414,19 +441,43 @@ fn audit_hash(event: &AuditEvent, previous_hash: &str) -> Result<String> {
 fn verify_audit_records(records: &[AuditRecord]) -> Result<()> {
     let mut previous_hash = "0".repeat(64);
     for (sequence, record) in records.iter().enumerate() {
-        crate::broker_ensure!(
-            record.event.sequence == sequence as u64,
-            "audit sequence is invalid"
-        );
-        crate::broker_ensure!(
-            record.previous_hash == previous_hash,
-            "audit chain link is invalid"
-        );
-        crate::broker_ensure!(
-            audit_hash(&record.event, &record.previous_hash)? == record.hash,
-            "audit record hash is invalid"
-        );
+        verify_audit_record(record, sequence as u64, &previous_hash)?;
         previous_hash = record.hash.clone();
+    }
+    Ok(())
+}
+
+fn verify_audit_record(record: &AuditRecord, sequence: u64, previous_hash: &str) -> Result<()> {
+    crate::broker_ensure!(
+        record.event.sequence == sequence,
+        "audit sequence is invalid"
+    );
+    crate::broker_ensure!(
+        record.previous_hash == previous_hash,
+        "audit chain link is invalid"
+    );
+    crate::broker_ensure!(
+        audit_hash(&record.event, &record.previous_hash)? == record.hash,
+        "audit record hash is invalid"
+    );
+    Ok(())
+}
+
+fn verify_audit_file(path: &Path) -> Result<()> {
+    let file = File::open(path)
+        .map_err(|error| BrokerError::with_source("opening audit log for verification", error))?;
+    let mut sequence = 0;
+    let mut previous_hash = "0".repeat(64);
+    for line in BufReader::new(file).lines() {
+        let line = line.map_err(|error| BrokerError::with_source("reading audit log", error))?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let record: AuditRecord = serde_json::from_str(&line)
+            .map_err(|error| BrokerError::with_source("decoding audit record", error))?;
+        verify_audit_record(&record, sequence, &previous_hash)?;
+        sequence = sequence.saturating_add(1);
+        previous_hash = record.hash;
     }
     Ok(())
 }
@@ -584,5 +635,32 @@ mod tests {
         bytes[index] ^= 1;
         std::fs::write(&path, bytes).unwrap();
         assert!(AuditLog::open(&path, 8).is_err());
+    }
+
+    #[test]
+    fn persisted_audit_log_keeps_appending_beyond_the_memory_window() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("audit.log");
+        let mut log = AuditLog::open(&path, 8).unwrap();
+        for sequence in 0..10_001 {
+            log.append(AuditEvent {
+                sequence,
+                timestamp_ms: sequence,
+                actor: "operator".to_string(),
+                tenant: None,
+                action: "health.check".to_string(),
+                resource: "cluster".to_string(),
+                outcome: "success".to_string(),
+                details: BTreeMap::new(),
+            })
+            .unwrap();
+        }
+        assert_eq!(log.records().len(), 8);
+        assert_eq!(log.records().first().unwrap().event.sequence, 9_993);
+        log.verify().unwrap();
+        drop(log);
+        let reopened = AuditLog::open(&path, 8).unwrap();
+        assert_eq!(reopened.export_json().unwrap().lines().count(), 10_001);
+        assert_eq!(reopened.records().last().unwrap().event.sequence, 10_000);
     }
 }

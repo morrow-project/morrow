@@ -96,7 +96,7 @@ impl Morrow {
             details: [("generation".to_string(), generation.to_string())]
                 .into_iter()
                 .collect(),
-        });
+        })?;
         Ok(())
     }
 
