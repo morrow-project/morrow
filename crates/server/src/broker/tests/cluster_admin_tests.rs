@@ -209,6 +209,19 @@ async fn http_readiness_reports_and_recovers_from_storage_failure() {
 }
 
 #[tokio::test]
+async fn successful_maintenance_does_not_clear_storage_failure() {
+    let scenario = Scenario::new();
+    scenario
+        .broker()
+        .storage_failure
+        .store(true, Ordering::Relaxed);
+
+    scenario.broker().expire_and_redeliver().await.unwrap();
+
+    assert!(scenario.broker().storage_failure.load(Ordering::Relaxed));
+}
+
+#[tokio::test]
 async fn http_readiness_reports_quorum_loss_separately_from_election() {
     let scenario = Scenario::new_fake_cluster_local_node(3, 1, Some(1));
     scenario.partition_available([1]);
