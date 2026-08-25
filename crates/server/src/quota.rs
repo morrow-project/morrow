@@ -116,6 +116,27 @@ pub(crate) struct TenantQuotaRuntime {
     rejections: Arc<Mutex<HashMap<String, TenantQuotaRejections>>>,
 }
 
+pub(crate) struct TenantQuotaReservation {
+    runtime: TenantQuotaRuntime,
+    tenant: String,
+    usage: TenantQuotaUsage,
+    committed: bool,
+}
+
+impl TenantQuotaReservation {
+    pub(crate) fn commit(mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for TenantQuotaReservation {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.runtime.release(&self.tenant, self.usage);
+        }
+    }
+}
+
 impl TenantQuotaRuntime {
     pub(crate) fn new(limits: TenantQuotaLimits) -> Self {
         Self {
@@ -263,6 +284,21 @@ impl TenantQuotaRuntime {
             self.reject(tenant, dimension);
         }
         fits
+    }
+
+    pub(crate) fn reserve_guard(
+        &self,
+        tenant: impl Into<String>,
+        request: TenantQuotaUsage,
+    ) -> Option<TenantQuotaReservation> {
+        let tenant = tenant.into();
+        self.try_reserve(&tenant, request)
+            .then(|| TenantQuotaReservation {
+                runtime: self.clone(),
+                tenant,
+                usage: request,
+                committed: false,
+            })
     }
 
     pub(crate) fn release(&self, tenant: &str, request: TenantQuotaUsage) {

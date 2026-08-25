@@ -199,10 +199,10 @@ impl Morrow {
             memory_bytes: self.config.quotas.max_outbound_bytes_per_connection as u64,
             ..Default::default()
         };
-        if !self
+        let Some(quota_reservation) = self
             .tenant_quotas
-            .try_reserve(crate::quota::DEFAULT_TENANT, quota_usage)
-        {
+            .reserve_guard(crate::quota::DEFAULT_TENANT, quota_usage)
+        else {
             self.record_quota_rejection(
                 id,
                 crate::quota::DEFAULT_TENANT,
@@ -210,11 +210,9 @@ impl Morrow {
                 "tenant connection quota exceeded",
             );
             crate::broker_bail!("tenant connection quota exceeded");
-        }
+        };
         let mut connections = self.connections.lock().await;
         if connections.clients.len() >= self.config.quotas.max_connections {
-            self.tenant_quotas
-                .release(crate::quota::DEFAULT_TENANT, quota_usage);
             self.quotas.reject_state();
             crate::broker_bail!("connection quota exceeded");
         }
@@ -240,6 +238,7 @@ impl Morrow {
                 quota_usage,
             },
         );
+        quota_reservation.commit();
         Ok(())
     }
 

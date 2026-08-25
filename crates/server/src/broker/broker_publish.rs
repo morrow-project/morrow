@@ -333,13 +333,13 @@ impl Morrow {
             }) as u64)
             .saturating_add(reply_to.as_ref().map_or(0, String::len) as u64)
             .saturating_add(payload.len() as u64);
-        if !self.tenant_quotas.try_reserve(
-            &quota_tenant,
+        let Some(disk_reservation) = self.tenant_quotas.reserve_guard(
+            quota_tenant.clone(),
             crate::quota::TenantQuotaUsage {
                 disk_bytes,
                 ..Default::default()
             },
-        ) {
+        ) else {
             self.record_quota_rejection(
                 publisher_id,
                 &quota_tenant,
@@ -347,7 +347,7 @@ impl Morrow {
                 "tenant durable disk quota exceeded",
             );
             crate::broker_bail!("tenant durable disk quota exceeded");
-        }
+        };
 
         if let (Some(producer), Some(fingerprint)) =
             (producer_sequence.as_ref(), producer_fingerprint)
@@ -400,17 +400,9 @@ impl Morrow {
                 .await
             {
                 Ok(envelope) => envelope,
-                Err(error) => {
-                    self.tenant_quotas.release(
-                        &quota_tenant,
-                        crate::quota::TenantQuotaUsage {
-                            disk_bytes,
-                            ..Default::default()
-                        },
-                    );
-                    return Err(error);
-                }
+                Err(error) => return Err(error),
             };
+            disk_reservation.commit();
             cluster.enforce_retention(self.hooks.clock.now_ms())?;
             self.apply_cluster_partition(envelope.clone()).await?;
             let _storage_operation = self.storage_gate.read().await;
@@ -492,30 +484,15 @@ impl Morrow {
             .await;
             let envelope = match append_result {
                 Ok(Ok(envelope)) => envelope,
-                Ok(Err(error)) => {
-                    self.tenant_quotas.release(
-                        &quota_tenant,
-                        crate::quota::TenantQuotaUsage {
-                            disk_bytes,
-                            ..Default::default()
-                        },
-                    );
-                    return Err(error);
-                }
+                Ok(Err(error)) => return Err(error),
                 Err(error) => {
-                    self.tenant_quotas.release(
-                        &quota_tenant,
-                        crate::quota::TenantQuotaUsage {
-                            disk_bytes,
-                            ..Default::default()
-                        },
-                    );
                     return Err(BrokerError::with_source(
                         "partition append worker failed",
                         error,
                     ));
                 }
             };
+            disk_reservation.commit();
             self.metrics
                 .partition_writes_total
                 .fetch_add(1, Ordering::Relaxed);
