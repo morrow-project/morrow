@@ -465,6 +465,7 @@ fn test_config(dir: &Path) -> Config {
         admin_token: Some("test-admin-token".to_string()),
         admin_tls: None,
         quotas: Default::default(),
+        tenant_quotas: Default::default(),
         wal_dir: dir.to_path_buf(),
         encryption_key_dir: None,
         encryption_active_key_version: 1,

@@ -15,7 +15,10 @@ JSON configuration and defaults to:
 
 Important fields include `listen`, `websocket`, `http_listen`, `admin_token`
 or `admin_token_file`, `wal_dir`, `tls`, `auth`, `quotas`, and `cluster`. The
-example file contains the complete default shape.
+example file contains the complete default shape. `tenant_quotas` optionally
+maps tenant identifiers to `max_connections`, `max_memory_bytes`,
+`max_disk_bytes`, `max_tasks`, and `max_background_tasks`; omitted tenant
+limits use the global tenant defaults. Tenant usage is node-local.
 
 Use `morrow-server --check-config CONFIG_PATH` before deployment to validate the
 configuration without opening listeners or creating storage directories. It

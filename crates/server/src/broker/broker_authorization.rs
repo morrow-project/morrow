@@ -1,6 +1,28 @@
 use super::*;
 
 impl Morrow {
+    pub(super) fn record_quota_rejection(
+        &self,
+        connection_id: u64,
+        tenant: &str,
+        dimension: &str,
+        reason: &str,
+    ) {
+        let mut details = std::collections::BTreeMap::new();
+        details.insert("dimension".to_string(), dimension.to_string());
+        details.insert("reason".to_string(), reason.to_string());
+        self.record_audit_event(crate::tenancy::AuditEvent {
+            sequence: 0,
+            timestamp_ms: self.hooks.clock.now_ms(),
+            actor: format!("connection:{connection_id}"),
+            tenant: crate::tenancy::TenantId::new(tenant.to_string()).ok(),
+            action: "quota.reject".to_string(),
+            resource: format!("tenant/{tenant}/quota"),
+            outcome: "denied".to_string(),
+            details,
+        });
+    }
+
     pub fn policy_store(&self) -> Arc<crate::tenancy::PolicyStore> {
         self.policy.clone()
     }

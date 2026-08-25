@@ -194,6 +194,23 @@ impl Morrow {
         sender: OutboundQueue,
         remote_addr: Option<SocketAddr>,
     ) -> Result<()> {
+        let quota_usage = crate::quota::TenantQuotaUsage {
+            connections: 1,
+            memory_bytes: self.config.quotas.max_outbound_bytes_per_connection as u64,
+            ..Default::default()
+        };
+        let Some(quota_reservation) = self
+            .tenant_quotas
+            .reserve_guard(crate::quota::DEFAULT_TENANT, quota_usage)
+        else {
+            self.record_quota_rejection(
+                id,
+                crate::quota::DEFAULT_TENANT,
+                "connections",
+                "tenant connection quota exceeded",
+            );
+            crate::broker_bail!("tenant connection quota exceeded");
+        };
         let mut connections = self.connections.lock().await;
         if connections.clients.len() >= self.config.quotas.max_connections {
             self.quotas.reject_state();
@@ -217,8 +234,11 @@ impl Morrow {
                 ack_timeout_ms: DEFAULT_ACK_TIMEOUT_MS,
                 max_in_flight: DEFAULT_MAX_IN_FLIGHT,
                 protocol_version: 1,
+                quota_tenant: crate::quota::DEFAULT_TENANT.to_string(),
+                quota_usage,
             },
         );
+        quota_reservation.commit();
         Ok(())
     }
 
@@ -263,7 +283,7 @@ impl Morrow {
             .get(&id)
             .ok_or_else(|| BrokerError::msg("unknown connection"))?;
         crate::broker_ensure!(!client.configured, "CONN already received");
-        let (durable_id, authenticated) = if self.config.auth.enabled {
+        let (durable_id, authenticated, quota_tenant) = if self.config.auth.enabled {
             let nonce = client
                 .auth_nonce
                 .as_deref()
@@ -290,9 +310,16 @@ impl Morrow {
                     "CONN durable_id must match authenticated client_id"
                 );
             }
-            (Some(client_id), true)
+            let quota_tenant = self
+                .config
+                .auth
+                .clients
+                .get(&client_id)
+                .map(|client| client.tenant.as_str())
+                .unwrap_or(crate::quota::DEFAULT_TENANT);
+            (Some(client_id), true, quota_tenant)
         } else {
-            (durable_id, false)
+            (durable_id, false, crate::quota::DEFAULT_TENANT)
         };
         if let Some(identity) = durable_id.as_deref() {
             let identity_connections = connections
@@ -307,6 +334,21 @@ impl Morrow {
                 crate::broker_bail!("connection quota exceeded for identity");
             }
         }
+        if quota_tenant != crate::quota::DEFAULT_TENANT
+            && !self.tenant_quotas.transfer(
+                crate::quota::DEFAULT_TENANT,
+                quota_tenant,
+                client.quota_usage,
+            )
+        {
+            self.record_quota_rejection(
+                id,
+                quota_tenant,
+                "connections",
+                "tenant connection quota exceeded for authenticated tenant",
+            );
+            crate::broker_bail!("tenant connection quota exceeded for authenticated tenant");
+        }
         let client = connections
             .clients
             .get_mut(&id)
@@ -317,6 +359,7 @@ impl Morrow {
         client.ack_timeout_ms = ack_timeout_ms;
         client.max_in_flight = max_in_flight;
         client.protocol_version = protocol_version;
+        client.quota_tenant = quota_tenant.to_string();
         client.configured = true;
         Ok(())
     }
@@ -389,6 +432,21 @@ impl Morrow {
                         self.quotas.reject_state();
                         crate::broker_bail!("transient subscription quota exceeded");
                     }
+                    if !self.tenant_quotas.try_reserve(
+                        &client.quota_tenant,
+                        crate::quota::TenantQuotaUsage {
+                            tasks: 1,
+                            ..Default::default()
+                        },
+                    ) {
+                        self.record_quota_rejection(
+                            connection_id,
+                            &client.quota_tenant,
+                            "tasks",
+                            "tenant foreground task quota exceeded",
+                        );
+                        crate::broker_bail!("tenant foreground task quota exceeded");
+                    }
                 }
                 let changes = transient.upsert_subscription(
                     key,
@@ -403,6 +461,10 @@ impl Morrow {
                 if let Some(durable_id) = &durable_id {
                     let inner = self.inner.lock().await;
                     let consumer_id = consumer_id(durable_id, queue.as_deref(), &sub_subject, &sid);
+                    let reserve_task = !inner
+                        .consumers
+                        .get(&consumer_id)
+                        .is_some_and(|consumer| consumer.members.contains_key(&connection_id));
                     if !inner.consumers.contains_key(&consumer_id) {
                         let identity_consumers = inner
                             .consumers
@@ -434,8 +496,32 @@ impl Morrow {
                         start_position: start,
                         retry_policy: protocol::RetryPolicy::default(),
                     };
+                    if reserve_task
+                        && !self.tenant_quotas.try_reserve(
+                            &client.quota_tenant,
+                            crate::quota::TenantQuotaUsage {
+                                tasks: 1,
+                                ..Default::default()
+                            },
+                        )
+                    {
+                        self.record_quota_rejection(
+                            connection_id,
+                            &client.quota_tenant,
+                            "tasks",
+                            "tenant foreground task quota exceeded",
+                        );
+                        crate::broker_bail!("tenant foreground task quota exceeded");
+                    }
                     (
-                        Some((consumer_id, record, sid, protocol_version)),
+                        Some((
+                            consumer_id,
+                            record,
+                            sid,
+                            protocol_version,
+                            client.quota_tenant.clone(),
+                            reserve_task,
+                        )),
                         RouteInterestChanges::default(),
                     )
                 } else {
@@ -444,53 +530,68 @@ impl Morrow {
             }
         };
 
-        if let Some((consumer_id, record, sid, protocol_version)) = durable_record {
-            if let Some(cluster) = self.cluster_runtime().await {
-                let cursors = {
-                    let inner = self.inner.lock().await;
-                    crate::consumer_cursor::ConsumerCursorSet::new(
-                        &record.filter_subject,
-                        record.start_position,
-                        record.max_in_flight,
-                        &self.config.streams,
-                        &inner.messages,
+        if let Some((consumer_id, record, sid, protocol_version, quota_tenant, reserved_task)) =
+            durable_record
+        {
+            let result = async {
+                if let Some(cluster) = self.cluster_runtime().await {
+                    let cursors = {
+                        let inner = self.inner.lock().await;
+                        crate::consumer_cursor::ConsumerCursorSet::new(
+                            &record.filter_subject,
+                            record.start_position,
+                            record.max_in_flight,
+                            &self.config.streams,
+                            &inner.messages,
+                        )
+                    };
+                    self.cluster_write(
+                        &cluster,
+                        BrokerCommand::CursorConsumerUpsert {
+                            record: record.clone(),
+                            cursors,
+                        },
                     )
-                };
-                self.cluster_write(
-                    &cluster,
-                    BrokerCommand::CursorConsumerUpsert {
-                        record: record.clone(),
+                    .await?;
+                } else {
+                    let mut inner = self.inner.lock().await;
+                    inner.wal.append_consumer_upsert(&record)?;
+                    let cursors = inner
+                        .upsert_consumer(record.clone(), &self.config.streams)
+                        .cursors
+                        .clone();
+                    inner.wal.append_consumer_cursor(&ConsumerCursorRecord {
+                        consumer_id: record.consumer_id.clone(),
                         cursors,
-                    },
-                )
-                .await?;
-            } else {
+                    })?;
+                }
+                self.wal.flush_due().await?;
                 let mut inner = self.inner.lock().await;
-                inner.wal.append_consumer_upsert(&record)?;
-                let cursors = inner
-                    .upsert_consumer(record.clone(), &self.config.streams)
-                    .cursors
-                    .clone();
-                inner.wal.append_consumer_cursor(&ConsumerCursorRecord {
-                    consumer_id: record.consumer_id.clone(),
-                    cursors,
-                })?;
+                let consumer = inner.upsert_consumer(record, &self.config.streams);
+                consumer.members.insert(
+                    connection_id,
+                    SubscriptionMember {
+                        sid,
+                        remaining_deliveries: None,
+                        credit_messages: if protocol_version >= 2 { 0 } else { usize::MAX },
+                        credit_bytes: if protocol_version >= 2 { 0 } else { usize::MAX },
+                    },
+                );
+                inner.mark_consumer_ready(&consumer_id);
+                drop(inner);
+                self.deliver_pending().await
             }
-            self.wal.flush_due().await?;
-            let mut inner = self.inner.lock().await;
-            let consumer = inner.upsert_consumer(record, &self.config.streams);
-            consumer.members.insert(
-                connection_id,
-                SubscriptionMember {
-                    sid,
-                    remaining_deliveries: None,
-                    credit_messages: if protocol_version >= 2 { 0 } else { usize::MAX },
-                    credit_bytes: if protocol_version >= 2 { 0 } else { usize::MAX },
-                },
-            );
-            inner.mark_consumer_ready(&consumer_id);
-            drop(inner);
-            self.deliver_pending().await?;
+            .await;
+            if result.is_err() && reserved_task {
+                self.tenant_quotas.release(
+                    &quota_tenant,
+                    crate::quota::TenantQuotaUsage {
+                        tasks: 1,
+                        ..Default::default()
+                    },
+                );
+            }
+            result?;
         }
         self.update_route_interests(route_interest_changes).await;
         Ok(())
@@ -582,6 +683,14 @@ impl Morrow {
             );
         }
         let mut found = false;
+        let mut released_task = false;
+        let quota_tenant = self
+            .connections
+            .lock()
+            .await
+            .clients
+            .get(&connection_id)
+            .map(|client| client.quota_tenant.clone());
         let mut transient = self.transient.lock().await;
         let mut route_interest_changes = RouteInterestChanges::default();
         if let Some(subscription) = transient
@@ -594,6 +703,15 @@ impl Morrow {
             } else {
                 let key = (connection_id, sid.to_string());
                 route_interest_changes = transient.remove_subscription(&key);
+                if let Some(tenant) = quota_tenant.as_deref() {
+                    self.tenant_quotas.release(
+                        tenant,
+                        crate::quota::TenantQuotaUsage {
+                            tasks: 1,
+                            ..Default::default()
+                        },
+                    );
+                }
             }
         }
         drop(transient);
@@ -610,12 +728,24 @@ impl Morrow {
                     }
                 } else {
                     consumer.members.remove(&connection_id);
+                    released_task = true;
                 }
                 found = true;
             }
         }
         crate::broker_ensure!(found, "unknown sid");
         drop(inner);
+        if released_task {
+            if let Some(tenant) = quota_tenant.as_deref() {
+                self.tenant_quotas.release(
+                    tenant,
+                    crate::quota::TenantQuotaUsage {
+                        tasks: 1,
+                        ..Default::default()
+                    },
+                );
+            }
+        }
         self.update_route_interests(route_interest_changes).await;
         Ok(())
     }

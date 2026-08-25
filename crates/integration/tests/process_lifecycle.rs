@@ -1,5 +1,6 @@
 #![cfg(unix)]
 
+use client::{Client, ClientAuth};
 use std::{
     env, fs,
     net::{TcpListener, TcpStream},
@@ -97,6 +98,73 @@ fn run_signal_case(signal: &str) -> ExitStatus {
     wait_for_listener(&listen, Duration::from_secs(10));
     terminate(child.id(), signal);
     child.wait().expect("wait for morrow-server")
+}
+
+#[tokio::test]
+#[ignore = "requires a built binary supplied through MORROW_SERVER_BIN"]
+async fn real_process_transfers_and_releases_tenant_connection_quota() {
+    let binary = env::var_os("MORROW_SERVER_BIN")
+        .expect("set MORROW_SERVER_BIN to the built morrow-server binary");
+    let temp = TempDir::new().unwrap();
+    let listen = reserved_addr();
+    let auth = ClientAuth::from_seed("tenant-client", [7; 32]);
+    let mut value: serde_json::Value = serde_json::from_str(&config(temp.path(), &listen)).unwrap();
+    value["tenant_quotas"] = serde_json::json!({
+        "tenant-a": {
+            "max_connections": 1,
+            "max_memory_bytes": 104857600,
+            "max_disk_bytes": 104857600,
+            "max_tasks": 100,
+            "max_background_tasks": 100
+        }
+    });
+    value["auth"] = serde_json::json!({
+        "enabled": true,
+        "clients": [{
+            "client_id": "tenant-client",
+            "public_key": auth.public_key_hex(),
+            "tenant": "tenant-a",
+            "namespace": "default"
+        }]
+    });
+    let config_path = temp.path().join("morrow.json");
+    std::fs::write(&config_path, serde_json::to_vec(&value).unwrap()).unwrap();
+    let mut child = Command::new(binary)
+        .arg(&config_path)
+        .env("OTEL_SDK_DISABLED", "true")
+        .spawn()
+        .expect("start morrow-server");
+    wait_for_listener(&listen, Duration::from_secs(10));
+    let addr = listen.parse().unwrap();
+
+    let mut first = Client::connect(addr, 1_048_576).await.unwrap();
+    let info = first.read_info().await.unwrap();
+    first
+        .connect_authenticated(&info, &auth, false, 5_000, 16)
+        .await
+        .unwrap();
+    first.ping_roundtrip().await.unwrap();
+
+    let mut second = Client::connect(addr, 1_048_576).await.unwrap();
+    let info = second.read_info().await.unwrap();
+    second
+        .connect_authenticated(&info, &auth, false, 5_000, 16)
+        .await
+        .unwrap();
+    assert!(second.ping_roundtrip().await.is_err());
+
+    drop(first);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let mut recovered = Client::connect(addr, 1_048_576).await.unwrap();
+    let info = recovered.read_info().await.unwrap();
+    recovered
+        .connect_authenticated(&info, &auth, false, 5_000, 16)
+        .await
+        .unwrap();
+    recovered.ping_roundtrip().await.unwrap();
+    drop(recovered);
+    terminate(child.id(), "TERM");
+    assert!(child.wait().unwrap().success());
 }
 
 #[test]

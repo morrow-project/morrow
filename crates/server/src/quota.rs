@@ -8,6 +8,40 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::config::ResourceQuotaConfig;
 
+pub(crate) const DEFAULT_TENANT: &str = "default";
+
+pub(crate) fn persistent_record_bytes(envelope: &crate::partition_log::MessageEnvelope) -> u64 {
+    let headers = envelope.headers.iter().fold(0usize, |total, header| {
+        total
+            .saturating_add(header.name.len())
+            .saturating_add(header.value.len())
+    });
+    128u64
+        .saturating_add(envelope.namespace.len() as u64)
+        .saturating_add(envelope.stream.as_str().len() as u64)
+        .saturating_add(envelope.subject.len() as u64)
+        .saturating_add(envelope.key.as_ref().map_or(0, Vec::len) as u64)
+        .saturating_add(headers as u64)
+        .saturating_add(envelope.reply_to.as_ref().map_or(0, String::len) as u64)
+        .saturating_add(envelope.payload.len() as u64)
+}
+
+pub(crate) fn persistent_publish_record_bytes(record: &crate::wal::PublishRecord) -> u64 {
+    let headers = record.headers.iter().fold(0usize, |total, header| {
+        total
+            .saturating_add(header.name.len())
+            .saturating_add(header.value.len())
+    });
+    128u64
+        .saturating_add(record.namespace.len() as u64)
+        .saturating_add(record.stream.as_ref().map_or(0, String::len) as u64)
+        .saturating_add(record.subject.len() as u64)
+        .saturating_add(record.key.as_ref().map_or(0, Vec::len) as u64)
+        .saturating_add(headers as u64)
+        .saturating_add(record.reply_to.as_ref().map_or(0, String::len) as u64)
+        .saturating_add(record.payload.len() as u64)
+}
+
 #[derive(Clone)]
 pub(crate) struct QuotaRuntime {
     limits: ResourceQuotaConfig,
@@ -40,7 +74,7 @@ pub(crate) struct QuotaUsage {
     pub(crate) rejections: u64,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize)]
 pub(crate) struct TenantQuotaLimits {
     pub(crate) max_connections: usize,
     pub(crate) max_memory_bytes: u64,
@@ -58,24 +92,93 @@ pub(crate) struct TenantQuotaUsage {
     pub(crate) background_tasks: usize,
 }
 
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct TenantQuotaStatus {
+    pub(crate) usage: TenantQuotaUsage,
+    pub(crate) limits: TenantQuotaLimits,
+    pub(crate) rejections: TenantQuotaRejections,
+}
+
+#[derive(Clone, Copy, Debug, Default, serde::Serialize)]
+pub(crate) struct TenantQuotaRejections {
+    pub(crate) connections: u64,
+    pub(crate) memory_bytes: u64,
+    pub(crate) disk_bytes: u64,
+    pub(crate) tasks: u64,
+    pub(crate) background_tasks: u64,
+}
+
 #[derive(Clone)]
 pub(crate) struct TenantQuotaRuntime {
-    limits: TenantQuotaLimits,
+    default_limits: TenantQuotaLimits,
+    limits: Arc<Mutex<HashMap<String, TenantQuotaLimits>>>,
     usage: Arc<Mutex<HashMap<String, TenantQuotaUsage>>>,
+    rejections: Arc<Mutex<HashMap<String, TenantQuotaRejections>>>,
+}
+
+pub(crate) struct TenantQuotaReservation {
+    runtime: TenantQuotaRuntime,
+    tenant: String,
+    usage: TenantQuotaUsage,
+    committed: bool,
+}
+
+impl TenantQuotaReservation {
+    pub(crate) fn commit(mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for TenantQuotaReservation {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.runtime.release(&self.tenant, self.usage);
+        }
+    }
 }
 
 impl TenantQuotaRuntime {
     pub(crate) fn new(limits: TenantQuotaLimits) -> Self {
         Self {
-            limits,
+            default_limits: limits,
+            limits: Arc::new(Mutex::new(HashMap::new())),
             usage: Arc::new(Mutex::new(HashMap::new())),
+            rejections: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    pub(crate) fn set_tenant_limits(&self, tenant: &str, limits: TenantQuotaLimits) {
+        self.limits
+            .lock()
+            .expect("tenant quota limits lock poisoned")
+            .insert(tenant.to_string(), limits);
+    }
+
+    fn limits_for(&self, tenant: &str) -> TenantQuotaLimits {
+        self.limits
+            .lock()
+            .expect("tenant quota limits lock poisoned")
+            .get(tenant)
+            .copied()
+            .unwrap_or(self.default_limits)
+    }
+
+    fn reject(&self, tenant: &str, dimension: fn(&mut TenantQuotaRejections)) {
+        dimension(
+            self.rejections
+                .lock()
+                .expect("tenant quota rejection lock poisoned")
+                .entry(tenant.to_string())
+                .or_default(),
+        );
     }
 
     pub(crate) fn try_connection(&self, tenant: &str) -> bool {
         let mut usage = self.usage.lock().expect("tenant quota lock poisoned");
         let entry = usage.entry(tenant.to_string()).or_default();
-        if entry.connections >= self.limits.max_connections {
+        if entry.connections >= self.limits_for(tenant).max_connections {
+            drop(usage);
+            self.reject(tenant, |rejections| rejections.connections += 1);
             return false;
         }
         entry.connections += 1;
@@ -89,19 +192,86 @@ impl TenantQuotaRuntime {
         }
     }
 
+    pub(crate) fn transfer_connection(&self, from: &str, to: &str) -> bool {
+        self.transfer(
+            from,
+            to,
+            TenantQuotaUsage {
+                connections: 1,
+                ..Default::default()
+            },
+        )
+    }
+
+    pub(crate) fn transfer(&self, from: &str, to: &str, request: TenantQuotaUsage) -> bool {
+        if from == to {
+            return true;
+        }
+        let mut usage = self.usage.lock().expect("tenant quota lock poisoned");
+        let source = usage.get(from).copied().unwrap_or_default();
+        if source.connections < request.connections
+            || source.memory_bytes < request.memory_bytes
+            || source.disk_bytes < request.disk_bytes
+            || source.tasks < request.tasks
+            || source.background_tasks < request.background_tasks
+        {
+            return false;
+        }
+        let target = usage.get(to).copied().unwrap_or_default();
+        let limits = self.limits_for(to);
+        if target.connections.saturating_add(request.connections) > limits.max_connections
+            || target.memory_bytes.saturating_add(request.memory_bytes) > limits.max_memory_bytes
+            || target.disk_bytes.saturating_add(request.disk_bytes) > limits.max_disk_bytes
+            || target.tasks.saturating_add(request.tasks) > limits.max_tasks
+            || target
+                .background_tasks
+                .saturating_add(request.background_tasks)
+                > limits.max_background_tasks
+        {
+            drop(usage);
+            self.reject(to, |rejections| rejections.connections += 1);
+            return false;
+        }
+        let source = usage.entry(from.to_string()).or_default();
+        source.connections -= request.connections;
+        source.memory_bytes -= request.memory_bytes;
+        source.disk_bytes -= request.disk_bytes;
+        source.tasks -= request.tasks;
+        source.background_tasks -= request.background_tasks;
+        let target = usage.entry(to.to_string()).or_default();
+        target.connections += request.connections;
+        target.memory_bytes += request.memory_bytes;
+        target.disk_bytes += request.disk_bytes;
+        target.tasks += request.tasks;
+        target.background_tasks += request.background_tasks;
+        true
+    }
+
     pub(crate) fn try_reserve(&self, tenant: &str, request: TenantQuotaUsage) -> bool {
         let mut usage = self.usage.lock().expect("tenant quota lock poisoned");
         let entry = usage.entry(tenant.to_string()).or_default();
-        let fits = entry.connections.saturating_add(request.connections)
-            <= self.limits.max_connections
-            && entry.memory_bytes.saturating_add(request.memory_bytes)
-                <= self.limits.max_memory_bytes
-            && entry.disk_bytes.saturating_add(request.disk_bytes) <= self.limits.max_disk_bytes
-            && entry.tasks.saturating_add(request.tasks) <= self.limits.max_tasks
-            && entry
+        let limits = self.limits_for(tenant);
+        let dimension: Option<fn(&mut TenantQuotaRejections)> =
+            if entry.connections.saturating_add(request.connections) > limits.max_connections {
+                Some(|rejections: &mut TenantQuotaRejections| rejections.connections += 1)
+            } else if entry.memory_bytes.saturating_add(request.memory_bytes)
+                > limits.max_memory_bytes
+            {
+                Some(|rejections: &mut TenantQuotaRejections| rejections.memory_bytes += 1)
+            } else if entry.disk_bytes.saturating_add(request.disk_bytes) > limits.max_disk_bytes {
+                Some(|rejections: &mut TenantQuotaRejections| rejections.disk_bytes += 1)
+            } else if entry.tasks.saturating_add(request.tasks) > limits.max_tasks {
+                Some(|rejections: &mut TenantQuotaRejections| rejections.tasks += 1)
+            } else if entry
                 .background_tasks
                 .saturating_add(request.background_tasks)
-                <= self.limits.max_background_tasks;
+                > limits.max_background_tasks
+            {
+                Some(|rejections: &mut TenantQuotaRejections| rejections.background_tasks += 1)
+            } else {
+                None
+            };
+        let fits = dimension.is_none();
         if fits {
             entry.connections += request.connections;
             entry.memory_bytes += request.memory_bytes;
@@ -109,7 +279,26 @@ impl TenantQuotaRuntime {
             entry.tasks += request.tasks;
             entry.background_tasks += request.background_tasks;
         }
+        drop(usage);
+        if let Some(dimension) = dimension {
+            self.reject(tenant, dimension);
+        }
         fits
+    }
+
+    pub(crate) fn reserve_guard(
+        &self,
+        tenant: impl Into<String>,
+        request: TenantQuotaUsage,
+    ) -> Option<TenantQuotaReservation> {
+        let tenant = tenant.into();
+        self.try_reserve(&tenant, request)
+            .then(|| TenantQuotaReservation {
+                runtime: self.clone(),
+                tenant,
+                usage: request,
+                committed: false,
+            })
     }
 
     pub(crate) fn release(&self, tenant: &str, request: TenantQuotaUsage) {
@@ -130,6 +319,54 @@ impl TenantQuotaRuntime {
             .lock()
             .expect("tenant quota lock poisoned")
             .clone()
+    }
+
+    pub(crate) fn replace_disk_usage(&self, disk_usage: HashMap<String, u64>) {
+        let mut usage = self.usage.lock().expect("tenant quota lock poisoned");
+        for (tenant, entry) in usage.iter_mut() {
+            entry.disk_bytes = disk_usage.get(tenant).copied().unwrap_or_default();
+        }
+        for (tenant, disk_bytes) in disk_usage {
+            usage.entry(tenant).or_default().disk_bytes = disk_bytes;
+        }
+    }
+
+    pub(crate) fn status_snapshot(&self) -> HashMap<String, TenantQuotaStatus> {
+        let usage = self.snapshot();
+        let limits = self
+            .limits
+            .lock()
+            .expect("tenant quota limits lock poisoned")
+            .clone();
+        let rejections = self
+            .rejections
+            .lock()
+            .expect("tenant quota rejection lock poisoned")
+            .clone();
+        let mut tenants = usage
+            .into_iter()
+            .map(|(tenant, usage)| {
+                let limit = limits.get(&tenant).copied().unwrap_or(self.default_limits);
+                let rejection = rejections.get(&tenant).copied().unwrap_or_default();
+                (
+                    tenant,
+                    TenantQuotaStatus {
+                        usage,
+                        limits: limit,
+                        rejections: rejection,
+                    },
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        for (tenant, limit) in limits {
+            let rejection = rejections.get(&tenant).copied().unwrap_or_default();
+            tenants.entry(tenant).or_insert_with(|| TenantQuotaStatus {
+                usage: TenantQuotaUsage::default(),
+                limits: limit,
+                rejections: rejection,
+            });
+        }
+        tenants
     }
 }
 

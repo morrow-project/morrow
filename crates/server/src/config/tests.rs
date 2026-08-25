@@ -78,6 +78,46 @@ fn parses_json_config() {
 }
 
 #[test]
+fn parses_per_tenant_quota_limits() {
+    let config = Config::from_json(&serde_json::json!({
+        "tenant_quotas": {
+            "tenant-a": {
+                "max_connections": 3,
+                "max_memory_bytes": 4096,
+                "max_disk_bytes": 8192,
+                "max_tasks": 7,
+                "max_background_tasks": 9
+            }
+        }
+    }))
+    .unwrap();
+
+    assert_eq!(
+        config.tenant_quotas.get("tenant-a"),
+        Some(&TenantQuotaConfig {
+            max_connections: 3,
+            max_memory_bytes: 4096,
+            max_disk_bytes: 8192,
+            max_tasks: 7,
+            max_background_tasks: 9,
+        })
+    );
+}
+
+#[test]
+fn rejects_unknown_per_tenant_quota_fields() {
+    let error = Config::from_json(&serde_json::json!({
+        "tenant_quotas": {"tenant-a": {"max_connections": 3, "typo": 1}}
+    }))
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("unknown field tenant_quotas.tenant-a.typo")
+    );
+}
+
+#[test]
 fn parses_cluster_route_mesh_config() {
     let value = serde_json::json!({
         "listen": "127.0.0.1:4221",

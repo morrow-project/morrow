@@ -2,6 +2,32 @@ use super::delivery_index::scheduled_at_ms;
 use super::*;
 
 impl Morrow {
+    pub(super) async fn rebuild_tenant_disk_usage(&self) -> Result<()> {
+        let records = self
+            .inner
+            .lock()
+            .await
+            .messages
+            .values()
+            .filter(|record| record.stream.is_some())
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut disk_usage = HashMap::new();
+        for record in records {
+            let record = self.partition_logs.load_record(&record)?;
+            let tenant = self
+                .config
+                .tenant_quotas
+                .keys()
+                .find(|tenant| record.subject.starts_with(&format!("{tenant}.")))
+                .map_or(crate::quota::DEFAULT_TENANT, String::as_str);
+            let entry = disk_usage.entry(tenant.to_string()).or_insert(0u64);
+            *entry = entry.saturating_add(crate::quota::persistent_publish_record_bytes(&record));
+        }
+        self.tenant_quotas.replace_disk_usage(disk_usage);
+        Ok(())
+    }
+
     pub fn open(config: Config) -> Result<Self> {
         Self::open_with_hooks(config, BrokerHooks::default())
     }
@@ -79,6 +105,7 @@ impl Morrow {
             .into_iter()
             .map(|envelope| (envelope.legacy_seq, envelope))
             .collect::<HashMap<_, _>>();
+        let recovered_envelopes = envelope_by_seq.values().cloned().collect::<Vec<_>>();
         let compaction_latest = reconcile_replayed_compaction(
             &mut replay,
             envelope_by_seq,
@@ -198,11 +225,66 @@ impl Morrow {
         let tenant_quotas =
             crate::quota::TenantQuotaRuntime::new(crate::quota::TenantQuotaLimits {
                 max_connections: config.quotas.max_connections,
-                max_memory_bytes: config.quotas.max_outbound_bytes_per_connection as u64,
+                max_memory_bytes: (config.quotas.max_outbound_bytes_per_connection as u64)
+                    .saturating_mul(config.quotas.max_connections as u64),
                 max_disk_bytes: u64::MAX,
                 max_tasks: config.quotas.max_durable_consumers,
                 max_background_tasks: config.quotas.max_transient_subscriptions,
             });
+        for (tenant, limits) in &config.tenant_quotas {
+            tenant_quotas.set_tenant_limits(
+                tenant,
+                crate::quota::TenantQuotaLimits {
+                    max_connections: limits.max_connections,
+                    max_memory_bytes: limits.max_memory_bytes,
+                    max_disk_bytes: limits.max_disk_bytes,
+                    max_tasks: limits.max_tasks,
+                    max_background_tasks: limits.max_background_tasks,
+                },
+            );
+        }
+        for record in &recovered_envelopes {
+            let tenant = config
+                .tenant_quotas
+                .keys()
+                .find(|tenant| record.subject.starts_with(&format!("{tenant}.")))
+                .map_or(crate::quota::DEFAULT_TENANT, String::as_str);
+            let bytes = crate::quota::persistent_record_bytes(record);
+            if bytes > 0 {
+                crate::broker_ensure!(
+                    tenant_quotas.try_reserve(
+                        tenant,
+                        crate::quota::TenantQuotaUsage {
+                            disk_bytes: bytes,
+                            ..Default::default()
+                        }
+                    ),
+                    "tenant durable disk quota exceeded while rebuilding usage"
+                );
+            }
+        }
+        for consumer in consumers.values() {
+            let tenant = config
+                .tenant_quotas
+                .keys()
+                .find(|tenant| {
+                    consumer
+                        .record
+                        .filter_subject
+                        .starts_with(&format!("{tenant}."))
+                })
+                .map_or(crate::quota::DEFAULT_TENANT, String::as_str);
+            crate::broker_ensure!(
+                tenant_quotas.try_reserve(
+                    tenant,
+                    crate::quota::TenantQuotaUsage {
+                        background_tasks: 1,
+                        ..Default::default()
+                    }
+                ),
+                "tenant background task quota exceeded while rebuilding usage"
+            );
+        }
         let policy = Arc::new(crate::tenancy::PolicyStore::default());
         let audit = Arc::new(std::sync::Mutex::new(crate::tenancy::AuditLog::open(
             config.wal_dir.join("audit.log"),
@@ -1086,6 +1168,7 @@ impl Morrow {
                 .config
                 .quotas
                 .max_outbound_bytes_per_connection,
+            tenant_quotas: self.tenant_quotas.status_snapshot(),
         }
     }
 
@@ -1114,18 +1197,7 @@ impl Morrow {
     }
 
     pub(super) fn spawn_accepted(&self, stream: TcpStream) {
-        const DEFAULT_TENANT: &str = "default";
-        if !self.tenant_quotas.try_connection(DEFAULT_TENANT) {
-            tokio::spawn(async move {
-                let mut stream = stream;
-                let _ = stream
-                    .write_all(&protocol::err("tenant connection quota exceeded"))
-                    .await;
-            });
-            return;
-        }
         let Some(permit) = self.quotas.try_client() else {
-            self.tenant_quotas.release_connection(DEFAULT_TENANT);
             tokio::spawn(async move {
                 let mut stream = stream;
                 let _ = stream
@@ -1140,7 +1212,6 @@ impl Morrow {
             if let Err(err) = broker.handle_accepted(stream).await {
                 error!(error = ?err, "client error");
             }
-            broker.tenant_quotas.release_connection(DEFAULT_TENANT);
         });
     }
 

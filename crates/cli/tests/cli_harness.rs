@@ -337,6 +337,7 @@ impl Harness {
             admin_token: Some(ADMIN_TOKEN.to_string()),
             admin_tls: None,
             quotas: Default::default(),
+            tenant_quotas: Default::default(),
             wal_dir: wal_dir.path().to_path_buf(),
             encryption_key_dir: None,
             encryption_active_key_version: 1,

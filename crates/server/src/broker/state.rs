@@ -216,6 +216,8 @@ pub(super) struct Client {
     pub(super) ack_timeout_ms: u64,
     pub(super) max_in_flight: usize,
     pub(super) protocol_version: u32,
+    pub(super) quota_tenant: String,
+    pub(super) quota_usage: crate::quota::TenantQuotaUsage,
 }
 
 #[derive(Debug, Clone)]
@@ -514,6 +516,7 @@ pub(super) struct QuotasResponse {
     pub(super) transient_subscriptions: StateQuotaUsage,
     pub(super) durable_consumers: StateQuotaUsage,
     pub(super) outbound_bytes_per_connection_limit: usize,
+    pub(super) tenant_quotas: HashMap<String, crate::quota::TenantQuotaStatus>,
 }
 
 #[derive(Debug, serde::Serialize)]

@@ -6,6 +6,35 @@ use crate::middleware::{
 use ed25519_dalek::{Signer, SigningKey};
 
 #[tokio::test]
+async fn authenticated_connection_transfers_tenant_quota_and_releases_on_disconnect() {
+    let scenario = auth_scenario(vec![auth_client_scoped(
+        "client-a", [7; 32], None, None, "tenant-a", "default",
+    )]);
+    scenario.broker().tenant_quotas.set_tenant_limits(
+        "tenant-a",
+        crate::quota::TenantQuotaLimits {
+            max_connections: 1,
+            max_memory_bytes: u64::MAX,
+            max_disk_bytes: u64::MAX,
+            max_tasks: 100,
+            max_background_tasks: 100,
+        },
+    );
+
+    let mut client = connect_authenticated(&scenario, "client-a", [7; 32]).await;
+    client.ping_roundtrip().await;
+    let usage = scenario.broker().tenant_quotas.snapshot();
+    assert_eq!(usage[crate::quota::DEFAULT_TENANT].connections, 0);
+    assert_eq!(usage["tenant-a"].connections, 1);
+    drop(client);
+    scenario.broker().remove_client(1).await.unwrap();
+    assert_eq!(
+        scenario.broker().tenant_quotas.snapshot()["tenant-a"].connections,
+        0
+    );
+}
+
+#[tokio::test]
 async fn auth_rejects_unknown_missing_bad_mismatch_and_repeat_connect() {
     let scenario = auth_scenario(vec![auth_client("client1", [7; 32], None, None)]);
 

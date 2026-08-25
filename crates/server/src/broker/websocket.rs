@@ -117,12 +117,7 @@ impl Morrow {
         let websocket = accept_hdr_async_with_config(stream, callback, Some(websocket_config))
             .await
             .map_err(|error| BrokerError::with_source("WebSocket handshake failed", error))?;
-        const DEFAULT_TENANT: &str = "default";
-        if !self.tenant_quotas.try_connection(DEFAULT_TENANT) {
-            return Err(BrokerError::msg("tenant connection quota exceeded"));
-        }
         let Some(permit) = self.quotas.try_client() else {
-            self.tenant_quotas.release_connection(DEFAULT_TENANT);
             return Err(BrokerError::msg("connection quota exceeded"));
         };
         self.metrics
@@ -164,7 +159,6 @@ impl Morrow {
                 .fetch_add(1, Ordering::Relaxed);
         }
         drop(permit);
-        self.tenant_quotas.release_connection(DEFAULT_TENANT);
         result
     }
 }

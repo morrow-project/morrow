@@ -87,6 +87,7 @@ async fn secure_secret_permissions_are_used_for_tls_authentication() {
         admin_token: None,
         admin_tls: None,
         quotas: Default::default(),
+        tenant_quotas: Default::default(),
         wal_dir: dir.path().join("wal"),
         encryption_key_dir: None,
         encryption_active_key_version: 1,

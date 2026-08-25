@@ -257,7 +257,7 @@ impl Morrow {
             crate::broker_bail!("CLUSTER_DURABLE requires clustered mode");
         }
 
-        let (transient_deliveries, route_interest_changes, verbose, namespace) = {
+        let (transient_deliveries, route_interest_changes, verbose, namespace, quota_tenant) = {
             let connections = self.connections.lock().await;
             let client = connections.clients.get(&publisher_id);
             let verbose = client
@@ -266,6 +266,9 @@ impl Morrow {
             let namespace = client
                 .and_then(|client| client.durable_id.clone())
                 .unwrap_or_else(|| DEFAULT_NAMESPACE.to_string());
+            let quota_tenant = client
+                .map(|client| client.quota_tenant.clone())
+                .unwrap_or_else(|| crate::quota::DEFAULT_TENANT.to_string());
             let (deliveries, route_interest_changes) =
                 self.transient.lock().await.prepare_transient_deliveries(
                     &connections,
@@ -274,7 +277,13 @@ impl Morrow {
                     &headers,
                     &payload,
                 );
-            (deliveries, route_interest_changes, verbose, namespace)
+            (
+                deliveries,
+                route_interest_changes,
+                verbose,
+                namespace,
+                quota_tenant,
+            )
         };
         for delivery in transient_deliveries {
             let _ = delivery.sender.send(delivery.frame).await;
@@ -313,6 +322,32 @@ impl Morrow {
             return Ok(());
         }
         let stream = stream.unwrap();
+
+        let disk_bytes = 128u64
+            .saturating_add(namespace.len() as u64)
+            .saturating_add(stream.name.as_str().len() as u64)
+            .saturating_add(subject_name.len() as u64)
+            .saturating_add(key.as_ref().map_or(0, Vec::len) as u64)
+            .saturating_add(headers.iter().fold(0usize, |total, (name, value)| {
+                total.saturating_add(name.len()).saturating_add(value.len())
+            }) as u64)
+            .saturating_add(reply_to.as_ref().map_or(0, String::len) as u64)
+            .saturating_add(payload.len() as u64);
+        let Some(disk_reservation) = self.tenant_quotas.reserve_guard(
+            quota_tenant.clone(),
+            crate::quota::TenantQuotaUsage {
+                disk_bytes,
+                ..Default::default()
+            },
+        ) else {
+            self.record_quota_rejection(
+                publisher_id,
+                &quota_tenant,
+                "disk_bytes",
+                "tenant durable disk quota exceeded",
+            );
+            crate::broker_bail!("tenant durable disk quota exceeded");
+        };
 
         if let (Some(producer), Some(fingerprint)) =
             (producer_sequence.as_ref(), producer_fingerprint)
@@ -359,10 +394,15 @@ impl Morrow {
                 legacy_seq: seq,
             };
             let fsync = ack.is_none_or(|ack| ack.level == protocol::AckLevel::HighDurability);
-            let envelope = cluster
+            let envelope = match cluster
                 .replicate_partition(envelope, fsync)
                 .instrument(tracing::info_span!("morrow.cluster.commit"))
-                .await?;
+                .await
+            {
+                Ok(envelope) => envelope,
+                Err(error) => return Err(error),
+            };
+            disk_reservation.commit();
             cluster.enforce_retention(self.hooks.clock.now_ms())?;
             self.apply_cluster_partition(envelope.clone()).await?;
             let _storage_operation = self.storage_gate.read().await;
@@ -371,6 +411,7 @@ impl Morrow {
                 &self.config.streams,
                 self.hooks.clock.now_ms(),
             )?;
+            self.rebuild_tenant_disk_usage().await?;
             let committed_record = PublishRecord::from(envelope.clone());
             if let (Some(producer), Some(fingerprint)) =
                 (producer_sequence.as_ref(), producer_fingerprint)
@@ -435,13 +476,23 @@ impl Morrow {
                 .acquire_owned()
                 .await
                 .map_err(|_| BrokerError::msg("storage worker pool closed"))?;
-            let envelope = tokio::task::spawn_blocking(move || {
+            let append_result = tokio::task::spawn_blocking(move || {
                 let _permit = permit;
                 partition_logs.append_envelope(pending_envelope)
             })
             .instrument(tracing::info_span!("morrow.partition.write"))
-            .await
-            .map_err(|err| BrokerError::with_source("partition append worker failed", err))??;
+            .await;
+            let envelope = match append_result {
+                Ok(Ok(envelope)) => envelope,
+                Ok(Err(error)) => return Err(error),
+                Err(error) => {
+                    return Err(BrokerError::with_source(
+                        "partition append worker failed",
+                        error,
+                    ));
+                }
+            };
+            disk_reservation.commit();
             self.metrics
                 .partition_writes_total
                 .fetch_add(1, Ordering::Relaxed);
@@ -469,6 +520,7 @@ impl Morrow {
             inner.apply_record_compaction(record.seq, &self.config.streams);
             record
         };
+        self.rebuild_tenant_disk_usage().await?;
 
         if let (Some(producer), Some(fingerprint)) =
             (producer_sequence.as_ref(), producer_fingerprint)
@@ -710,17 +762,46 @@ impl Morrow {
     pub(super) async fn remove_client(&self, connection_id: u64) -> Result<()> {
         self.pull_waiters.cancel_connection(connection_id);
         self.group_sessions.lock().await.remove(&connection_id);
-        self.connections.lock().await.clients.remove(&connection_id);
-        let route_interest_changes = self
-            .transient
-            .lock()
-            .await
-            .remove_connection_interests(connection_id);
+        let removed_client = self.connections.lock().await.clients.remove(&connection_id);
+        if let Some(client) = &removed_client {
+            self.tenant_quotas
+                .release(&client.quota_tenant, client.quota_usage);
+        }
+        let (route_interest_changes, transient_task_count) = {
+            let mut transient = self.transient.lock().await;
+            let count = transient
+                .subscriptions
+                .keys()
+                .filter(|(client_id, _)| *client_id == connection_id)
+                .count();
+            (transient.remove_connection_interests(connection_id), count)
+        };
+        if let Some(client) = &removed_client {
+            self.tenant_quotas.release(
+                &client.quota_tenant,
+                crate::quota::TenantQuotaUsage {
+                    tasks: transient_task_count,
+                    ..Default::default()
+                },
+            );
+        }
         let mut inner = self.inner.lock().await;
+        let mut durable_task_count = 0;
         for consumer in inner.consumers.values_mut() {
-            consumer.members.remove(&connection_id);
+            if consumer.members.remove(&connection_id).is_some() {
+                durable_task_count += 1;
+            }
         }
         drop(inner);
+        if let Some(client) = &removed_client {
+            self.tenant_quotas.release(
+                &client.quota_tenant,
+                crate::quota::TenantQuotaUsage {
+                    tasks: durable_task_count,
+                    ..Default::default()
+                },
+            );
+        }
         self.update_route_interests(route_interest_changes).await;
         Ok(())
     }
