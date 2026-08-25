@@ -145,6 +145,9 @@ impl FakeClusterRuntime {
                 key,
                 crate::raft::PartitionAssignmentMetadata {
                     replicas: replicas.clone(),
+                    active_commit_set: replicas.clone(),
+                    replica_set_generation: 1,
+                    phase: crate::raft::PartitionReconfigurationPhase::Stable,
                     leader_id: leader,
                     leader_epoch,
                 },

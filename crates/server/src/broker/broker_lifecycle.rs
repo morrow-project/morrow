@@ -1449,6 +1449,31 @@ impl Morrow {
             "morrow_cluster_partitions {}\n",
             cluster.partitions.len()
         ));
+        let reconfiguration_generation_max = cluster
+            .partitions
+            .iter()
+            .map(|partition| partition.replica_set_generation)
+            .max()
+            .unwrap_or_default();
+        let active_commit_members = cluster
+            .partitions
+            .iter()
+            .map(|partition| partition.active_commit_set.len())
+            .sum::<usize>();
+        metrics.push_str(
+            "# HELP morrow_partition_reconfiguration_generation_max Highest persisted partition replica-set generation.\n",
+        );
+        metrics.push_str("# TYPE morrow_partition_reconfiguration_generation_max gauge\n");
+        metrics.push_str(&format!(
+            "morrow_partition_reconfiguration_generation_max {reconfiguration_generation_max}\n"
+        ));
+        metrics.push_str(
+            "# HELP morrow_partition_active_commit_members Current active commit-set members.\n",
+        );
+        metrics.push_str("# TYPE morrow_partition_active_commit_members gauge\n");
+        metrics.push_str(&format!(
+            "morrow_partition_active_commit_members {active_commit_members}\n"
+        ));
         metrics.push_str("# HELP morrow_cluster_peers Current configured cluster peers.\n");
         metrics.push_str("# TYPE morrow_cluster_peers gauge\n");
         metrics.push_str(&format!("morrow_cluster_peers {}\n", cluster.peers.len()));
@@ -1682,6 +1707,9 @@ impl Morrow {
                             stream: stream.to_string(),
                             partition,
                             replicas: assignment.replicas.into_iter().collect(),
+                            active_commit_set: assignment.active_commit_set.into_iter().collect(),
+                            replica_set_generation: assignment.replica_set_generation,
+                            phase: assignment.phase,
                             leader_id: assignment.leader_id,
                             leader_client_addr,
                             leader_epoch: assignment.leader_epoch,

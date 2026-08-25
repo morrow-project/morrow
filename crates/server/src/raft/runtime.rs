@@ -406,6 +406,9 @@ impl RaftRuntime {
                     partition_key(stream.name.as_str(), partition),
                     PartitionAssignmentMetadata {
                         replicas: replicas.clone(),
+                        active_commit_set: replicas.clone(),
+                        replica_set_generation: 1,
+                        phase: PartitionReconfigurationPhase::Stable,
                         leader_id: self.node_id,
                         leader_epoch: 1,
                     },

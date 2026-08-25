@@ -72,6 +72,9 @@ fn assignment() -> HashMap<String, PartitionAssignmentMetadata> {
         partition_key("orders", 0),
         PartitionAssignmentMetadata {
             replicas: [1].into_iter().collect(),
+            active_commit_set: [1].into_iter().collect(),
+            replica_set_generation: 1,
+            phase: PartitionReconfigurationPhase::Stable,
             leader_id: 1,
             leader_epoch: 1,
         },
@@ -229,6 +232,11 @@ fn partition_leader_epoch_must_be_committed_before_the_new_leader_can_commit_dat
         .unwrap()
         .replicas
         .insert(2);
+    assignments
+        .get_mut(&partition_key("orders", 0))
+        .unwrap()
+        .active_commit_set
+        .insert(2);
     state.apply_command(BrokerCommand::MetadataBootstrap {
         streams: vec![stream()],
         assignments,
@@ -272,6 +280,105 @@ fn partition_leader_epoch_must_be_committed_before_the_new_leader_can_commit_dat
             leader_epoch: 2,
         }
     );
+}
+
+#[test]
+fn fenced_reconfiguration_requires_catch_up_before_activation_and_fences_old_generation() {
+    let mut state = DurableState::new(nodes());
+    let mut assignments = assignment();
+    let metadata = assignments.get_mut(&partition_key("orders", 0)).unwrap();
+    metadata.replicas.insert(2);
+    state.apply_command(BrokerCommand::MetadataBootstrap {
+        streams: vec![stream()],
+        assignments,
+        security_references: BTreeSet::new(),
+        feature_gates: BTreeSet::new(),
+    });
+    assert!(matches!(
+        state.apply_command(BrokerCommand::PartitionCommit {
+            stream: "orders".into(),
+            partition: 0,
+            offset: 0,
+            checksum: 7,
+            leader_id: 1,
+            leader_epoch: 1,
+        }),
+        BrokerResponse::PartitionCommit { .. }
+    ));
+    assert!(matches!(
+        state.apply_command(BrokerCommand::PartitionReconfiguration {
+            stream: "orders".into(),
+            partition: 0,
+            generation: 1,
+            phase: PartitionReconfigurationPhase::CatchingUp {
+                candidate: 2,
+                committed_offset: 0,
+                digest: 7
+            },
+            replicas: [1, 2].into_iter().collect(),
+            active_commit_set: [1].into_iter().collect(),
+            leader_id: 1,
+            leader_epoch: 1,
+            committed_offset: None,
+            committed_checksum: None,
+        }),
+        BrokerResponse::PartitionReconfiguration { .. }
+    ));
+    assert_eq!(
+        state.apply_command(BrokerCommand::PartitionReconfiguration {
+            stream: "orders".into(),
+            partition: 0,
+            generation: 2,
+            phase: PartitionReconfigurationPhase::Activating { candidate: 2 },
+            replicas: [1, 2].into_iter().collect(),
+            active_commit_set: [1, 2].into_iter().collect(),
+            leader_id: 1,
+            leader_epoch: 2,
+            committed_offset: Some(0),
+            committed_checksum: Some(7),
+        }),
+        BrokerResponse::PartitionReconfiguration {
+            generation: 2,
+            phase: PartitionReconfigurationPhase::Activating { candidate: 2 },
+        }
+    );
+    assert_eq!(
+        state.apply_command(BrokerCommand::PartitionCommit {
+            stream: "orders".into(),
+            partition: 0,
+            offset: 1,
+            checksum: 8,
+            leader_id: 1,
+            leader_epoch: 2,
+        }),
+        BrokerResponse::Noop
+    );
+    assert!(matches!(
+        state.apply_command(BrokerCommand::PartitionReconfiguration {
+            stream: "orders".into(),
+            partition: 0,
+            generation: 2,
+            phase: PartitionReconfigurationPhase::Stable,
+            replicas: [1, 2].into_iter().collect(),
+            active_commit_set: [1, 2].into_iter().collect(),
+            leader_id: 2,
+            leader_epoch: 3,
+            committed_offset: None,
+            committed_checksum: None,
+        }),
+        BrokerResponse::PartitionReconfiguration { .. }
+    ));
+    assert!(matches!(
+        state.apply_command(BrokerCommand::PartitionCommit {
+            stream: "orders".into(),
+            partition: 0,
+            offset: 1,
+            checksum: 8,
+            leader_id: 2,
+            leader_epoch: 3,
+        }),
+        BrokerResponse::PartitionCommit { .. }
+    ));
 }
 
 #[test]

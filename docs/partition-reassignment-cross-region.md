@@ -14,6 +14,14 @@ which fences stale writers. A move can be rolled back while adding or catching
 up a replica; after leadership transfer it must complete or be recovered by the
 controller rather than silently reverting the leader.
 
+Global Raft also persists each partition's replica-set generation, active commit
+set, leader epoch, and reconfiguration phase. The `/cluster` administration
+response exposes `replicas`, `active_commit_set`, `replica_set_generation`, and
+`phase` for every partition. A candidate is activated only after its committed
+offset and digest match the controller's partition commit; non-stable phases
+fence foreground partition commits. Legacy snapshots normalize missing fields
+to generation 1, the full replica set, and `Stable`.
+
 The placement planner orders partitions deterministically and scores brokers by
 disk utilization, partition count, leader count, throughput, and node ID. It
 filters draining/decommissioned brokers and applies allowed-region and replica
