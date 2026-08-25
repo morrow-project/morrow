@@ -82,7 +82,7 @@ jobs:
 
   build:
     name: Build (${{ matrix.name }})
-    needs: tag
+    needs: [tag, create-release]
     strategy:
       fail-fast: false
       matrix:
@@ -159,7 +159,7 @@ jobs:
 
   publish-binaries:
     name: Publish binary release
-    needs: [tag, build, create-release]
+    needs: [tag, build]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -237,7 +237,7 @@ jobs:
 
   publish-debian:
     name: Publish Debian packages
-    needs: [tag, create-release, build-debian]
+    needs: [tag, build-debian]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -325,7 +325,7 @@ jobs:
 
   publish-rpm:
     name: Publish RPM packages
-    needs: [tag, create-release, build-rpm]
+    needs: [tag, build-rpm]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
