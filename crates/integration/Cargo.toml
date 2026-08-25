@@ -13,4 +13,5 @@ broker-pem.workspace = true
 tokio-rustls.workspace = true
 
 [dev-dependencies]
+tempfile = "3.27.0"
 wat = "1.257.1"
