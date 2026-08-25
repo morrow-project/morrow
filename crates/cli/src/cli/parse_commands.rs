@@ -74,6 +74,7 @@ fn parse_bench_pubsub(mut args: impl Iterator<Item = String>) -> Result<Command>
     let mut subscribers = 1;
     let mut concurrency = 1;
     let mut ack = false;
+    let mut ack_level = None;
     let mut durable_id = None;
     let mut json = false;
     while let Some(arg) = args.next() {
@@ -84,7 +85,16 @@ fn parse_bench_pubsub(mut args: impl Iterator<Item = String>) -> Result<Command>
             "--publishers" => publishers = parse_usize(&mut args, "--publishers")?,
             "--subscribers" => subscribers = parse_usize(&mut args, "--subscribers")?,
             "--concurrency" => concurrency = parse_usize(&mut args, "--concurrency")?,
-            "--ack" => ack = true,
+            "--ack" => {
+                ack = true;
+                ack_level.get_or_insert(AckLevel::Durable);
+            }
+            "--ack-level" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| CliError::msg("--ack-level requires a value"))?;
+                ack_level = Some(parse_bench_ack_level(&value)?);
+            }
             "--durable-id" => {
                 durable_id = Some(
                     args.next()
@@ -124,6 +134,7 @@ fn parse_bench_pubsub(mut args: impl Iterator<Item = String>) -> Result<Command>
         subscribers,
         concurrency,
         ack,
+        ack_level,
         durable_id,
         json,
     })
@@ -166,6 +177,18 @@ fn parse_ack_level(value: &str) -> Result<AckLevel> {
         "2" => Ok(AckLevel::HighDurability),
         "3" => Ok(AckLevel::ClusterDurable),
         _ => Err(CliError::msg("--qos must be 0, 1, 2, or 3")),
+    }
+}
+
+fn parse_bench_ack_level(value: &str) -> Result<AckLevel> {
+    match value {
+        "accepted" => Ok(AckLevel::Accepted),
+        "durable" => Ok(AckLevel::Durable),
+        "high-durability" => Ok(AckLevel::HighDurability),
+        "cluster-durable" => Ok(AckLevel::ClusterDurable),
+        _ => Err(CliError::msg(
+            "--ack-level must be accepted, durable, high-durability, or cluster-durable",
+        )),
     }
 }
 
@@ -297,6 +320,8 @@ pub(super) fn usage() -> CliError {
          request <subject> <payload> [--timeout-ms n]\n\
          reply <subject> [--queue group]\n\
          bench pubsub <subject> [--messages n|--duration 30s] [--payload-size n]\n\
-             [--publishers n] [--subscribers n] [--concurrency n] [--ack] [--json]",
+             [--publishers n] [--subscribers n] [--concurrency n]\n\
+             [--ack|--ack-level accepted|durable|high-durability|cluster-durable]\n\
+             [--durable-id id] [--json]",
     )
 }

@@ -24,9 +24,22 @@ morrow-cli bench pubsub orders/bench --duration 30s --json
 
 `--messages` and `--duration` are mutually exclusive. `--publishers` controls
 the number of publisher workers, while `--concurrency` multiplies that worker
-count. `--ack` measures the acknowledgement path as well as delivery. The
-default payload is 1,024 bytes and the default fixed run publishes 10,000
-messages.
+count. `--ack` is a compatibility alias for `--ack-level durable` and also
+acknowledges durable deliveries. Use `--ack-level` to select the publisher
+acknowledgement boundary explicitly:
+
+```bash
+morrow-cli bench pubsub orders/bench --messages 10000 --ack-level durable
+morrow-cli bench pubsub orders/bench --messages 10000 --ack-level high-durability
+```
+
+The accepted values are `accepted`, `durable`, `high-durability`, and
+`cluster-durable`. `cluster-durable` requires a clustered server and waits for
+every assigned replica; the benchmark reports a server error rather than
+silently downgrading when the level is unsupported. Human-readable and JSON
+output report both the requested acknowledgement level and the level observed
+in producer acknowledgements. The default payload is 1,024 bytes and the
+default fixed run publishes 10,000 messages.
 
 ## Remote brokers
 

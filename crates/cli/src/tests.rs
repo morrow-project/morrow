@@ -114,10 +114,51 @@ fn parses_server_override_and_bench_pubsub_args() {
             subscribers: 3,
             concurrency: 2,
             ack: true,
+            ack_level: Some(AckLevel::Durable),
             durable_id: None,
             json: true,
         }
     );
+}
+
+#[test]
+fn parses_bench_ack_levels() {
+    let args = Args::parse(
+        [
+            "morrow-cli",
+            "bench",
+            "pubsub",
+            "orders",
+            "--ack-level",
+            "high-durability",
+        ]
+        .into_iter()
+        .map(str::to_string),
+    )
+    .unwrap();
+    assert!(matches!(
+        args.command,
+        Command::BenchPubSub {
+            ack: false,
+            ack_level: Some(AckLevel::HighDurability),
+            ..
+        }
+    ));
+
+    let legacy = Args::parse(
+        ["morrow-cli", "bench", "pubsub", "orders", "--ack"]
+            .into_iter()
+            .map(str::to_string),
+    )
+    .unwrap();
+    assert!(matches!(
+        legacy.command,
+        Command::BenchPubSub {
+            ack: true,
+            ack_level: Some(AckLevel::Durable),
+            ..
+        }
+    ));
 }
 
 #[test]
