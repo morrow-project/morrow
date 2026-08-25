@@ -35,6 +35,8 @@ pub struct Config {
     pub max_fetch_messages: usize,
     pub max_fetch_bytes: usize,
     pub max_encoded_batch_bytes: usize,
+    pub audit_max_records: usize,
+    pub audit_segment_bytes: u64,
     pub verbose: bool,
     pub tls: Option<TlsConfig>,
     pub auth: AuthConfig,
@@ -248,6 +250,8 @@ impl Config {
             "max_encoded_batch_bytes",
             DEFAULT_MAX_ENCODED_BATCH_BYTES,
         )?;
+        let audit_max_records = get_bounded_usize(value, "audit_max_records", 10_000)?;
+        let audit_segment_bytes = get_u64(value, "audit_segment_bytes")?.unwrap_or(16 * 1_048_576);
         let verbose = get_bool(value, "verbose")?.unwrap_or(false);
         let tls = get_tls_config(value)?;
         let auth = get_auth_config(value)?;
@@ -280,6 +284,8 @@ impl Config {
             max_fetch_messages,
             max_fetch_bytes,
             max_encoded_batch_bytes,
+            audit_max_records,
+            audit_segment_bytes,
             verbose,
             tls,
             auth,
@@ -372,6 +378,14 @@ impl Config {
                 );
             }
         }
+        crate::broker_ensure!(
+            self.audit_max_records > 0,
+            "config field audit_max_records must be greater than zero"
+        );
+        crate::broker_ensure!(
+            self.audit_segment_bytes > 0,
+            "config field audit_segment_bytes must be greater than zero"
+        );
         if self.http_listen.is_some() {
             crate::broker_ensure!(
                 self.admin_token

@@ -81,11 +81,16 @@ impl Morrow {
     }
 
     pub(super) fn record_audit_event(&self, event: crate::tenancy::AuditEvent) -> Result<()> {
-        self.audit
+        let result = self
+            .audit
             .lock()
             .expect("audit log lock poisoned")
             .append(event)
-            .map(|_| ())
+            .map(|_| ());
+        if result.is_err() {
+            self.audit_failure.store(true, Ordering::Relaxed);
+        }
+        result
     }
 
     pub(super) fn record_authorization_denial(

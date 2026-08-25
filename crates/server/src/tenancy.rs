@@ -9,7 +9,7 @@ use crate::error::{BrokerError, Result};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs::{File, OpenOptions},
+    fs::{self, File, OpenOptions},
     io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
@@ -278,12 +278,31 @@ pub struct AuditRecord {
     pub hash: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AuditStatus {
+    pub records_written: u64,
+    pub bytes_written: u64,
+    pub rotations: u64,
+    pub export_position: u64,
+    pub write_failures: u64,
+    pub verification_failures: u64,
+    pub oldest_retained_sequence: Option<u64>,
+    pub newest_retained_sequence: Option<u64>,
+}
+
 #[derive(Debug)]
 pub struct AuditLog {
     records: Vec<AuditRecord>,
     max_records: usize,
     next_sequence: u64,
     last_hash: String,
+    segment_bytes_limit: u64,
+    segment_index: u64,
+    current_segment_bytes: u64,
+    bytes_written: u64,
+    rotations: u64,
+    write_failures: u64,
+    verification_failures: u64,
     path: Option<PathBuf>,
 }
 
@@ -294,6 +313,13 @@ impl Default for AuditLog {
             max_records: 10_000,
             next_sequence: 0,
             last_hash: "0".repeat(64),
+            segment_bytes_limit: 16 * 1_048_576,
+            segment_index: 0,
+            current_segment_bytes: 0,
+            bytes_written: 0,
+            rotations: 0,
+            write_failures: 0,
+            verification_failures: 0,
             path: None,
         }
     }
@@ -307,18 +333,39 @@ impl AuditLog {
             max_records,
             next_sequence: 0,
             last_hash: "0".repeat(64),
+            segment_bytes_limit: 16 * 1_048_576,
+            segment_index: 0,
+            current_segment_bytes: 0,
+            bytes_written: 0,
+            rotations: 0,
+            write_failures: 0,
+            verification_failures: 0,
             path: None,
         })
     }
 
     pub fn open(path: impl AsRef<Path>, max_records: usize) -> Result<Self> {
+        Self::open_with_segment_bytes(path, max_records, 16 * 1_048_576)
+    }
+
+    pub fn open_with_segment_bytes(
+        path: impl AsRef<Path>,
+        max_records: usize,
+        segment_bytes_limit: u64,
+    ) -> Result<Self> {
         crate::broker_ensure!(max_records > 0, "audit log capacity must be positive");
+        crate::broker_ensure!(
+            segment_bytes_limit > 0,
+            "audit log segment size must be positive"
+        );
         let path = path.as_ref().to_path_buf();
         let mut records = Vec::new();
         let mut next_sequence = 0;
         let mut last_hash = "0".repeat(64);
-        if path.exists() {
-            let file = File::open(&path)
+        let segment_paths = audit_segment_paths(&path)?;
+        let mut bytes_written: u64 = 0;
+        for (_, segment_path) in &segment_paths {
+            let file = File::open(segment_path)
                 .map_err(|error| BrokerError::with_source("opening audit log", error))?;
             for line in BufReader::new(file).lines() {
                 let line =
@@ -336,12 +383,35 @@ impl AuditLog {
                     records.remove(0);
                 }
             }
+            bytes_written = bytes_written.saturating_add(
+                fs::metadata(segment_path)
+                    .map_err(|error| BrokerError::with_source("reading audit metadata", error))?
+                    .len(),
+            );
         }
+        let (segment_index, current_segment_bytes) = segment_paths
+            .last()
+            .map(|(index, segment_path)| {
+                (
+                    *index,
+                    fs::metadata(segment_path)
+                        .map(|metadata| metadata.len())
+                        .unwrap_or(0),
+                )
+            })
+            .unwrap_or((0, 0));
         Ok(Self {
             records,
             max_records,
             next_sequence,
             last_hash,
+            segment_bytes_limit,
+            segment_index,
+            current_segment_bytes,
+            bytes_written,
+            rotations: segment_index,
+            write_failures: 0,
+            verification_failures: 0,
             path: Some(path),
         })
     }
@@ -355,18 +425,44 @@ impl AuditLog {
             previous_hash,
             hash,
         };
+        let encoded = serde_json::to_vec(&record)
+            .map_err(|error| BrokerError::with_source("encoding audit record", error))?;
+        let bytes = encoded.len() as u64 + 1;
         if let Some(path) = &self.path {
-            let mut file = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-                .map_err(|error| BrokerError::with_source("opening audit log for append", error))?;
-            serde_json::to_writer(&mut file, &record)
-                .map_err(|error| BrokerError::with_source("encoding audit record", error))?;
-            file.write_all(b"\n")
-                .map_err(|error| BrokerError::with_source("writing audit record", error))?;
-            file.sync_data()
-                .map_err(|error| BrokerError::with_source("syncing audit record", error))?;
+            let rotate = self.current_segment_bytes > 0
+                && self.current_segment_bytes.saturating_add(bytes) > self.segment_bytes_limit;
+            let segment_path = if rotate {
+                self.segment_index = self.segment_index.saturating_add(1);
+                self.current_segment_bytes = 0;
+                audit_segment_path(path, self.segment_index)
+            } else {
+                audit_segment_path(path, self.segment_index)
+            };
+            let result = (|| -> Result<()> {
+                let mut file = OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&segment_path)
+                    .map_err(|error| {
+                        BrokerError::with_source("opening audit log for append", error)
+                    })?;
+                file.write_all(&encoded)
+                    .map_err(|error| BrokerError::with_source("writing audit record", error))?;
+                file.write_all(b"\n")
+                    .map_err(|error| BrokerError::with_source("writing audit record", error))?;
+                file.sync_data()
+                    .map_err(|error| BrokerError::with_source("syncing audit record", error))?;
+                Ok(())
+            })();
+            if let Err(error) = result {
+                self.write_failures = self.write_failures.saturating_add(1);
+                return Err(error);
+            }
+            if rotate {
+                self.rotations = self.rotations.saturating_add(1);
+            }
+            self.current_segment_bytes = self.current_segment_bytes.saturating_add(bytes);
+            self.bytes_written = self.bytes_written.saturating_add(bytes);
         }
         self.next_sequence = self.next_sequence.saturating_add(1);
         self.last_hash = record.hash.clone();
@@ -389,30 +485,36 @@ impl AuditLog {
             .collect()
     }
 
-    pub fn verify(&self) -> Result<()> {
-        if let Some(path) = &self.path {
-            verify_audit_file(path)
+    pub fn verify(&mut self) -> Result<()> {
+        let result = if let Some(path) = &self.path {
+            verify_audit_files(&audit_segment_paths(path)?)
         } else {
             verify_audit_records(&self.records)
+        };
+        if result.is_err() {
+            self.verification_failures = self.verification_failures.saturating_add(1);
         }
+        result
     }
 
     pub fn verify_export(records: &[AuditRecord]) -> Result<()> {
         verify_audit_records(records)
     }
 
-    pub fn export_json(&self) -> Result<Vec<u8>> {
+    pub fn export_json(&mut self) -> Result<Vec<u8>> {
         self.verify()?;
         let mut output = Vec::new();
         if let Some(path) = &self.path {
-            let file = File::open(path)
-                .map_err(|error| BrokerError::with_source("opening audit export", error))?;
-            for line in BufReader::new(file).lines() {
-                let line =
-                    line.map_err(|error| BrokerError::with_source("reading audit export", error))?;
-                if !line.trim().is_empty() {
-                    output.extend_from_slice(line.as_bytes());
-                    output.push(b'\n');
+            for (_, segment_path) in audit_segment_paths(path)? {
+                let file = File::open(segment_path)
+                    .map_err(|error| BrokerError::with_source("opening audit export", error))?;
+                for line in BufReader::new(file).lines() {
+                    let line = line
+                        .map_err(|error| BrokerError::with_source("reading audit export", error))?;
+                    if !line.trim().is_empty() {
+                        output.extend_from_slice(line.as_bytes());
+                        output.push(b'\n');
+                    }
                 }
             }
         } else {
@@ -423,6 +525,19 @@ impl AuditLog {
             }
         }
         Ok(output)
+    }
+
+    pub fn status(&self) -> AuditStatus {
+        AuditStatus {
+            records_written: self.next_sequence,
+            bytes_written: self.bytes_written,
+            rotations: self.rotations,
+            export_position: self.next_sequence,
+            write_failures: self.write_failures,
+            verification_failures: self.verification_failures,
+            oldest_retained_sequence: self.records.first().map(|record| record.event.sequence),
+            newest_retained_sequence: self.records.last().map(|record| record.event.sequence),
+        }
     }
 }
 
@@ -463,21 +578,62 @@ fn verify_audit_record(record: &AuditRecord, sequence: u64, previous_hash: &str)
     Ok(())
 }
 
-fn verify_audit_file(path: &Path) -> Result<()> {
-    let file = File::open(path)
-        .map_err(|error| BrokerError::with_source("opening audit log for verification", error))?;
+fn audit_segment_path(path: &Path, index: u64) -> PathBuf {
+    if index == 0 {
+        path.to_path_buf()
+    } else {
+        PathBuf::from(format!("{}.segment-{index:08}", path.to_string_lossy()))
+    }
+}
+
+fn audit_segment_paths(path: &Path) -> Result<Vec<(u64, PathBuf)>> {
+    let mut paths = Vec::new();
+    if path.exists() {
+        paths.push((0, path.to_path_buf()));
+    }
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let prefix = format!(
+        "{}.segment-",
+        path.file_name().unwrap_or_default().to_string_lossy()
+    );
+    if let Ok(entries) = fs::read_dir(parent) {
+        for entry in entries {
+            let entry = entry.map_err(|error| {
+                BrokerError::with_source("reading audit segment directory", error)
+            })?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let Some(index) = name
+                .strip_prefix(&prefix)
+                .and_then(|value| value.parse().ok())
+            else {
+                continue;
+            };
+            paths.push((index, entry.path()));
+        }
+    }
+    paths.sort_by_key(|(index, _)| *index);
+    Ok(paths)
+}
+
+fn verify_audit_files(paths: &[(u64, PathBuf)]) -> Result<()> {
     let mut sequence = 0;
     let mut previous_hash = "0".repeat(64);
-    for line in BufReader::new(file).lines() {
-        let line = line.map_err(|error| BrokerError::with_source("reading audit log", error))?;
-        if line.trim().is_empty() {
-            continue;
+    for (_, path) in paths {
+        let file = File::open(path).map_err(|error| {
+            BrokerError::with_source("opening audit log for verification", error)
+        })?;
+        for line in BufReader::new(file).lines() {
+            let line =
+                line.map_err(|error| BrokerError::with_source("reading audit log", error))?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            let record: AuditRecord = serde_json::from_str(&line)
+                .map_err(|error| BrokerError::with_source("decoding audit record", error))?;
+            verify_audit_record(&record, sequence, &previous_hash)?;
+            sequence = sequence.saturating_add(1);
+            previous_hash = record.hash;
         }
-        let record: AuditRecord = serde_json::from_str(&line)
-            .map_err(|error| BrokerError::with_source("decoding audit record", error))?;
-        verify_audit_record(&record, sequence, &previous_hash)?;
-        sequence = sequence.saturating_add(1);
-        previous_hash = record.hash;
     }
     Ok(())
 }
@@ -627,7 +783,7 @@ mod tests {
         })
         .unwrap();
         drop(log);
-        let reopened = AuditLog::open(&path, 8).unwrap();
+        let mut reopened = AuditLog::open(&path, 8).unwrap();
         assert_eq!(reopened.records().len(), 1);
         assert_eq!(reopened.export_json().unwrap().lines().count(), 1);
         let mut bytes = std::fs::read(&path).unwrap();
@@ -641,7 +797,7 @@ mod tests {
     fn persisted_audit_log_keeps_appending_beyond_the_memory_window() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("audit.log");
-        let mut log = AuditLog::open(&path, 8).unwrap();
+        let mut log = AuditLog::open_with_segment_bytes(&path, 8, 512).unwrap();
         for sequence in 0..10_001 {
             log.append(AuditEvent {
                 sequence,
@@ -657,10 +813,33 @@ mod tests {
         }
         assert_eq!(log.records().len(), 8);
         assert_eq!(log.records().first().unwrap().event.sequence, 9_993);
+        assert!(log.status().rotations > 1);
         log.verify().unwrap();
         drop(log);
-        let reopened = AuditLog::open(&path, 8).unwrap();
+        let mut reopened = AuditLog::open_with_segment_bytes(&path, 8, 512).unwrap();
         assert_eq!(reopened.export_json().unwrap().lines().count(), 10_001);
         assert_eq!(reopened.records().last().unwrap().event.sequence, 10_000);
+    }
+
+    #[test]
+    fn audit_write_failure_is_counted_without_advancing_the_chain() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("missing").join("audit.log");
+        let mut log = AuditLog::open(&path, 8).unwrap();
+        let error = log
+            .append(AuditEvent {
+                sequence: 0,
+                timestamp_ms: 1,
+                actor: "operator".to_string(),
+                tenant: None,
+                action: "health.check".to_string(),
+                resource: "cluster".to_string(),
+                outcome: "success".to_string(),
+                details: BTreeMap::new(),
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("opening audit log"));
+        assert_eq!(log.status().write_failures, 1);
+        assert_eq!(log.status().records_written, 0);
     }
 }

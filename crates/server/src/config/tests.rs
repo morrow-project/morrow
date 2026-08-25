@@ -71,6 +71,8 @@ fn parses_json_config() {
     assert_eq!(config.max_fetch_messages, 128);
     assert_eq!(config.max_fetch_bytes, 65_536);
     assert_eq!(config.max_encoded_batch_bytes, 131_072);
+    assert_eq!(config.audit_max_records, 10_000);
+    assert_eq!(config.audit_segment_bytes, 16 * 1_048_576);
     assert!(config.verbose);
     assert!(config.tls.is_none());
     assert!(!config.auth.enabled);
