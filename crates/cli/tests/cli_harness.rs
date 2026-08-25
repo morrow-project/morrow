@@ -54,6 +54,8 @@ async fn cli_bench_pubsub_reports_json_results() {
         "2",
         "--subscribers",
         "2",
+        "--ack-level",
+        "durable",
         "--json",
     ])
     .await;
@@ -63,6 +65,8 @@ async fn cli_bench_pubsub_reports_json_results() {
     assert_eq!(result["messages_received"], 40);
     assert_eq!(result["duplicates"], 0);
     assert_eq!(result["network_mode"], "local");
+    assert_eq!(result["requested_ack_level"], "durable");
+    assert_eq!(result["observed_ack_level"], "durable");
     harness.shutdown().await;
 }
 

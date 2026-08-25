@@ -3,7 +3,7 @@ use std::{
     collections::HashSet,
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -19,6 +19,7 @@ pub(super) struct PubSubOptions {
     pub subscribers: usize,
     pub concurrency: usize,
     pub ack: bool,
+    pub ack_level: Option<AckLevel>,
     pub durable_id: Option<String>,
 }
 
@@ -35,6 +36,8 @@ pub(super) struct BenchmarkResult {
     subscribers: usize,
     concurrency: usize,
     ack: bool,
+    requested_ack_level: Option<String>,
+    observed_ack_level: Option<String>,
     publish_messages_per_second: f64,
     delivery_messages_per_second: f64,
     publish_latency_us: Percentiles,
@@ -71,6 +74,8 @@ pub(super) async fn run_pubsub(
     let next_sequence = Arc::new(AtomicU64::new(0));
     let publishers_remaining = Arc::new(AtomicU64::new(publisher_tasks as u64));
     let publish_latencies = Arc::new(Mutex::new(Vec::new()));
+    let observed_ack_level = Arc::new(Mutex::new(None));
+    let observed_ack_mismatch = Arc::new(AtomicBool::new(false));
     let start_barrier = Arc::new(Barrier::new(publisher_tasks + options.subscribers));
 
     let mut subscribers = Vec::with_capacity(options.subscribers);
@@ -153,10 +158,12 @@ pub(super) async fn run_pubsub(
         let next_sequence = next_sequence.clone();
         let publishers_remaining = publishers_remaining.clone();
         let publish_latencies = publish_latencies.clone();
+        let observed_ack_level = observed_ack_level.clone();
+        let observed_ack_mismatch = observed_ack_mismatch.clone();
         let payload_size = options.payload_size;
         let messages = options.messages.map(|messages| messages as u64);
         let deadline = deadline;
-        let ack = options.ack;
+        let ack_level = options.ack_level;
         publishers.push(tokio::spawn(async move {
             let options = config.client_options_for(&format!("bench-pub-{index}"))?;
             let mut client = Client::connect_with_options(&options).await?;
@@ -173,16 +180,24 @@ pub(super) async fn run_pubsub(
                 let sent_ns = start.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
                 payload[8..16].copy_from_slice(&sent_ns.to_le_bytes());
                 let publish_start = Instant::now();
-                if ack {
-                    client
+                if let Some(ack_level) = ack_level {
+                    let producer_ack = client
                         .publish_with_qos(
                             &subject,
                             None,
                             &payload,
-                            AckLevel::Accepted,
+                            ack_level,
                             &format!("bench-{index}-{sequence}"),
                         )
                         .await?;
+                    let mut observed = observed_ack_level.lock().await;
+                    if let Some(previous) = *observed {
+                        if previous != producer_ack.level {
+                            observed_ack_mismatch.store(true, Ordering::Release);
+                        }
+                    } else {
+                        *observed = Some(producer_ack.level);
+                    }
                 } else {
                     client.publish(&subject, &payload).await?;
                 }
@@ -223,6 +238,18 @@ pub(super) async fn run_pubsub(
     let mut publish_latencies = Arc::try_unwrap(publish_latencies)
         .map_err(|_| CliError::msg("benchmark latency collection is still in use"))?
         .into_inner();
+    let observed_ack_level = Arc::try_unwrap(observed_ack_level)
+        .map_err(|_| CliError::msg("benchmark acknowledgement collection is still in use"))?
+        .into_inner();
+    let observed_ack_level = options.ack_level.map(|_| {
+        if observed_ack_mismatch.load(Ordering::Acquire) {
+            "mixed".to_string()
+        } else {
+            observed_ack_level
+                .map(ack_level_name)
+                .unwrap_or_else(|| "none".to_string())
+        }
+    });
     let expected_received = messages_published * options.subscribers as u64;
     if messages_received != expected_received || duplicates != 0 {
         return Err(CliError::msg(format!(
@@ -245,6 +272,8 @@ pub(super) async fn run_pubsub(
         subscribers: options.subscribers,
         concurrency: options.concurrency,
         ack: options.ack,
+        requested_ack_level: options.ack_level.map(ack_level_name),
+        observed_ack_level,
         publish_messages_per_second: messages_published as f64 * 1_000.0 / elapsed_ms as f64,
         delivery_messages_per_second: messages_received as f64 * 1_000.0 / elapsed_ms as f64,
         publish_latency_us: percentiles(&mut publish_latencies),
@@ -268,9 +297,24 @@ impl BenchmarkResult {
             "settings: payload={} bytes publishers={} subscribers={} concurrency={} ack={}",
             self.payload_size, self.publishers, self.subscribers, self.concurrency, self.ack
         );
+        println!(
+            "publish acknowledgement: requested={} observed={}",
+            self.requested_ack_level.as_deref().unwrap_or("none"),
+            self.observed_ack_level.as_deref().unwrap_or("none")
+        );
         print_percentiles("publish latency", &self.publish_latency_us);
         print_percentiles("end-to-end latency", &self.end_to_end_latency_us);
     }
+}
+
+fn ack_level_name(level: AckLevel) -> String {
+    match level {
+        AckLevel::Accepted => "accepted",
+        AckLevel::Durable => "durable",
+        AckLevel::HighDurability => "high-durability",
+        AckLevel::ClusterDurable => "cluster-durable",
+    }
+    .to_string()
 }
 
 fn percentiles(values: &mut Vec<u64>) -> Percentiles {

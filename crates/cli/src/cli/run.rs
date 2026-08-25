@@ -137,6 +137,7 @@ pub(super) async fn run_command(config: &CliConfig, command: Command) -> Result<
             subscribers,
             concurrency,
             ack,
+            ack_level,
             durable_id,
             json,
         } => {
@@ -156,6 +157,7 @@ pub(super) async fn run_command(config: &CliConfig, command: Command) -> Result<
                     subscribers,
                     concurrency,
                     ack,
+                    ack_level,
                     durable_id,
                 },
             )

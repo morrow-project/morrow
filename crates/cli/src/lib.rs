@@ -51,6 +51,7 @@ pub enum Command {
         subscribers: usize,
         concurrency: usize,
         ack: bool,
+        ack_level: Option<AckLevel>,
         durable_id: Option<String>,
         json: bool,
     },
