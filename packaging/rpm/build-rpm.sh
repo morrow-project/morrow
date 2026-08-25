@@ -13,10 +13,18 @@ archive="$4"
 output_dir="$5"
 build_root="$(mktemp -d)"
 trap 'rm -rf "${build_root}"' EXIT
+script_dir="$(cd "$(dirname "$0")" && pwd)"
+unit_file="${script_dir}/../systemd/morrow.service"
+
+if [[ ! -r "${unit_file}" ]]; then
+  echo "missing shared systemd unit: ${unit_file}" >&2
+  exit 1
+fi
 
 topdir="${build_root}/rpmbuild"
 mkdir -p "${topdir}"/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS}
 cp "${archive}" "${topdir}/SOURCES/morrow-${version}-linux-${release_arch}.tar.gz"
+cp "${unit_file}" "${topdir}/SOURCES/morrow.service"
 
 cat >"${topdir}/SPECS/morrow.spec" <<EOF
 Name:           morrow
@@ -27,6 +35,7 @@ Summary:        WAL-backed message broker
 License:        Apache-2.0
 URL:            https://github.com/morrow-project/morrow
 Source0:        morrow-%{version}-linux-${release_arch}.tar.gz
+Source1:        morrow.service
 Requires:       glibc >= 2.35
 
 %description
@@ -46,28 +55,9 @@ install -D -m 0644 LICENSE %{buildroot}%{_docdir}/morrow/LICENSE
 install -D -m 0644 README.md %{buildroot}%{_docdir}/morrow/README.md
 install -D -m 0644 docs/building.md %{buildroot}%{_docdir}/morrow/building.md
 install -D -m 0644 docs/operations.md %{buildroot}%{_docdir}/morrow/operations.md
+install -D -m 0644 docs/packaging-systemd.md %{buildroot}%{_docdir}/morrow/packaging-systemd.md
 install -d -m 0750 %{buildroot}/var/lib/morrow
-install -D -m 0644 /dev/stdin %{buildroot}%{_unitdir}/morrow.service <<'SERVICE'
-[Unit]
-Description=Morrow message broker
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=morrow
-Group=morrow
-WorkingDirectory=/var/lib/morrow
-ExecStartPre=/usr/bin/test -r /etc/morrow/morrow.json
-ExecStart=/usr/bin/morrow-server /etc/morrow/morrow.json
-Restart=on-failure
-StateDirectory=morrow
-NoNewPrivileges=true
-PrivateTmp=true
-
-[Install]
-WantedBy=multi-user.target
-SERVICE
+install -D -m 0644 %{SOURCE1} %{buildroot}%{_unitdir}/morrow.service
 
 %pre
 getent group morrow >/dev/null 2>&1 || groupadd -r morrow

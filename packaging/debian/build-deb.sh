@@ -12,6 +12,13 @@ archive="$3"
 output_dir="$4"
 package_root="$(mktemp -d)"
 trap 'rm -rf "${package_root}"' EXIT
+script_dir="$(cd "$(dirname "$0")" && pwd)"
+unit_file="${script_dir}/../systemd/morrow.service"
+
+if [[ ! -r "${unit_file}" ]]; then
+  echo "missing shared systemd unit: ${unit_file}" >&2
+  exit 1
+fi
 
 name="morrow"
 package_dir="${package_root}/${name}"
@@ -33,6 +40,8 @@ install -m 0644 "${release_dir}/LICENSE" "${package_dir}/usr/share/doc/${name}/L
 install -m 0644 "${release_dir}/README.md" "${package_dir}/usr/share/doc/${name}/README.md"
 install -m 0644 "${release_dir}/docs/building.md" "${package_dir}/usr/share/doc/${name}/building.md"
 install -m 0644 "${release_dir}/docs/operations.md" "${package_dir}/usr/share/doc/${name}/operations.md"
+install -m 0644 "${script_dir}/../../docs/packaging-systemd.md" "${package_dir}/usr/share/doc/${name}/packaging-systemd.md"
+install -m 0644 "${unit_file}" "${package_dir}/lib/systemd/system/morrow.service"
 
 cat >"${package_dir}/DEBIAN/control" <<EOF
 Package: ${name}
@@ -45,28 +54,6 @@ Depends: libc6 (>= 2.35), adduser
 Description: WAL-backed message broker
  Morrow is a message broker with durable consumers, request/reply inboxes,
  and optional clustered durability.
-EOF
-
-cat >"${package_dir}/lib/systemd/system/morrow.service" <<'EOF'
-[Unit]
-Description=Morrow message broker
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=morrow
-Group=morrow
-WorkingDirectory=/var/lib/morrow
-ExecStartPre=/usr/bin/test -r /etc/morrow/morrow.json
-ExecStart=/usr/bin/morrow-server /etc/morrow/morrow.json
-Restart=on-failure
-StateDirectory=morrow
-NoNewPrivileges=true
-PrivateTmp=true
-
-[Install]
-WantedBy=multi-user.target
 EOF
 
 cat >"${package_dir}/DEBIAN/postinst" <<'EOF'

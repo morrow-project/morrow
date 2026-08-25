@@ -40,6 +40,9 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v7
+      - name: Validate packaged systemd unit
+        if: matrix.id == 'linux-amd64'
+        run: packaging/tests/systemd-unit-test.sh
       - name: Set up Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:

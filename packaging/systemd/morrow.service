@@ -1,0 +1,53 @@
+[Unit]
+Description=Morrow message broker
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=60s
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=morrow
+Group=morrow
+WorkingDirectory=/var/lib/morrow
+ExecStartPre=/usr/bin/test -r /etc/morrow/morrow.json
+ExecStart=/usr/bin/morrow-server /etc/morrow/morrow.json
+KillSignal=SIGTERM
+TimeoutStopSec=120s
+SendSIGKILL=yes
+SuccessExitStatus=0
+Restart=on-failure
+RestartSec=5s
+UMask=0077
+LimitNOFILE=65536
+
+StateDirectory=morrow
+RuntimeDirectory=morrow
+ReadWritePaths=/var/lib/morrow /run/morrow
+ReadOnlyPaths=/etc/morrow /etc/ssl /etc/pki
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectKernelLogs=true
+ProtectClock=true
+ProtectHostname=true
+LockPersonality=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+# Wasmtime JIT and supported middleware require executable memory transitions.
+# Keep the exception explicit; validate middleware-enabled deployments separately.
+MemoryDenyWriteExecute=false
+
+[Install]
+WantedBy=multi-user.target
