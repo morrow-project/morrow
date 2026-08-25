@@ -19,7 +19,6 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     fmt, io,
-    net::SocketAddr,
     ops::RangeBounds,
     path::{Path, PathBuf},
     sync::{

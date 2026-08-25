@@ -304,12 +304,50 @@ impl Morrow {
         listener: TcpListener,
         handle_shutdown: bool,
     ) -> Result<()> {
-        self.start_cluster().await?;
-        self.start_route_mesh().await?;
+        let http_listener = match self.config.http_listen {
+            Some(listen) => Some(
+                TcpListener::bind(listen)
+                    .await
+                    .with_context(|| format!("binding HTTP status listener {listen}"))?,
+            ),
+            None => None,
+        };
+        let websocket_listener = match self.config.websocket.as_ref() {
+            Some(config) => Some(
+                TcpListener::bind(config.listen)
+                    .await
+                    .with_context(|| format!("binding WebSocket listener {}", config.listen))?,
+            ),
+            None => None,
+        };
+        let route_listener = match self
+            .config
+            .cluster
+            .as_ref()
+            .and_then(|cluster| cluster.route_listen)
+        {
+            Some(listen) => Some(
+                TcpListener::bind(listen)
+                    .await
+                    .with_context(|| format!("binding route listener {listen}"))?,
+            ),
+            None => None,
+        };
+        let raft_listener = match self.config.cluster.as_ref() {
+            Some(cluster) => Some(
+                TcpListener::bind(cluster.raft_listen)
+                    .await
+                    .with_context(|| format!("binding Raft listener {}", cluster.raft_listen))?,
+            ),
+            None => None,
+        };
+
+        self.start_cluster(raft_listener).await?;
+        self.start_route_mesh(route_listener).await?;
         self.log_cluster_event("server started").await;
         self.spawn_cluster_log_monitor();
-        self.spawn_http_status_listener();
-        self.spawn_websocket_listener().await?;
+        self.spawn_http_status_listener(http_listener);
+        self.spawn_websocket_listener(websocket_listener).await?;
         if self.hooks.start_redelivery_loop {
             let redeliver = self.clone();
             tokio::spawn(async move {

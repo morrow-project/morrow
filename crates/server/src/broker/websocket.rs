@@ -21,13 +21,14 @@ const TEXT_SUBPROTOCOL: &str = "morrow.v1.text";
 const BRIDGE_CAPACITY: usize = 128 * 1024;
 
 impl Morrow {
-    pub(super) async fn spawn_websocket_listener(&self) -> Result<()> {
+    pub(super) async fn spawn_websocket_listener(
+        &self,
+        listener: Option<TcpListener>,
+    ) -> Result<()> {
         let Some(config) = self.config.websocket.clone() else {
             return Ok(());
         };
-        let listener = TcpListener::bind(config.listen)
-            .await
-            .with_context(|| format!("binding WebSocket listener {}", config.listen))?;
+        let listener = listener.expect("configured WebSocket listener was not pre-bound");
         info!(listen = %config.listen, tls = config.tls.is_some(), "WebSocket listener started");
         let broker = self.clone();
         tokio::spawn(async move {

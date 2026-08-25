@@ -1,7 +1,7 @@
 use super::*;
 
 impl Morrow {
-    pub(super) async fn start_cluster(&self) -> Result<()> {
+    pub(super) async fn start_cluster(&self, listener: Option<TcpListener>) -> Result<()> {
         let Some(cluster_config) = &self.config.cluster else {
             return Ok(());
         };
@@ -13,18 +13,23 @@ impl Morrow {
             self.quotas.clone(),
         )
         .await?;
-        runtime.spawn_listener(cluster_config.raft_listen);
+        runtime.spawn_listener(listener.expect("configured Raft listener was not pre-bound"));
         let runtime = ClusterRuntime::real(runtime);
         self.sync_from_cluster(&runtime).await?;
         *self.cluster.lock().await = Some(runtime);
         Ok(())
     }
 
-    pub(super) async fn start_route_mesh(&self) -> Result<()> {
+    pub(super) async fn start_route_mesh(&self, listener: Option<TcpListener>) -> Result<()> {
         let Some(route_mesh) = &self.route_mesh else {
             return Ok(());
         };
-        route_mesh.start(self.clone()).await?;
+        route_mesh
+            .start(
+                self.clone(),
+                listener.expect("configured route listener was not pre-bound"),
+            )
+            .await?;
         self.sync_route_interests().await;
         Ok(())
     }
