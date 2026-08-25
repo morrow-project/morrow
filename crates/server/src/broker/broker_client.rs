@@ -203,6 +203,12 @@ impl Morrow {
             .tenant_quotas
             .try_reserve(crate::quota::DEFAULT_TENANT, quota_usage)
         {
+            self.record_quota_rejection(
+                id,
+                crate::quota::DEFAULT_TENANT,
+                "connections",
+                "tenant connection quota exceeded",
+            );
             crate::broker_bail!("tenant connection quota exceeded");
         }
         let mut connections = self.connections.lock().await;
@@ -336,6 +342,12 @@ impl Morrow {
                 client.quota_usage,
             )
         {
+            self.record_quota_rejection(
+                id,
+                quota_tenant,
+                "connections",
+                "tenant connection quota exceeded for authenticated tenant",
+            );
             crate::broker_bail!("tenant connection quota exceeded for authenticated tenant");
         }
         let client = connections
@@ -428,6 +440,12 @@ impl Morrow {
                             ..Default::default()
                         },
                     ) {
+                        self.record_quota_rejection(
+                            connection_id,
+                            &client.quota_tenant,
+                            "tasks",
+                            "tenant foreground task quota exceeded",
+                        );
                         crate::broker_bail!("tenant foreground task quota exceeded");
                     }
                 }
@@ -488,6 +506,12 @@ impl Morrow {
                             },
                         )
                     {
+                        self.record_quota_rejection(
+                            connection_id,
+                            &client.quota_tenant,
+                            "tasks",
+                            "tenant foreground task quota exceeded",
+                        );
                         crate::broker_bail!("tenant foreground task quota exceeded");
                     }
                     (

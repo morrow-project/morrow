@@ -101,6 +101,12 @@ impl Morrow {
                 ..Default::default()
             },
         ) {
+            self.record_quota_rejection(
+                connection_id,
+                &quota_tenant,
+                "background_tasks",
+                "tenant background task quota exceeded",
+            );
             crate::broker_bail!("tenant background task quota exceeded");
         }
 

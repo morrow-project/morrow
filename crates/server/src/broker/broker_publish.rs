@@ -333,16 +333,21 @@ impl Morrow {
             }) as u64)
             .saturating_add(reply_to.as_ref().map_or(0, String::len) as u64)
             .saturating_add(payload.len() as u64);
-        crate::broker_ensure!(
-            self.tenant_quotas.try_reserve(
+        if !self.tenant_quotas.try_reserve(
+            &quota_tenant,
+            crate::quota::TenantQuotaUsage {
+                disk_bytes,
+                ..Default::default()
+            },
+        ) {
+            self.record_quota_rejection(
+                publisher_id,
                 &quota_tenant,
-                crate::quota::TenantQuotaUsage {
-                    disk_bytes,
-                    ..Default::default()
-                }
-            ),
-            "tenant durable disk quota exceeded"
-        );
+                "disk_bytes",
+                "tenant durable disk quota exceeded",
+            );
+            crate::broker_bail!("tenant durable disk quota exceeded");
+        }
 
         if let (Some(producer), Some(fingerprint)) =
             (producer_sequence.as_ref(), producer_fingerprint)
