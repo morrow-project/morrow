@@ -33,6 +33,8 @@ if command -v systemd-analyze >/dev/null 2>&1; then
     >"${verify_root}/usr/lib/systemd/system/network.target"
   printf '[Unit]\nDescription=network online target\nAfter=network.target\n' \
     >"${verify_root}/usr/lib/systemd/system/network-online.target"
+  printf '[Unit]\nDescription=system initialization target\n' \
+    >"${verify_root}/usr/lib/systemd/system/sysinit.target"
   cp /usr/bin/test "${verify_root}/usr/bin/test"
   touch "${verify_root}/usr/bin/morrow-server" "${verify_root}/etc/morrow/morrow.json"
   chmod 0755 "${verify_root}/usr/bin/morrow-server"
