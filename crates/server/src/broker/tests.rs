@@ -485,6 +485,7 @@ fn test_config(dir: &Path) -> Config {
         auth: Default::default(),
         cluster: None,
         streams: test_streams(),
+        views: Default::default(),
     }
 }
 

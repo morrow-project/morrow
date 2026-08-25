@@ -34,6 +34,45 @@ async fn configured_materialized_view_projects_committed_records() {
 }
 
 #[tokio::test]
+async fn dynamic_materialized_view_persists_definition_and_exposes_watch_cursor() {
+    let dir = TempDir::new().unwrap();
+    let config = test_config(dir.path());
+    let broker = deterministic_broker(config.clone(), Arc::new(ManualClock::new(1_000)), None);
+    assert!(
+        broker
+            .create_view(
+                "orders-watch",
+                crate::broker::state::ViewCreateRequest {
+                    tenant: "default".to_string(),
+                    source_stream: "orders".to_string(),
+                    source_subject: Some("orders/*".to_string()),
+                    key_header: None,
+                    max_entries: 10,
+                    max_value_bytes: 1024,
+                    watch_capacity: 10,
+                },
+            )
+            .await
+            .unwrap()
+    );
+    let mut publisher = TestClient::connect_durable(&broker, "publisher", 25).await;
+    publisher.publish("orders/created", b"hello").await;
+    publisher.ping_roundtrip().await;
+    let watch = broker.view_watch("orders-watch", 0).await.unwrap().unwrap();
+    assert_eq!(watch.events.len(), 1);
+    assert_eq!(watch.events[0].sequence, 1);
+    assert_eq!(watch.events[0].update.value, Some(b"hello".to_vec()));
+    drop(broker);
+
+    let reopened = Morrow::open(config).unwrap();
+    let views = reopened.views.lock().await;
+    assert_eq!(
+        views["orders-watch"].view.point_read("orders/created"),
+        Some(&b"hello"[..])
+    );
+}
+
+#[tokio::test]
 async fn auth_enabled_generates_fresh_nonce_per_connection() {
     let dir = TempDir::new().unwrap();
     let mut config = test_config(dir.path());

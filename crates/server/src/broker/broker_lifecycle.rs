@@ -78,6 +78,125 @@ impl Morrow {
             })
     }
 
+    pub(super) async fn view_watch(
+        &self,
+        name: &str,
+        since: u64,
+    ) -> Result<Option<crate::broker::state::ViewWatchResponse>> {
+        let views = self.views.lock().await;
+        let Some(runtime) = views.get(name) else {
+            return Ok(None);
+        };
+        Ok(Some(crate::broker::state::ViewWatchResponse {
+            name: name.to_string(),
+            tenant: runtime.view.tenant().to_string(),
+            since,
+            events: runtime.view.watch_from(since)?,
+            positions: runtime.view.consistency_positions(),
+        }))
+    }
+
+    pub(super) async fn create_view(
+        &self,
+        name: &str,
+        request: crate::broker::state::ViewCreateRequest,
+    ) -> Result<bool> {
+        let tenant = request.tenant.clone();
+        let definition = crate::config::ViewConfig {
+            tenant: request.tenant,
+            source_stream: request.source_stream,
+            source_subject: request.source_subject,
+            key_header: request.key_header,
+            max_entries: request.max_entries,
+            max_value_bytes: request.max_value_bytes,
+            watch_capacity: request.watch_capacity,
+        };
+        crate::tenancy::TenantId::new(definition.tenant.clone())?;
+        crate::stream::StreamId::new(definition.source_stream.clone())?;
+        crate::broker_ensure!(
+            !name.is_empty()
+                && name.len() <= 128
+                && name.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.')
+                }),
+            "invalid view name"
+        );
+        if let Some(subject) = &definition.source_subject {
+            crate::broker_ensure!(
+                protocol::subject::validate_subscription(subject),
+                "invalid view source subject"
+            );
+        }
+        crate::broker_ensure!(
+            definition.max_entries > 0
+                && definition.max_value_bytes > 0
+                && definition.watch_capacity > 0,
+            "view limits must be greater than zero"
+        );
+        crate::broker_ensure!(
+            self.config
+                .streams
+                .definitions()
+                .iter()
+                .any(|stream| stream.name.as_str() == definition.source_stream),
+            "view source stream is not configured"
+        );
+        let mut views = self.views.lock().await;
+        if views.contains_key(name) {
+            return Ok(false);
+        }
+        let path = self
+            .config
+            .wal_dir
+            .join("views")
+            .join(&definition.tenant)
+            .join(format!("{name}.json"));
+        let view = crate::materialized_view::MaterializedView::open(
+            path,
+            &definition.tenant,
+            name,
+            crate::materialized_view::ViewLimits {
+                max_entries: definition.max_entries,
+                max_value_bytes: definition.max_value_bytes,
+                watch_capacity: definition.watch_capacity,
+            },
+        )?;
+        let definition_path = self.view_definition_path(&definition.tenant, name);
+        if let Some(parent) = definition_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let definition_body = serde_json::to_vec(&definition)
+            .map_err(|error| BrokerError::with_source("encoding view definition", error))?;
+        std::fs::write(&definition_path, definition_body)?;
+        views.insert(
+            name.to_string(),
+            crate::broker::broker::ViewRuntime {
+                definition,
+                view,
+                paused: false,
+            },
+        );
+        self.record_audit_event(crate::tenancy::AuditEvent {
+            sequence: 0,
+            timestamp_ms: self.hooks.clock.now_ms(),
+            actor: "admin".to_string(),
+            tenant: crate::tenancy::TenantId::new(tenant).ok(),
+            action: "view.create".to_string(),
+            resource: format!("view/{name}"),
+            outcome: "success".to_string(),
+            details: std::collections::BTreeMap::new(),
+        });
+        Ok(true)
+    }
+
+    fn view_definition_path(&self, tenant: &str, name: &str) -> std::path::PathBuf {
+        self.config
+            .wal_dir
+            .join("views")
+            .join(tenant)
+            .join(format!("{name}.definition.json"))
+    }
+
     pub fn open(config: Config) -> Result<Self> {
         Self::open_with_hooks(config, BrokerHooks::default())
     }
@@ -335,8 +454,44 @@ impl Morrow {
                 "tenant background task quota exceeded while rebuilding usage"
             );
         }
+        let mut view_definitions = config.views.clone();
+        let definitions_root = config.wal_dir.join("views");
+        if definitions_root.is_dir() {
+            for tenant_dir in std::fs::read_dir(&definitions_root)? {
+                let tenant_dir = tenant_dir?.path();
+                if !tenant_dir.is_dir() {
+                    continue;
+                }
+                for definition_file in std::fs::read_dir(&tenant_dir)? {
+                    let definition_file = definition_file?.path();
+                    if definition_file
+                        .extension()
+                        .and_then(|extension| extension.to_str())
+                        != Some("json")
+                        || !definition_file
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .is_some_and(|name| name.ends_with(".definition.json"))
+                    {
+                        continue;
+                    }
+                    let name = definition_file
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .and_then(|name| name.strip_suffix(".definition.json"))
+                        .ok_or_else(|| BrokerError::msg("invalid persisted view definition"))?;
+                    let definition: crate::config::ViewConfig = serde_json::from_slice(
+                        &std::fs::read(&definition_file)?,
+                    )
+                    .map_err(|error| {
+                        BrokerError::with_source("decoding persisted view definition", error)
+                    })?;
+                    view_definitions.insert(name.to_string(), definition);
+                }
+            }
+        }
         let mut views = HashMap::new();
-        for (name, definition) in &config.views {
+        for (name, definition) in &view_definitions {
             let path = config
                 .wal_dir
                 .join("views")
@@ -535,6 +690,8 @@ impl Morrow {
         id: &str,
     ) -> Option<crate::transaction::TransactionStatus> {
         self.transactions.lock().await.status(id).cloned()
+    }
+
     pub(super) async fn set_view_paused(&self, name: &str, paused: bool) -> bool {
         let mut views = self.views.lock().await;
         let Some(runtime) = views.get_mut(name) else {
@@ -613,6 +770,14 @@ impl Morrow {
         let Some(runtime) = views.remove(name) else {
             return false;
         };
+        let _ = std::fs::remove_file(self.view_definition_path(runtime.view.tenant(), name));
+        let _ = std::fs::remove_file(
+            self.config
+                .wal_dir
+                .join("views")
+                .join(runtime.view.tenant())
+                .join(format!("{name}.json")),
+        );
         self.record_audit_event(crate::tenancy::AuditEvent {
             sequence: 0,
             timestamp_ms: self.hooks.clock.now_ms(),

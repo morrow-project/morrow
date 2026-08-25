@@ -88,7 +88,7 @@ pub struct TenantQuotaConfig {
     pub max_tasks: usize,
     pub max_background_tasks: usize,
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ViewConfig {
     pub tenant: String,
     pub source_stream: String,
