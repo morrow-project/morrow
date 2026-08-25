@@ -54,6 +54,35 @@ pub(super) struct DataManifestResponse {
     pub(super) last_checksum: Option<u32>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(super) struct DataHeartbeatRequest {
+    pub(super) stream: String,
+    pub(super) partition: PartitionId,
+    pub(super) replica_set_generation: u64,
+    pub(super) leader_id: u64,
+    pub(super) leader_epoch: u64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub(super) struct DataHeartbeatResponse {
+    pub(super) replica_set_generation: u64,
+    pub(super) leader_id: u64,
+    pub(super) leader_epoch: u64,
+    pub(super) high_watermark: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(super) struct DataSnapshotChunk {
+    pub(super) stream: String,
+    pub(super) partition: PartitionId,
+    pub(super) replica_set_generation: u64,
+    pub(super) leader_epoch: u64,
+    pub(super) offset: u64,
+    pub(super) final_chunk: bool,
+    pub(super) checksum: u32,
+    pub(super) data: Vec<u8>,
+}
+
 pub(super) struct ReplicaDataStore {
     logs: PartitionLogSet,
     records: HashMap<(String, PartitionId), BTreeMap<u64, MessageEnvelope>>,

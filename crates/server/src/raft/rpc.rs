@@ -12,6 +12,8 @@ pub(super) enum RaftRequest {
     DataAppend(DataAppendRequest),
     DataProgress(DataProgressRequest),
     DataManifest(DataManifestRequest),
+    DataHeartbeat(DataHeartbeatRequest),
+    DataSnapshotChunk(DataSnapshotChunk),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -29,6 +31,8 @@ pub(super) enum RaftResponse {
     DataAppend(DataAppendResponse),
     DataProgress(Option<u64>),
     DataManifest(DataManifestResponse),
+    DataHeartbeat(DataHeartbeatResponse),
+    DataSnapshotChunkAck { offset: u64, checksum: u32 },
     Error(String),
 }
 
@@ -170,6 +174,41 @@ where
                 RaftResponse::DataManifest(
                     partition_data.lock().unwrap().manifest(&request, &metadata),
                 )
+            }
+            RaftRequest::DataHeartbeat(request) => {
+                let metadata = state_machine.durable_state();
+                let key = partition_key(&request.stream, request.partition.0);
+                let assignment = metadata.partition_assignments.get(&key);
+                let commit = metadata.partition_commits.get(&key);
+                if assignment.is_none_or(|assignment| {
+                    assignment.replica_set_generation != request.replica_set_generation
+                        || assignment.leader_id != request.leader_id
+                        || assignment.leader_epoch != request.leader_epoch
+                }) {
+                    RaftResponse::Error("fenced partition heartbeat".to_string())
+                } else {
+                    RaftResponse::DataHeartbeat(DataHeartbeatResponse {
+                        replica_set_generation: request.replica_set_generation,
+                        leader_id: request.leader_id,
+                        leader_epoch: request.leader_epoch,
+                        high_watermark: commit.map(|commit| commit.high_watermark),
+                    })
+                }
+            }
+            RaftRequest::DataSnapshotChunk(chunk) => {
+                crate::broker_ensure!(
+                    chunk.data.len() <= MAX_RAFT_SNAPSHOT_CHUNK,
+                    "partition snapshot chunk exceeds maximum size"
+                );
+                let checksum = crc32fast::hash(&chunk.data);
+                if checksum != chunk.checksum {
+                    RaftResponse::Error("partition snapshot chunk checksum mismatch".to_string())
+                } else {
+                    RaftResponse::DataSnapshotChunkAck {
+                        offset: chunk.offset,
+                        checksum,
+                    }
+                }
             }
         };
         write_frame(&mut stream, &response).await?;
