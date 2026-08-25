@@ -14,6 +14,7 @@ pub struct RaftRuntime {
     security_references: BTreeSet<String>,
     raft_tls: Option<RaftTlsRuntime>,
     quotas: Arc<crate::quota::QuotaRuntime>,
+    data_clients: Arc<tokio::sync::Mutex<HashMap<u64, NetworkClient>>>,
 }
 #[derive(Debug, Clone)]
 pub struct ClusterNode {
@@ -167,7 +168,29 @@ impl RaftRuntime {
             security_references: ["cluster-auth-token".to_string()].into_iter().collect(),
             raft_tls,
             quotas,
+            data_clients: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         })
+    }
+
+    async fn data_client(&self, target: u64) -> Result<NetworkClient> {
+        let mut clients = self.data_clients.lock().await;
+        if let Some(client) = clients.get(&target) {
+            return Ok(client.clone());
+        }
+        let node = self
+            .nodes
+            .get(&target)
+            .ok_or_else(|| BrokerError::msg("unknown data-plane peer"))?;
+        let client = NetworkClient {
+            addr: node.raft_addr.clone(),
+            auth_token: self.auth_token.clone(),
+            node_id: self.node_id,
+            target,
+            tls: self.raft_tls.clone(),
+            connection: Arc::new(tokio::sync::Mutex::new(None)),
+        };
+        clients.insert(target, client.clone());
+        Ok(client)
     }
 
     pub fn spawn_listener(&self, listener: TcpListener) {
@@ -309,24 +332,16 @@ impl RaftRuntime {
             envelope.partition,
             None,
         )?;
-        for (node_id, node) in &self.nodes {
+        for node_id in self.nodes.keys() {
             if *node_id == self.node_id {
                 continue;
             }
-            let addr = node.raft_addr.clone();
-            let auth_token = self.auth_token.clone();
+            let client = self.data_client(*node_id).await?;
             let request = request.clone();
             let committed_records = committed_records.clone();
-            let local_node_id = self.node_id;
-            let target_node_id = *node_id;
-            let tls = self.raft_tls.clone();
             joins.spawn(async move {
-                let progress = send_data_progress(
-                    &addr,
-                    auth_token.clone(),
-                    local_node_id,
-                    target_node_id,
-                    tls.clone(),
+                let progress = send_data_progress_on_client(
+                    &client,
                     DataProgressRequest {
                         stream: request.envelope.stream.as_str().to_string(),
                         partition: request.envelope.partition,
@@ -337,12 +352,8 @@ impl RaftRuntime {
                     .into_iter()
                     .filter(|record| progress.is_none_or(|offset| record.offset > offset))
                 {
-                    send_data_append(
-                        &addr,
-                        auth_token.clone(),
-                        local_node_id,
-                        target_node_id,
-                        tls.clone(),
+                    send_data_append_on_client(
+                        &client,
                         DataAppendRequest {
                             leader_id: request.leader_id,
                             leader_epoch: request.leader_epoch,
@@ -360,15 +371,7 @@ impl RaftRuntime {
                     )
                     .await?;
                 }
-                send_data_append(
-                    &addr,
-                    auth_token,
-                    local_node_id,
-                    target_node_id,
-                    tls,
-                    request,
-                )
-                .await
+                send_data_append_on_client(&client, request).await
             });
         }
         while let Some(response) = joins.join_next().await {
