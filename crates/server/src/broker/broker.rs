@@ -34,6 +34,7 @@ pub struct Morrow {
     pub(super) route_mesh: Option<RouteMesh>,
     pub(super) middleware: MiddlewareRuntime,
     pub(super) hooks: BrokerHooks,
+    pub(super) transactions: Arc<Mutex<crate::transaction::TransactionCoordinator>>,
 }
 
 impl Morrow {

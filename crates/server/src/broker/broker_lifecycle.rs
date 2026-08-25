@@ -208,6 +208,18 @@ impl Morrow {
             config.wal_dir.join("audit.log"),
             10_000,
         )?));
+        let transaction_limits = crate::transaction::TransactionLimits {
+            max_messages: 10_000,
+            max_bytes: 64 * 1_048_576,
+            max_partitions: 128,
+            max_duration_ms: 300_000,
+            max_concurrent: 1_024,
+        };
+        let mut transactions = crate::transaction::TransactionCoordinator::open(
+            config.wal_dir.join("transactions.json"),
+            transaction_limits,
+        )?;
+        transactions.recover(hooks.clock.now_ms())?;
         for (index, (subject, client)) in config.auth.clients.iter().enumerate() {
             let role_name = format!("static-client-{index}");
             let mut permissions = std::collections::BTreeSet::new();
@@ -286,7 +298,60 @@ impl Morrow {
             route_mesh,
             middleware: hooks.middleware.clone(),
             hooks,
+            transactions: Arc::new(Mutex::new(transactions)),
         })
+    }
+
+    pub async fn transaction_begin(
+        &self,
+        id: impl Into<String>,
+        tenant: impl Into<String>,
+        producer: impl Into<String>,
+        producer_epoch: u64,
+    ) -> Result<()> {
+        self.transactions.lock().await.begin(
+            id,
+            tenant,
+            producer,
+            producer_epoch,
+            self.hooks.clock.now_ms(),
+        )
+    }
+
+    pub async fn transaction_append(
+        &self,
+        id: &str,
+        write: crate::transaction::TransactionWrite,
+    ) -> Result<()> {
+        self.transactions
+            .lock()
+            .await
+            .append(id, write, self.hooks.clock.now_ms())
+    }
+
+    pub async fn transaction_prepare(&self, id: &str) -> Result<()> {
+        self.transactions
+            .lock()
+            .await
+            .prepare(id, self.hooks.clock.now_ms())
+    }
+
+    pub async fn transaction_commit(&self, id: &str) -> Result<crate::transaction::CommittedBatch> {
+        self.transactions
+            .lock()
+            .await
+            .commit(id, self.hooks.clock.now_ms())
+    }
+
+    pub async fn transaction_abort(&self, id: &str, reason: &str) -> Result<()> {
+        self.transactions.lock().await.abort(id, reason)
+    }
+
+    pub async fn transaction_status(
+        &self,
+        id: &str,
+    ) -> Option<crate::transaction::TransactionStatus> {
+        self.transactions.lock().await.status(id).cloned()
     }
 
     pub async fn serve(self) -> Result<()> {

@@ -42,6 +42,39 @@ async fn auth_enabled_generates_fresh_nonce_per_connection() {
     assert_eq!(first.len(), 64);
     assert_eq!(second.len(), 64);
 }
+
+#[tokio::test]
+async fn broker_transaction_coordinator_recovers_terminal_state() {
+    let dir = TempDir::new().unwrap();
+    let config = test_config(dir.path());
+    let broker = Morrow::open(config.clone()).unwrap();
+    broker
+        .transaction_begin("tx-1", "default", "producer-1", 1)
+        .await
+        .unwrap();
+    broker
+        .transaction_append(
+            "tx-1",
+            crate::transaction::TransactionWrite {
+                stream: "orders".to_string(),
+                partition: crate::stream::PartitionId(0),
+                offset: 1,
+                bytes: b"payload".to_vec(),
+            },
+        )
+        .await
+        .unwrap();
+    broker.transaction_prepare("tx-1").await.unwrap();
+    let committed = broker.transaction_commit("tx-1").await.unwrap();
+    assert_eq!(committed.id, "tx-1");
+    drop(broker);
+
+    let reopened = Morrow::open(config).unwrap();
+    assert_eq!(
+        reopened.transaction_status("tx-1").await,
+        Some(crate::transaction::TransactionStatus::Committed)
+    );
+}
 #[tokio::test]
 async fn non_durable_connect_subscribes_as_transient_core() {
     let scenario = Scenario::new();
