@@ -65,6 +65,18 @@ pub enum BrokerCommand {
         leader_id: u64,
         leader_epoch: u64,
     },
+    PartitionReconfiguration {
+        stream: String,
+        partition: u32,
+        generation: u64,
+        phase: PartitionReconfigurationPhase,
+        replicas: BTreeSet<u64>,
+        active_commit_set: BTreeSet<u64>,
+        leader_id: u64,
+        leader_epoch: u64,
+        committed_offset: Option<u64>,
+        committed_checksum: Option<u32>,
+    },
     PartitionCommit {
         stream: String,
         partition: u32,
@@ -97,6 +109,10 @@ pub enum BrokerResponse {
     PartitionLeaderUpdate {
         leader_id: u64,
         leader_epoch: u64,
+    },
+    PartitionReconfiguration {
+        generation: u64,
+        phase: PartitionReconfigurationPhase,
     },
     PartitionCommit {
         high_watermark: u64,
@@ -151,8 +167,56 @@ pub struct PartitionCommitMetadata {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PartitionAssignmentMetadata {
     pub replicas: BTreeSet<u64>,
+    #[serde(default)]
+    pub active_commit_set: BTreeSet<u64>,
+    #[serde(default = "default_replica_set_generation")]
+    pub replica_set_generation: u64,
+    #[serde(default)]
+    pub phase: PartitionReconfigurationPhase,
     pub leader_id: u64,
     pub leader_epoch: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum PartitionReconfigurationPhase {
+    #[default]
+    Stable,
+    Adding {
+        candidate: u64,
+    },
+    CatchingUp {
+        candidate: u64,
+        committed_offset: u64,
+        digest: u32,
+    },
+    Activating {
+        candidate: u64,
+    },
+    Demoting {
+        member: u64,
+    },
+    RolledBack {
+        reason: String,
+    },
+}
+
+fn default_replica_set_generation() -> u64 {
+    1
+}
+
+impl PartitionAssignmentMetadata {
+    fn normalize(&mut self) {
+        if self.active_commit_set.is_empty() {
+            self.active_commit_set = self.replicas.clone();
+        }
+        if self.replica_set_generation == 0 {
+            self.replica_set_generation = 1;
+        }
+    }
+
+    pub fn active_members(&self) -> &BTreeSet<u64> {
+        &self.active_commit_set
+    }
 }
 impl DurableState {
     pub fn new(nodes: BTreeMap<u64, BasicNode>) -> Self {
@@ -188,6 +252,9 @@ impl DurableState {
                         .map(|stream| (stream.name.as_str().to_string(), stream))
                         .collect();
                     self.partition_assignments = assignments;
+                    self.partition_assignments
+                        .values_mut()
+                        .for_each(PartitionAssignmentMetadata::normalize);
                     self.security_references = security_references;
                     self.feature_gates = feature_gates;
                     BrokerResponse::MetadataBootstrap
@@ -219,7 +286,16 @@ impl DurableState {
                 let Some(assignment) = self.partition_assignments.get(&key) else {
                     return BrokerResponse::Noop;
                 };
-                if assignment.leader_id != leader_id || assignment.leader_epoch != leader_epoch {
+                let active_members = if assignment.active_commit_set.is_empty() {
+                    &assignment.replicas
+                } else {
+                    &assignment.active_commit_set
+                };
+                if assignment.leader_id != leader_id
+                    || assignment.leader_epoch != leader_epoch
+                    || !active_members.contains(&leader_id)
+                    || !matches!(assignment.phase, PartitionReconfigurationPhase::Stable)
+                {
                     return BrokerResponse::Noop;
                 }
                 let next_offset = self.next_partition_offsets.entry(key.clone()).or_default();
@@ -266,6 +342,7 @@ impl DurableState {
                 let Some(assignment) = self.partition_assignments.get_mut(&key) else {
                     return BrokerResponse::Noop;
                 };
+                assignment.normalize();
                 if assignment.leader_id == leader_id && assignment.leader_epoch == leader_epoch {
                     return BrokerResponse::PartitionLeaderUpdate {
                         leader_id,
@@ -273,7 +350,8 @@ impl DurableState {
                     };
                 }
                 if leader_epoch != assignment.leader_epoch.saturating_add(1)
-                    || !assignment.replicas.contains(&leader_id)
+                    || !assignment.active_members().contains(&leader_id)
+                    || !matches!(assignment.phase, PartitionReconfigurationPhase::Stable)
                 {
                     return BrokerResponse::Noop;
                 }
@@ -283,6 +361,77 @@ impl DurableState {
                     leader_id,
                     leader_epoch,
                 }
+            }
+            BrokerCommand::PartitionReconfiguration {
+                stream,
+                partition,
+                generation,
+                phase,
+                replicas,
+                active_commit_set,
+                leader_id,
+                leader_epoch,
+                committed_offset,
+                committed_checksum,
+            } => {
+                let key = partition_key(&stream, partition);
+                let Some(assignment) = self.partition_assignments.get_mut(&key) else {
+                    return BrokerResponse::Noop;
+                };
+                assignment.normalize();
+                if generation < assignment.replica_set_generation {
+                    return BrokerResponse::Noop;
+                }
+                if generation > assignment.replica_set_generation.saturating_add(1) {
+                    return BrokerResponse::Noop;
+                }
+                if active_commit_set.is_empty()
+                    || !active_commit_set.is_subset(&replicas)
+                    || !replicas.contains(&leader_id)
+                    || !active_commit_set.contains(&leader_id)
+                    || (matches!(phase, PartitionReconfigurationPhase::Stable)
+                        && active_commit_set.len().saturating_mul(2) <= replicas.len())
+                {
+                    return BrokerResponse::Noop;
+                }
+                if matches!(phase, PartitionReconfigurationPhase::Activating { .. }) {
+                    let Some(expected_offset) = committed_offset else {
+                        return BrokerResponse::Noop;
+                    };
+                    let Some(expected_checksum) = committed_checksum else {
+                        return BrokerResponse::Noop;
+                    };
+                    let Some(committed) = self.partition_commits.get(&key) else {
+                        return BrokerResponse::Noop;
+                    };
+                    if committed.high_watermark != expected_offset
+                        || committed.checksum != expected_checksum
+                    {
+                        return BrokerResponse::Noop;
+                    }
+                }
+                if generation == assignment.replica_set_generation
+                    && assignment.phase == phase
+                    && assignment.replicas == replicas
+                    && assignment.active_commit_set == active_commit_set
+                    && assignment.leader_id == leader_id
+                    && assignment.leader_epoch == leader_epoch
+                {
+                    return BrokerResponse::PartitionReconfiguration { generation, phase };
+                }
+                if leader_epoch < assignment.leader_epoch
+                    || (leader_epoch == assignment.leader_epoch
+                        && leader_id != assignment.leader_id)
+                {
+                    return BrokerResponse::Noop;
+                }
+                assignment.replicas = replicas;
+                assignment.active_commit_set = active_commit_set;
+                assignment.leader_id = leader_id;
+                assignment.leader_epoch = leader_epoch;
+                assignment.replica_set_generation = generation;
+                assignment.phase = phase.clone();
+                BrokerResponse::PartitionReconfiguration { generation, phase }
             }
             BrokerCommand::ConsumerUpsert { record } => {
                 self.consumers
