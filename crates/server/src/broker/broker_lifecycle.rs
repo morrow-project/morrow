@@ -556,6 +556,8 @@ impl Morrow {
             transaction_limits,
         )?;
         transactions.recover(hooks.clock.now_ms())?;
+        let schema_registry =
+            crate::schema_registry::SchemaRegistry::open(config.wal_dir.join("schemas.json"))?;
         for (index, (subject, client)) in config.auth.clients.iter().enumerate() {
             let role_name = format!("static-client-{index}");
             let mut permissions = std::collections::BTreeSet::new();
@@ -621,6 +623,7 @@ impl Morrow {
             tenant_quotas,
             policy,
             audit,
+            schema_registry: Arc::new(Mutex::new(schema_registry)),
             cluster: Arc::new(Mutex::new(cluster)),
             cluster_applied_index: Arc::new(AtomicU64::new(0)),
             cluster_delta_gate: Arc::new(Mutex::new(())),

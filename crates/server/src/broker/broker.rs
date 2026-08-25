@@ -61,6 +61,7 @@ pub struct Morrow {
     pub(super) tenant_quotas: crate::quota::TenantQuotaRuntime,
     pub(super) policy: Arc<crate::tenancy::PolicyStore>,
     pub(super) audit: Arc<std::sync::Mutex<crate::tenancy::AuditLog>>,
+    pub(super) schema_registry: Arc<Mutex<crate::schema_registry::SchemaRegistry>>,
     pub(super) cluster: Arc<Mutex<Option<ClusterRuntime>>>,
     pub(super) cluster_applied_index: Arc<AtomicU64>,
     pub(super) cluster_delta_gate: Arc<Mutex<()>>,

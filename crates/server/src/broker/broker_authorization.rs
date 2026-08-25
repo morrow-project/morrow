@@ -22,6 +22,26 @@ impl Morrow {
             details,
         });
     }
+    pub(super) async fn tenant_for_connection(&self, connection_id: u64) -> Result<String> {
+        let durable_id = self
+            .connections
+            .lock()
+            .await
+            .clients
+            .get(&connection_id)
+            .and_then(|client| client.durable_id.clone());
+        if !self.config.auth.enabled {
+            return Ok("default".to_string());
+        }
+        let durable_id = durable_id
+            .ok_or_else(|| BrokerError::msg("authenticated client is missing durable identity"))?;
+        self.config
+            .auth
+            .clients
+            .get(&durable_id)
+            .map(|client| client.tenant.clone())
+            .ok_or_else(|| BrokerError::msg("unknown authenticated client"))
+    }
 
     pub fn policy_store(&self) -> Arc<crate::tenancy::PolicyStore> {
         self.policy.clone()

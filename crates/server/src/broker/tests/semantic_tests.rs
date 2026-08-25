@@ -147,6 +147,39 @@ async fn broker_transaction_coordinator_recovers_terminal_state() {
         Some(crate::transaction::TransactionStatus::Committed)
     );
 }
+
+#[tokio::test]
+async fn broker_schema_registry_enforces_schema_id_on_publish() {
+    let scenario = Scenario::new();
+    let schema_id = scenario
+        .broker()
+        .schema_registry
+        .lock()
+        .await
+        .register(crate::schema_registry::SchemaRegistration {
+            tenant: "default".to_string(),
+            subject: "orders".to_string(),
+            format: crate::schema_registry::SchemaFormat::JsonSchema,
+            definition: r#"{"type":"object"}"#.to_string(),
+            references: Vec::new(),
+        })
+        .unwrap()
+        .id;
+    let mut publisher = scenario.connect_durable("publisher", 25).await;
+    let schema_id_header = schema_id.to_string();
+    publisher
+        .publish_hpub(
+            "orders",
+            &[("Morrow-Schema-Id", schema_id_header.as_str())],
+            b"payload",
+        )
+        .await;
+    publisher.ping_roundtrip().await;
+    publisher
+        .publish_hpub("orders", &[("Morrow-Schema-Id", "999999")], b"payload")
+        .await;
+    assert!(publisher.read_frame().await.starts_with("-ERR "));
+}
 #[tokio::test]
 async fn non_durable_connect_subscribes_as_transient_core() {
     let scenario = Scenario::new();

@@ -348,6 +348,14 @@ impl Morrow {
             );
             crate::broker_bail!("tenant durable disk quota exceeded");
         };
+        let schema_id = schema_id_from_headers(&headers)?;
+        if let Some(schema_id) = schema_id {
+            let tenant = self.tenant_for_connection(publisher_id).await?;
+            self.schema_registry
+                .lock()
+                .await
+                .validate_message_metadata(&tenant, &subject_name, schema_id)?;
+        }
 
         if let (Some(producer), Some(fingerprint)) =
             (producer_sequence.as_ref(), producer_fingerprint)
@@ -387,7 +395,7 @@ impl Morrow {
                 headers: stored_headers,
                 timestamp_ms: self.hooks.clock.now_ms(),
                 reply_to,
-                schema_id: schema_id_from_headers(&headers)?,
+                schema_id,
                 payload,
                 partitioning_epoch: stream.partitioning.epoch,
                 leader_epoch: 0,
@@ -463,7 +471,7 @@ impl Morrow {
             headers: stored_headers,
             timestamp_ms: self.hooks.clock.now_ms(),
             reply_to,
-            schema_id: schema_id_from_headers(&headers)?,
+            schema_id,
             payload,
             partitioning_epoch: stream.partitioning.epoch,
             leader_epoch: 0,
