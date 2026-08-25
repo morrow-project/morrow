@@ -507,3 +507,51 @@ fn rejects_invalid_auth_permission_pattern() {
     let err = get_auth_config(&value).unwrap_err();
     assert!(err.to_string().contains("invalid subject pattern"));
 }
+
+#[test]
+fn rejects_unknown_fields_at_each_configuration_level() {
+    let mut value = serde_json::json!({
+        "auth": {"enabled": false},
+        "wal_dir": "./target/test-unknown-field"
+    });
+    value["auth"]["enabeld"] = serde_json::json!(true);
+    let err = Config::from_json(&value).unwrap_err();
+    assert!(err.to_string().contains("config.auth.enabeld"));
+}
+
+#[test]
+fn production_requires_security_for_non_loopback_listeners() {
+    let err = Config::from_json(&serde_json::json!({
+        "production": true,
+        "listen": "0.0.0.0:4222",
+        "wal_dir": "./target/test-production-listener"
+    }))
+    .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("TLS for non-loopback client listener")
+    );
+}
+
+#[test]
+fn check_config_is_side_effect_free_and_redacts_secrets() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let config_path = dir.path().join("morrow.json");
+    let wal_dir = dir.path().join("wal");
+    std::fs::write(
+        &config_path,
+        serde_json::to_vec(&serde_json::json!({
+            "production": true,
+            "listen": "127.0.0.1:4222",
+            "admin_token": "secret-value",
+            "wal_dir": wal_dir
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let output = Config::check_file(&config_path).unwrap();
+    assert!(!wal_dir.exists());
+    assert!(!output.contains("secret-value"));
+    assert!(output.contains("authentication_enabled"));
+}

@@ -146,6 +146,8 @@ impl ClusterHarness {
             let dir = TestDir::new();
             let listener = TcpListener::bind(node.client_addr).await.unwrap();
             let config = Config {
+                production: false,
+                allow_insecure_development: false,
                 listen: node.client_addr,
                 websocket: None,
                 http_listen: enable_routes.then_some(node.http_addr),
@@ -516,6 +518,8 @@ impl Harness {
         let addr = listener.local_addr().unwrap();
         let max_payload = 1024;
         let config = Config {
+            production: false,
+            allow_insecure_development: false,
             listen: addr,
             websocket: None,
             http_listen: None,

@@ -79,6 +79,8 @@ async fn secure_secret_permissions_are_used_for_tls_authentication() {
     let valid_seed = [7_u8; 32];
     let auth = ClientAuth::from_seed("connector-orders", valid_seed);
     let broker = server::Morrow::open(server::Config {
+        production: false,
+        allow_insecure_development: false,
         listen: addr,
         websocket: None,
         http_listen: None,

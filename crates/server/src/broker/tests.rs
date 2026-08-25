@@ -457,6 +457,8 @@ impl TestClient {
 }
 fn test_config(dir: &Path) -> Config {
     Config {
+        production: false,
+        allow_insecure_development: false,
         listen: "127.0.0.1:0".parse().unwrap(),
         websocket: None,
         http_listen: None,

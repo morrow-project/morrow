@@ -14,6 +14,8 @@ pub const DEFAULT_MAX_FETCH_BYTES: usize = 16 * 1_048_576;
 pub const DEFAULT_MAX_ENCODED_BATCH_BYTES: usize = 20 * 1_048_576;
 #[derive(Debug, Clone)]
 pub struct Config {
+    pub production: bool,
+    pub allow_insecure_development: bool,
     pub listen: SocketAddr,
     pub websocket: Option<WebSocketConfig>,
     pub http_listen: Option<SocketAddr>,
@@ -129,7 +131,7 @@ impl Config {
     }
 
     pub fn usage() -> &'static str {
-        "Usage: morrow-server [CONFIG_PATH]\n\nOptions:\n    -h, --help    Print this help message"
+        "Usage: morrow-server [OPTIONS] [CONFIG_PATH]\n\nOptions:\n    -h, --help             Print this help message\n    --check-config PATH   Validate and print the effective configuration without starting\n"
     }
 
     fn is_help_arg(arg: &std::ffi::OsStr) -> bool {
@@ -138,6 +140,22 @@ impl Config {
 
     pub fn load_from_args() -> Result<Self> {
         Self::load_from_args_iter(std::env::args_os())
+    }
+
+    pub fn check_config_from_args() -> Result<Option<String>> {
+        let mut args = std::env::args_os().skip(1);
+        while let Some(arg) = args.next() {
+            if arg == "--check-config" {
+                let path = args.next().ok_or_else(|| {
+                    BrokerError::msg("--check-config requires a config file path")
+                })?;
+                if args.next().is_some() {
+                    return Err(BrokerError::msg("--check-config accepts exactly one path"));
+                }
+                return Ok(Some(path.to_string_lossy().into_owned()));
+            }
+        }
+        Ok(None)
     }
 
     fn load_from_args_iter<I>(args: I) -> Result<Self>
@@ -169,7 +187,26 @@ impl Config {
     }
 
     pub fn from_json(value: &serde_json::Value) -> Result<Self> {
+        Self::from_json_with_options(value, true)
+    }
+
+    pub fn check_file(path: impl AsRef<Path>) -> Result<String> {
+        let path = path.as_ref();
+        let contents = std::fs::read_to_string(path)
+            .with_context(|| format!("reading config file {}", path.display()))?;
+        let value: serde_json::Value = serde_json::from_str(&contents)
+            .with_context(|| format!("parsing JSON config file {}", path.display()))?;
+        let config = Self::from_json_with_options(&value, false)?;
+        serde_json::to_string_pretty(&config.redacted_json())
+            .map_err(|err| BrokerError::with_source("rendering effective configuration", err))
+    }
+
+    fn from_json_with_options(value: &serde_json::Value, create_dirs: bool) -> Result<Self> {
         crate::broker_ensure!(value.is_object(), "config file must contain a JSON object");
+        validation::reject_unknown_fields(value)?;
+        let production = get_bool(value, "production")?.unwrap_or(false);
+        let allow_insecure_development =
+            get_bool(value, "allow_insecure_development")?.unwrap_or(false);
         let listen = get_string(value, "listen")?
             .unwrap_or("127.0.0.1:4222")
             .parse()
@@ -208,6 +245,8 @@ impl Config {
         let streams = get_streams_config(value)?;
 
         let config = Self {
+            production,
+            allow_insecure_development,
             listen,
             websocket,
             http_listen,
@@ -236,7 +275,7 @@ impl Config {
             cluster,
             streams,
         };
-        config.validate()?;
+        config.validate_impl(create_dirs)?;
         Ok(config)
     }
 
@@ -256,6 +295,10 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<()> {
+        self.validate_impl(true)
+    }
+
+    fn validate_impl(&self, create_dirs: bool) -> Result<()> {
         crate::broker_ensure!(
             self.max_payload > 0,
             "config field max_payload must be greater than zero"
@@ -296,6 +339,28 @@ impl Config {
             self.fsync_interval_ms > 0,
             "config field fsync_interval_ms must be greater than zero"
         );
+        if self.production && !self.allow_insecure_development {
+            crate::broker_ensure!(
+                self.tls.is_some() || self.listen.ip().is_loopback(),
+                "production config requires TLS for non-loopback client listener"
+            );
+            crate::broker_ensure!(
+                self.auth.enabled || self.listen.ip().is_loopback(),
+                "production config requires authentication for non-loopback client listener"
+            );
+            if let Some(websocket) = &self.websocket {
+                crate::broker_ensure!(
+                    websocket.tls.is_some() || websocket.listen.ip().is_loopback(),
+                    "production config requires TLS for non-loopback WebSocket listener"
+                );
+            }
+            if let Some(http_listen) = self.http_listen {
+                crate::broker_ensure!(
+                    self.admin_tls.is_some() || http_listen.ip().is_loopback(),
+                    "production config requires admin TLS for non-loopback admin listener"
+                );
+            }
+        }
         if self.http_listen.is_some() {
             crate::broker_ensure!(
                 self.admin_token
@@ -332,9 +397,11 @@ impl Config {
         }
         if let Some(cluster) = &self.cluster {
             cluster.validate()?;
-            std::fs::create_dir_all(&cluster.raft_dir).with_context(|| {
-                format!("creating Raft directory {}", cluster.raft_dir.display())
-            })?;
+            if create_dirs {
+                std::fs::create_dir_all(&cluster.raft_dir).with_context(|| {
+                    format!("creating Raft directory {}", cluster.raft_dir.display())
+                })?;
+            }
         }
         if self.auth.enabled {
             crate::broker_ensure!(
@@ -342,9 +409,30 @@ impl Config {
                 "config field auth.clients must contain at least one client when auth is enabled"
             );
         }
-        std::fs::create_dir_all(&self.wal_dir)
-            .with_context(|| format!("creating WAL directory {}", self.wal_dir.display()))?;
+        if create_dirs {
+            std::fs::create_dir_all(&self.wal_dir)
+                .with_context(|| format!("creating WAL directory {}", self.wal_dir.display()))?;
+        }
         Ok(())
+    }
+
+    fn redacted_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "production": self.production,
+            "allow_insecure_development": self.allow_insecure_development,
+            "listen": self.listen.to_string(),
+            "websocket": self.websocket.as_ref().map(|value| value.listen.to_string()),
+            "http_listen": self.http_listen.map(|value| value.to_string()),
+            "tls": self.tls.is_some(),
+            "admin_tls": self.admin_tls.is_some(),
+            "authentication_enabled": self.auth.enabled,
+            "wal_dir": self.wal_dir,
+            "cluster_enabled": self.cluster.is_some(),
+            "quotas": {
+                "max_connections": self.quotas.max_connections,
+                "max_outbound_bytes_per_connection": self.quotas.max_outbound_bytes_per_connection
+            }
+        })
     }
 }
 fn get_auth_config(value: &serde_json::Value) -> Result<AuthConfig> {
@@ -667,6 +755,9 @@ impl From<OsString> for BrokerError {
 #[path = "config/stream_config.rs"]
 mod stream_config;
 use stream_config::get_streams_config;
+
+#[path = "config/validation.rs"]
+mod validation;
 
 #[cfg(test)]
 mod tests;

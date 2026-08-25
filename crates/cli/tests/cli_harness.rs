@@ -329,6 +329,8 @@ impl Harness {
         drop(admin_listener);
         let max_payload = 1024;
         let config = Config {
+            production: false,
+            allow_insecure_development: false,
             listen: addr,
             websocket: None,
             http_listen: Some(admin_addr),
