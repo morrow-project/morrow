@@ -40,6 +40,7 @@ install -m 0644 "${release_dir}/LICENSE" "${package_dir}/usr/share/doc/${name}/L
 install -m 0644 "${release_dir}/README.md" "${package_dir}/usr/share/doc/${name}/README.md"
 install -m 0644 "${release_dir}/docs/building.md" "${package_dir}/usr/share/doc/${name}/building.md"
 install -m 0644 "${release_dir}/docs/operations.md" "${package_dir}/usr/share/doc/${name}/operations.md"
+install -m 0644 "${release_dir}/docs/release-supply-chain.md" "${package_dir}/usr/share/doc/${name}/release-supply-chain.md"
 install -m 0644 "${script_dir}/../../docs/packaging-systemd.md" "${package_dir}/usr/share/doc/${name}/packaging-systemd.md"
 install -m 0644 "${unit_file}" "${package_dir}/lib/systemd/system/morrow.service"
 
