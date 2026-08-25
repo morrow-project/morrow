@@ -115,14 +115,16 @@ impl Client {
         max_in_flight: usize,
         ack_contract_version: Option<u16>,
     ) -> Result<()> {
-        let payload = serde_json::json!({
+        let mut payload = serde_json::json!({
             "durable_id": durable_id,
             "verbose": verbose,
             "ack_timeout_ms": ack_timeout_ms,
             "max_in_flight": max_in_flight,
             "protocol_version": 2,
-            "ack_contract_version": ack_contract_version,
         });
+        if let Some(version) = ack_contract_version {
+            payload["ack_contract_version"] = serde_json::json!(version);
+        }
         self.write_line(&format!("CONN {payload}")).await?;
         self.inbox_prefix = inbox_prefix(durable_id);
         self.durable = true;
@@ -171,15 +173,17 @@ impl Client {
             .nonce
             .as_deref()
             .ok_or_else(|| ClientError::msg("INFO frame does not contain an auth nonce"))?;
-        let payload = serde_json::json!({
+        let mut payload = serde_json::json!({
             "client_id": auth.client_id,
             "signature": auth.sign_nonce(nonce),
             "verbose": verbose,
             "ack_timeout_ms": ack_timeout_ms,
             "max_in_flight": max_in_flight,
             "protocol_version": 2,
-            "ack_contract_version": ack_contract_version,
         });
+        if let Some(version) = ack_contract_version {
+            payload["ack_contract_version"] = serde_json::json!(version);
+        }
         self.write_line(&format!("CONN {payload}")).await?;
         self.inbox_prefix = inbox_prefix(&auth.client_id);
         self.durable = true;
