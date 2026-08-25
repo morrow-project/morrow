@@ -582,6 +582,45 @@ impl Morrow {
             })?;
         }
         let route_mesh = RouteMesh::from_config(&config, quotas.clone())?;
+        let broker_capacities = config
+            .cluster
+            .as_ref()
+            .map(|cluster| {
+                cluster
+                    .nodes
+                    .iter()
+                    .map(|node| crate::reassignment::BrokerCapacity {
+                        node_id: node.node_id,
+                        region: "default".to_string(),
+                        zone: "default".to_string(),
+                        disk_capacity_bytes: u64::MAX,
+                        disk_used_bytes: 0,
+                        partition_count: 0,
+                        leader_count: 0,
+                        throughput_bytes_per_second: u64::MAX,
+                        max_concurrent_moves: 1,
+                        lifecycle: crate::reassignment::BrokerLifecycle::Active,
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_else(|| {
+                vec![crate::reassignment::BrokerCapacity {
+                    node_id: 1,
+                    region: "default".to_string(),
+                    zone: "default".to_string(),
+                    disk_capacity_bytes: u64::MAX,
+                    disk_used_bytes: 0,
+                    partition_count: 0,
+                    leader_count: 0,
+                    throughput_bytes_per_second: u64::MAX,
+                    max_concurrent_moves: 1,
+                    lifecycle: crate::reassignment::BrokerLifecycle::Active,
+                }]
+            });
+        let reassignment = crate::reassignment::ReassignmentController::open(
+            config.wal_dir.join("reassignments.json"),
+            broker_capacities,
+        )?;
         let wal = WalRuntime::new(wal);
         Ok(Self {
             inner: Arc::new(Mutex::new(DurableBrokerState {
@@ -640,6 +679,7 @@ impl Morrow {
             hooks,
             transactions: Arc::new(Mutex::new(transactions)),
             views: Arc::new(Mutex::new(views)),
+            reassignment: Arc::new(Mutex::new(reassignment)),
         })
     }
 
@@ -792,6 +832,26 @@ impl Morrow {
             details: std::collections::BTreeMap::new(),
         });
         true
+    }
+
+    pub async fn reassignment_plan(
+        &self,
+        move_: crate::reassignment::PlacementMove,
+        source_epoch: u64,
+    ) -> Result<u64> {
+        self.reassignment.lock().await.begin(move_, source_epoch)
+    }
+
+    pub async fn reassignment_advance(
+        &self,
+        id: u64,
+        progress: crate::reassignment::ReassignmentProgress,
+    ) -> Result<crate::reassignment::ReassignmentPhase> {
+        self.reassignment.lock().await.advance(id, progress)
+    }
+
+    pub async fn reassignment_rollback(&self, id: u64, reason: &str) -> Result<()> {
+        self.reassignment.lock().await.rollback(id, reason)
     }
 
     pub async fn serve(self) -> Result<()> {
