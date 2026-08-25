@@ -603,6 +603,7 @@ jobs:
 
       - name: Verify published image by immutable digest
         env:
+          GH_TOKEN: ${{ github.token }}
           IMAGE_DIGEST: ${{ needs.publish-docker.outputs.digest }}
           IMAGE: ghcr.io/morrow-project/morrow-server
         run: |
