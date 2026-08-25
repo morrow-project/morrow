@@ -82,7 +82,7 @@ jobs:
 
   build:
     name: Build (${{ matrix.name }})
-    needs: tag
+    needs: [tag, create-release]
     strategy:
       fail-fast: false
       matrix:
@@ -159,7 +159,7 @@ jobs:
 
   publish-binaries:
     name: Publish binary release
-    needs: [tag, build, create-release]
+    needs: [tag, build]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -237,7 +237,7 @@ jobs:
 
   publish-debian:
     name: Publish Debian packages
-    needs: [tag, create-release, build-debian]
+    needs: [tag, build-debian]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -325,7 +325,7 @@ jobs:
 
   publish-rpm:
     name: Publish RPM packages
-    needs: [tag, create-release, build-rpm]
+    needs: [tag, build-rpm]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -408,6 +408,7 @@ jobs:
     needs: [tag, publish-binaries, publish-debian, publish-rpm, publish-docker]
     runs-on: ubuntu-24.04
     permissions:
+      actions: read
       contents: write
       id-token: write
       attestations: write
@@ -419,11 +420,69 @@ jobs:
           ref: ${{ needs.tag.outputs.version }}
 
       - name: Download exact release artifacts
-        uses: actions/download-artifact@v4
-        with:
-          pattern: '*'
-          merge-multiple: true
-          path: dist
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.tag.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist .artifact-download
+          artifacts=(
+            "release-linux-amd64"
+            "release-linux-arm64"
+            "release-macos-arm64"
+            "debian-${VERSION}-amd64"
+            "debian-${VERSION}-arm64"
+            "rpm-${VERSION}-x86_64"
+            "rpm-${VERSION}-aarch64"
+          )
+
+          for artifact_name in "${artifacts[@]}"; do
+            downloaded=false
+            for attempt in 1 2 3 4 5; do
+              artifact_line="$(
+                gh api --method GET \
+                  "repos/${GITHUB_REPOSITORY}/actions/artifacts" \
+                  --field "name=${artifact_name}" \
+                  --jq ".artifacts[] | select(.workflow_run.id == ${GITHUB_RUN_ID} and .expired == false) | [.id, .digest] | @tsv" \
+                  | head -n 1
+              )"
+              if [[ -z "${artifact_line}" ]]; then
+                echo "artifact ${artifact_name} is not available yet (attempt ${attempt})" >&2
+                sleep $((attempt * 2))
+                continue
+              fi
+
+              artifact_id="${artifact_line%%$'\t'*}"
+              expected_digest="${artifact_line#*$'\t'}"
+              archive=".artifact-download/${artifact_name}.zip"
+              extract_dir=".artifact-download/${artifact_name}"
+              rm -rf "${extract_dir}"
+              if ! gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}/zip" > "${archive}"; then
+                echo "failed to download ${artifact_name} (attempt ${attempt})" >&2
+                sleep $((attempt * 2))
+                continue
+              fi
+
+              actual_digest="sha256:$(sha256sum "${archive}" | awk '{print $1}')"
+              if [[ "${actual_digest}" != "${expected_digest}" ]]; then
+                echo "digest mismatch for ${artifact_name}: expected ${expected_digest}, got ${actual_digest} (attempt ${attempt})" >&2
+                sleep $((attempt * 2))
+                continue
+              fi
+
+              mkdir -p "${extract_dir}"
+              unzip -q "${archive}" -d "${extract_dir}"
+              find "${extract_dir}" -mindepth 1 -maxdepth 1 -type f -exec cp {} dist/ \;
+              downloaded=true
+              break
+            done
+
+            if [[ "${downloaded}" != true ]]; then
+              echo "unable to download verified artifact ${artifact_name} after five attempts" >&2
+              exit 1
+            fi
+          done
 
       - name: Install cosign
         uses: sigstore/cosign-installer@v3.8.1
