@@ -366,6 +366,21 @@ pub(super) async fn send_data_append(
     }
 }
 
+pub(super) async fn send_data_append_on_client(
+    client: &NetworkClient,
+    request: DataAppendRequest,
+) -> Result<DataAppendResponse> {
+    match client
+        .request(RaftRequest::DataAppend(request))
+        .await
+        .map_err(|err| BrokerError::msg(err.to_string()))?
+    {
+        RaftResponse::DataAppend(response) => Ok(response),
+        RaftResponse::Error(message) => Err(BrokerError::msg(message)),
+        _ => Err(BrokerError::msg("unexpected partition replica response")),
+    }
+}
+
 pub(super) async fn send_data_progress(
     addr: &str,
     auth_token: String,
@@ -382,6 +397,21 @@ pub(super) async fn send_data_progress(
         tls,
         connection: Arc::new(tokio::sync::Mutex::new(None)),
     };
+    match client
+        .request(RaftRequest::DataProgress(request))
+        .await
+        .map_err(|err| BrokerError::msg(err.to_string()))?
+    {
+        RaftResponse::DataProgress(progress) => Ok(progress),
+        RaftResponse::Error(message) => Err(BrokerError::msg(message)),
+        _ => Err(BrokerError::msg("unexpected partition progress response")),
+    }
+}
+
+pub(super) async fn send_data_progress_on_client(
+    client: &NetworkClient,
+    request: DataProgressRequest,
+) -> Result<Option<u64>> {
     match client
         .request(RaftRequest::DataProgress(request))
         .await
