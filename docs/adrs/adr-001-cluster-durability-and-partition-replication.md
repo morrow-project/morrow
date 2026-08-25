@@ -1,6 +1,7 @@
 # ADR-001: Cluster durability and partition replication
 
-- Status: Proposed
+- Status: Accepted
+- Accepted: 2026-08-26
 - Date: 2026-08-26
 - Decision owners: Morrow maintainers
 - Related issues: #134, #135, #136, #142, #143, #144, #145, #162, #163
@@ -373,13 +374,15 @@ Recommended order:
 8. Complete the end-to-end concurrency, history, lag, recovery, and overload
    benchmark matrix in #163.
 
-Independent standalone bounded-work improvements may proceed while the ADR is
-under review, provided they do not cement the current clustered commit path.
+Independent standalone bounded-work improvements may proceed alongside the
+clustered implementation, provided they do not cement the superseded commit
+path.
 
-## Acceptance evidence
+## Required implementation evidence
 
-The decision is ready to move from `Proposed` to `Accepted` only when reviewers
-agree that the protocol and test plan cover:
+Acceptance of this architectural decision does not waive implementation and
+release verification. The design may ship only when the protocol and test plan
+cover:
 
 - leader crash before append, during replication, after quorum, and before
   acknowledgement;
