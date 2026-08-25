@@ -1,5 +1,26 @@
 # Backup and tiered storage
 
+## Local operator workflow
+
+The `morrow-backup` utility exposes the local filesystem workflow:
+
+```text
+morrow-backup create-full ./morrow-wal ./backup-store full-2026-01 standalone
+morrow-backup list ./backup-store
+morrow-backup inspect ./backup-store full-2026-01
+morrow-backup verify ./backup-store full-2026-01
+morrow-backup restore ./backup-store full-2026-01 ./restored-wal replacement-cluster
+```
+
+`verify` checks every published object and `restore` verifies again before the
+engine atomically publishes its staging directory. Restore is offline and
+requires a new cluster identity; never point it at a live broker's data path.
+For a consistent online backup, an operator must first stop admission and use
+the broker's existing shutdown/checkpoint fence, then run `create-full` against
+the quiesced data directory. S3-compatible stores remain an adapter concern
+behind `ObjectStore`; this command intentionally does not accept credentials or
+log provider configuration.
+
 The server backup primitives use a versioned `BackupManifest` as the recovery-point
 publication fence. Callers must flush the broker before creating a backup. The
 backup copies stream segments, sparse/subject indexes, and WAL files with a stable

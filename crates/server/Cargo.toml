@@ -7,6 +7,10 @@ edition.workspace = true
 name = "morrow-server"
 path = "src/main.rs"
 
+[[bin]]
+name = "morrow-backup"
+path = "src/bin/morrow-backup.rs"
+
 [dependencies]
 aws-lc-rs.workspace = true
 crc32fast.workspace = true
