@@ -166,6 +166,22 @@ async fn parses_producer_ack_frame() {
 }
 
 #[tokio::test]
+async fn parses_negotiated_ack_contract_without_position() {
+    let (_writer, reader) = tokio::io::duplex(64);
+    let mut reader = BufReader::new(Box::new(reader) as Box<dyn ClientStream>);
+    let frame = parse_frame(&mut reader, "P-ACK msg-1 1 OK true 42 contract=1", 1024)
+        .await
+        .unwrap()
+        .unwrap();
+    let ServerFrame::ProducerAck(ack) = frame else {
+        panic!("expected producer ack");
+    };
+    assert_eq!(ack.level, protocol::AckLevel::Durable);
+    assert_eq!(ack.ack_contract_version, Some(1));
+    assert!(ack.stream.is_none());
+}
+
+#[tokio::test]
 async fn parses_partition_position_from_producer_ack() {
     let (_writer, reader) = tokio::io::duplex(64);
     let mut reader = BufReader::new(Box::new(reader) as Box<dyn ClientStream>);

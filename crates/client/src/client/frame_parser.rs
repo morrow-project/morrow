@@ -365,13 +365,18 @@ pub(super) fn parse_producer_ack<'a>(
                 .map_err(|_| ClientError::msg("P-ACK sequence must be an integer"))?,
         ),
     };
-    let stream = parts.next().map(str::to_string);
+    let first_optional = parts.next();
+    let (stream, contract_token) = match first_optional {
+        Some(value) if value.starts_with("contract=") => (None, Some(value)),
+        Some(value) => (Some(value.to_string()), None),
+        None => (None, None),
+    };
     let partition = parse_optional_position(&mut parts, "partition")?;
     let offset = parse_optional_position(&mut parts, "offset")?;
     let partitioning_epoch = parse_optional_position(&mut parts, "partitioning epoch")?;
     let leader_epoch = parse_optional_position(&mut parts, "leader epoch")?;
-    let ack_contract_version = parts
-        .next()
+    let ack_contract_version = contract_token
+        .or_else(|| parts.next())
         .map(|value| {
             value
                 .strip_prefix("contract=")
