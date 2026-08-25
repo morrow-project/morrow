@@ -7,6 +7,7 @@
 use serde::{Deserialize, Serialize};
 
 pub const PROTOCOL_VERSION: u16 = 1;
+pub const ACK_CONTRACT_VERSION: u16 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -20,6 +21,7 @@ pub struct Capabilities {
     pub protocol_versions: Vec<u16>,
     pub encodings: Vec<WireEncoding>,
     pub features: Vec<String>,
+    pub ack_contract_versions: Vec<u16>,
     pub max_frame_size: usize,
     pub max_metadata_size: usize,
     pub max_payload_size: usize,
@@ -37,6 +39,7 @@ impl Default for Capabilities {
                 "checksums".into(),
                 "credit-flow-control".into(),
             ],
+            ack_contract_versions: vec![ACK_CONTRACT_VERSION],
             max_frame_size: crate::cbor::DEFAULT_MAX_FRAME_SIZE,
             max_metadata_size: crate::cbor::DEFAULT_MAX_FRAME_SIZE,
             max_payload_size: crate::cbor::DEFAULT_MAX_FRAME_SIZE,

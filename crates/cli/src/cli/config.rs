@@ -95,6 +95,7 @@ impl CliConfig {
             verbose: self.connect.verbose,
             ack_timeout_ms: self.connect.ack_timeout_ms,
             max_in_flight: self.connect.max_in_flight,
+            ack_contract_version: None,
         })
     }
 }

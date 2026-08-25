@@ -16,6 +16,12 @@ payload bodies.
 
 1. The client opens a TCP connection to the broker.
 2. If the listener is TLS-enabled, the TLS handshake happens first.
+
+Producer acknowledgement contract negotiation is explicit: `INFO` advertises
+`ack_contract_versions`, and a client may request `ack_contract_version` in
+`CONN`. Legacy clients omit the field and retain the legacy numeric ACK
+semantics. A negotiated `P-ACK` appends `contract=<version>`; unsupported
+versions are rejected rather than downgraded.
 3. The server immediately sends one `INFO` frame.
 4. The client sends `CONN <json>`.
 5. The client may then use the commands supported by its negotiated protocol

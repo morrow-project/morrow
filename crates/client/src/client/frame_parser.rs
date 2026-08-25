@@ -117,6 +117,17 @@ pub(super) fn parse_info(line: &str) -> Result<Info> {
                     .collect()
             })
             .unwrap_or_default(),
+        ack_contract_versions: value
+            .get("ack_contract_versions")
+            .and_then(serde_json::Value::as_array)
+            .map(|versions| {
+                versions
+                    .iter()
+                    .filter_map(serde_json::Value::as_u64)
+                    .filter_map(|v| v.try_into().ok())
+                    .collect()
+            })
+            .unwrap_or_default(),
         max_frame_size: value
             .get("max_frame_size")
             .and_then(serde_json::Value::as_u64)
@@ -359,6 +370,20 @@ pub(super) fn parse_producer_ack<'a>(
     let offset = parse_optional_position(&mut parts, "offset")?;
     let partitioning_epoch = parse_optional_position(&mut parts, "partitioning epoch")?;
     let leader_epoch = parse_optional_position(&mut parts, "leader epoch")?;
+    let ack_contract_version = parts
+        .next()
+        .map(|value| {
+            value
+                .strip_prefix("contract=")
+                .ok_or_else(|| ClientError::msg("invalid P-ACK contract"))
+        })
+        .transpose()?
+        .map(|value| {
+            value
+                .parse()
+                .map_err(|_| ClientError::msg("P-ACK contract version must be an integer"))
+        })
+        .transpose()?;
     if stream.is_some() && leader_epoch.is_none() {
         return Err(ClientError::msg(
             "P-ACK has an incomplete partition position",
@@ -384,6 +409,7 @@ pub(super) fn parse_producer_ack<'a>(
         offset,
         partitioning_epoch,
         leader_epoch,
+        ack_contract_version,
     }))
 }
 

@@ -24,6 +24,7 @@ pub fn info_line_with_capabilities(
         "protocol_versions": capabilities.protocol_versions,
         "encodings": capabilities.encodings,
         "features": capabilities.features,
+        "ack_contract_versions": capabilities.ack_contract_versions,
         "max_payload": max_payload,
         "max_frame_size": capabilities.max_frame_size,
         "max_metadata_size": capabilities.max_metadata_size,
@@ -50,10 +51,27 @@ pub fn ok() -> &'static [u8] {
 }
 
 pub fn producer_ack(msg_id: &str, level: AckLevel, retained: bool, seq: Option<u64>) -> Vec<u8> {
+    producer_ack_with_contract(msg_id, level, retained, seq, None)
+}
+
+pub fn producer_ack_with_contract(
+    msg_id: &str,
+    level: AckLevel,
+    retained: bool,
+    seq: Option<u64>,
+    contract: Option<u16>,
+) -> Vec<u8> {
     let seq = seq
         .map(|seq| seq.to_string())
         .unwrap_or_else(|| "-".to_string());
-    format!("P-ACK {msg_id} {} OK {retained} {seq}\r\n", level as u8).into_bytes()
+    let contract = contract
+        .map(|version| format!(" contract={version}"))
+        .unwrap_or_default();
+    format!(
+        "P-ACK {msg_id} {} OK {retained} {seq}{contract}\r\n",
+        level as u8
+    )
+    .into_bytes()
 }
 
 pub fn producer_ack_with_position(
@@ -63,13 +81,30 @@ pub fn producer_ack_with_position(
     seq: Option<u64>,
     position: Option<(&str, u32, u64, u64, u64)>,
 ) -> Vec<u8> {
-    let mut frame = String::from_utf8(producer_ack(msg_id, level, retained, seq))
-        .expect("producer ack is UTF-8");
+    producer_ack_with_position_and_contract(msg_id, level, retained, seq, position, None)
+}
+
+pub fn producer_ack_with_position_and_contract(
+    msg_id: &str,
+    level: AckLevel,
+    retained: bool,
+    seq: Option<u64>,
+    position: Option<(&str, u32, u64, u64, u64)>,
+    contract: Option<u16>,
+) -> Vec<u8> {
+    let mut frame = String::from_utf8(producer_ack_with_contract(
+        msg_id, level, retained, seq, None,
+    ))
+    .expect("producer ack is UTF-8");
     if let Some((stream, partition, offset, partitioning_epoch, leader_epoch)) = position {
         frame.truncate(frame.len() - 2);
         frame.push_str(&format!(
             " {stream} {partition} {offset} {partitioning_epoch} {leader_epoch}\r\n"
         ));
+    }
+    if let Some(version) = contract {
+        frame.truncate(frame.len() - 2);
+        frame.push_str(&format!(" contract={version}\r\n"));
     }
     frame.into_bytes()
 }
@@ -292,6 +327,7 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(payload).unwrap();
         assert_eq!(value["protocol_versions"], serde_json::json!([1, 2]));
         assert_eq!(value["encodings"], serde_json::json!(["text", "cbor"]));
+        assert_eq!(value["ack_contract_versions"], serde_json::json!([1]));
         assert_eq!(value["max_payload_size"], 1024);
         assert!(
             value["features"]
@@ -300,5 +336,11 @@ mod tests {
                 .iter()
                 .any(|feature| feature == "request-ids")
         );
+    }
+
+    #[test]
+    fn negotiated_ack_includes_contract_version() {
+        let frame = producer_ack_with_contract("msg-1", AckLevel::Durable, true, Some(7), Some(1));
+        assert_eq!(frame, b"P-ACK msg-1 1 OK true 7 contract=1\r\n");
     }
 }

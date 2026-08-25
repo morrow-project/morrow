@@ -11,6 +11,7 @@ pub enum Command {
         ack_timeout_ms: Option<u64>,
         max_in_flight: Option<usize>,
         protocol_version: Option<u32>,
+        ack_contract_version: Option<u16>,
         auth: Option<ConnectAuth>,
     },
     Ping,
@@ -339,6 +340,13 @@ fn parse_connect(payload: &str) -> Result<Command, ProtocolError> {
                 .map_err(|_| ProtocolError("protocol_version is too large".into()))
         })
         .transpose()?;
+    let ack_contract_version = get_u64(&value, "ack_contract_version")?
+        .map(|value| {
+            value
+                .try_into()
+                .map_err(|_| ProtocolError("ack_contract_version is too large".into()))
+        })
+        .transpose()?;
     let auth = parse_connect_auth(&value)?;
     Ok(Command::Connect {
         verbose,
@@ -346,6 +354,7 @@ fn parse_connect(payload: &str) -> Result<Command, ProtocolError> {
         ack_timeout_ms,
         max_in_flight,
         protocol_version,
+        ack_contract_version,
         auth,
     })
 }

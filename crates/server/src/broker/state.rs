@@ -216,6 +216,7 @@ pub(super) struct Client {
     pub(super) ack_timeout_ms: u64,
     pub(super) max_in_flight: usize,
     pub(super) protocol_version: u32,
+    pub(super) ack_contract_version: Option<u16>,
     pub(super) quota_tenant: String,
     pub(super) quota_usage: crate::quota::TenantQuotaUsage,
 }

@@ -67,6 +67,7 @@ async fn cli_bench_pubsub_reports_json_results() {
     assert_eq!(result["network_mode"], "local");
     assert_eq!(result["requested_ack_level"], "durable");
     assert_eq!(result["observed_ack_level"], "durable");
+    assert_eq!(result["ack_contract_version"], 1);
     harness.shutdown().await;
 }
 

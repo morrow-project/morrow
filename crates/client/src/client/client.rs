@@ -13,6 +13,7 @@ impl Client {
             durable: false,
             push_credit_messages: 0,
             pending_messages: VecDeque::new(),
+            ack_contract_version: None,
         })
     }
 
@@ -40,6 +41,7 @@ impl Client {
             durable: false,
             push_credit_messages: 0,
             pending_messages: VecDeque::new(),
+            ack_contract_version: None,
         })
     }
 
@@ -67,12 +69,13 @@ impl Client {
         let info = client.read_info().await?;
         if let Some(auth) = &options.auth {
             client
-                .connect_authenticated(
+                .connect_authenticated_with_contract(
                     &info,
                     auth,
                     options.verbose,
                     options.ack_timeout_ms,
                     options.max_in_flight,
+                    options.ack_contract_version,
                 )
                 .await?;
         } else {
@@ -81,11 +84,12 @@ impl Client {
                 .as_deref()
                 .ok_or_else(|| ClientError::msg("durable_id is required when auth is disabled"))?;
             client
-                .connect_durable(
+                .connect_durable_with_contract(
                     durable_id,
                     options.verbose,
                     options.ack_timeout_ms,
                     options.max_in_flight,
+                    options.ack_contract_version,
                 )
                 .await?;
         }
@@ -99,17 +103,31 @@ impl Client {
         ack_timeout_ms: u64,
         max_in_flight: usize,
     ) -> Result<()> {
+        self.connect_durable_with_contract(durable_id, verbose, ack_timeout_ms, max_in_flight, None)
+            .await
+    }
+
+    pub async fn connect_durable_with_contract(
+        &mut self,
+        durable_id: &str,
+        verbose: bool,
+        ack_timeout_ms: u64,
+        max_in_flight: usize,
+        ack_contract_version: Option<u16>,
+    ) -> Result<()> {
         let payload = serde_json::json!({
             "durable_id": durable_id,
             "verbose": verbose,
             "ack_timeout_ms": ack_timeout_ms,
             "max_in_flight": max_in_flight,
             "protocol_version": 2,
+            "ack_contract_version": ack_contract_version,
         });
         self.write_line(&format!("CONN {payload}")).await?;
         self.inbox_prefix = inbox_prefix(durable_id);
         self.durable = true;
         self.push_credit_messages = max_in_flight;
+        self.ack_contract_version = ack_contract_version;
         Ok(())
     }
 
@@ -129,6 +147,26 @@ impl Client {
         ack_timeout_ms: u64,
         max_in_flight: usize,
     ) -> Result<()> {
+        self.connect_authenticated_with_contract(
+            info,
+            auth,
+            verbose,
+            ack_timeout_ms,
+            max_in_flight,
+            None,
+        )
+        .await
+    }
+
+    pub async fn connect_authenticated_with_contract(
+        &mut self,
+        info: &Info,
+        auth: &ClientAuth,
+        verbose: bool,
+        ack_timeout_ms: u64,
+        max_in_flight: usize,
+        ack_contract_version: Option<u16>,
+    ) -> Result<()> {
         let nonce = info
             .nonce
             .as_deref()
@@ -140,11 +178,13 @@ impl Client {
             "ack_timeout_ms": ack_timeout_ms,
             "max_in_flight": max_in_flight,
             "protocol_version": 2,
+            "ack_contract_version": ack_contract_version,
         });
         self.write_line(&format!("CONN {payload}")).await?;
         self.inbox_prefix = inbox_prefix(&auth.client_id);
         self.durable = true;
         self.push_credit_messages = max_in_flight;
+        self.ack_contract_version = ack_contract_version;
         Ok(())
     }
 

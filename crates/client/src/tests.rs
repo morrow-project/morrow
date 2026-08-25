@@ -13,6 +13,7 @@ async fn keyed_qos_publish_encodes_partition_key_and_waits_for_commit_ack() {
         durable: true,
         push_credit_messages: 1,
         pending_messages: VecDeque::new(),
+        ack_contract_version: None,
     };
     let server = tokio::spawn(async move {
         let mut server = tokio::io::BufReader::new(server_io);
@@ -60,6 +61,7 @@ async fn ping_roundtrip_buffers_delivery_that_arrives_before_pong() {
         durable: true,
         push_credit_messages: 1,
         pending_messages: VecDeque::new(),
+        ack_contract_version: None,
     };
     let server = tokio::spawn(async move {
         let mut server = tokio::io::BufReader::new(server_io);
@@ -158,6 +160,7 @@ async fn parses_producer_ack_frame() {
             offset: None,
             partitioning_epoch: None,
             leader_epoch: None,
+            ack_contract_version: None,
         })
     );
 }
