@@ -141,12 +141,14 @@ jobs:
           docker run --rm
           --volume "${{ github.workspace }}:/work:ro"
           --workdir /work
+          --entrypoint promtool
           prom/prometheus:v3.5.0
-          promtool check rules monitoring/prometheus/morrow-alerts.yml
+          check rules monitoring/prometheus/morrow-alerts.yml
       - name: Run rule unit tests
         run: >-
           docker run --rm
           --volume "${{ github.workspace }}:/work:ro"
           --workdir /work
+          --entrypoint promtool
           prom/prometheus:v3.5.0
-          promtool test rules monitoring/prometheus/morrow-alerts.test.yml
+          test rules monitoring/prometheus/morrow-alerts.test.yml
