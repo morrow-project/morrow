@@ -137,12 +137,12 @@ impl Morrow {
         if !http_authorized(&request, admin_token) {
             return write_http_unauthorized(&mut stream).await;
         }
-        if method == "GET" && matches!(path, "/audit/status" | "/api/v1/audit/status") {
+        if method == "GET" && matches!(path.as_str(), "/audit/status" | "/api/v1/audit/status") {
             let body = serde_json::to_vec(&self.audit_status())
                 .context("serializing HTTP audit status response")?;
             return write_http_response(&mut stream, "200 OK", "application/json", &body).await;
         }
-        if method == "POST" && matches!(path, "/audit/verify" | "/api/v1/audit/verify") {
+        if method == "POST" && matches!(path.as_str(), "/audit/verify" | "/api/v1/audit/verify") {
             return match self.verify_audit_log() {
                 Ok(()) => {
                     write_http_response(
@@ -167,7 +167,7 @@ impl Morrow {
                 }
             };
         }
-        if method == "GET" && matches!(path, "/audit/export" | "/api/v1/audit/export") {
+        if method == "GET" && matches!(path.as_str(), "/audit/export" | "/api/v1/audit/export") {
             let body = self.export_audit_log()?;
             return write_http_response(&mut stream, "200 OK", "application/x-ndjson", &body).await;
         }
