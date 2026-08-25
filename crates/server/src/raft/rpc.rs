@@ -11,6 +11,7 @@ pub(super) enum RaftRequest {
     },
     DataAppend(DataAppendRequest),
     DataProgress(DataProgressRequest),
+    DataManifest(DataManifestRequest),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -27,6 +28,7 @@ pub(super) enum RaftResponse {
     FullSnapshot(SnapshotResponse<u64>),
     DataAppend(DataAppendResponse),
     DataProgress(Option<u64>),
+    DataManifest(DataManifestResponse),
     Error(String),
 }
 
@@ -140,9 +142,17 @@ where
                     || assignment.is_none_or(|assignment| {
                         assignment.leader_id != request.leader_id
                             || assignment.leader_epoch != request.leader_epoch
+                            || assignment.replica_set_generation != request.replica_set_generation
                     })
                 {
                     RaftResponse::Error("fenced partition leader epoch".to_string())
+                } else if request.batch_digest
+                    != crate::partition_log::committed_envelope_checksum(&request.envelope)
+                        .unwrap_or_default()
+                {
+                    RaftResponse::Error(
+                        "partition predecessor or batch digest mismatch".to_string(),
+                    )
                 } else {
                     request.committed_high_watermark =
                         committed.map(|commit| commit.high_watermark);
@@ -154,6 +164,12 @@ where
             }
             RaftRequest::DataProgress(request) => {
                 RaftResponse::DataProgress(partition_data.lock().unwrap().progress(&request))
+            }
+            RaftRequest::DataManifest(request) => {
+                let metadata = state_machine.durable_state();
+                RaftResponse::DataManifest(
+                    partition_data.lock().unwrap().manifest(&request, &metadata),
+                )
             }
         };
         write_frame(&mut stream, &response).await?;

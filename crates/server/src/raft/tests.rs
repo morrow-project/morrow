@@ -39,8 +39,31 @@ fn replica_data_retention_rewrites_physical_history() {
             .append(&DataAppendRequest {
                 leader_id: 1,
                 leader_epoch: 1,
+                replica_set_generation: 1,
                 fsync: false,
                 committed_high_watermark: offset.checked_sub(1),
+                predecessor_offset: offset.checked_sub(1),
+                predecessor_checksum: None,
+                batch_digest: crate::partition_log::committed_envelope_checksum(
+                    &crate::partition_log::MessageEnvelope {
+                        namespace: "default".into(),
+                        stream: definition.name.clone(),
+                        partition: crate::stream::PartitionId(0),
+                        offset,
+                        subject: "orders/created".into(),
+                        key: None,
+                        headers: vec![],
+                        timestamp_ms,
+                        reply_to: None,
+                        schema_id: None,
+                        payload: vec![offset as u8],
+                        partitioning_epoch: 0,
+                        leader_epoch: 1,
+                        legacy_seq: offset,
+                    },
+                )
+                .unwrap(),
+                durability: DurabilityBoundary::Memory,
                 envelope: crate::partition_log::MessageEnvelope {
                     namespace: "default".into(),
                     stream: definition.name.clone(),
@@ -143,8 +166,13 @@ async fn binary_partition_frames_preserve_byte_strings_and_reject_unknown_versio
     let request = RaftRequest::DataAppend(DataAppendRequest {
         leader_id: 1,
         leader_epoch: 2,
+        replica_set_generation: 1,
         fsync: true,
         committed_high_watermark: Some(4),
+        predecessor_offset: Some(4),
+        predecessor_checksum: Some(7),
+        batch_digest: 0,
+        durability: DurabilityBoundary::LocalFlush,
         envelope: MessageEnvelope {
             namespace: "default".into(),
             stream: StreamId::new("orders").unwrap(),
