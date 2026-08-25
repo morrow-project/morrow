@@ -19,6 +19,11 @@ async fn main() -> server::error::Result<()> {
         return Ok(());
     }
 
+    if let Some(path) = Config::check_config_from_args()? {
+        println!("{}", Config::check_file(path)?);
+        return Ok(());
+    }
+
     let config = Config::load_from_args()?;
     let broker = Morrow::open(config)?;
     let result = broker.serve().await;

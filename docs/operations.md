@@ -17,6 +17,14 @@ Important fields include `listen`, `websocket`, `http_listen`, `admin_token`
 or `admin_token_file`, `wal_dir`, `tls`, `auth`, `quotas`, and `cluster`. The
 example file contains the complete default shape.
 
+Use `morrow-server --check-config CONFIG_PATH` before deployment to validate the
+configuration without opening listeners or creating storage directories. It
+prints a redacted effective configuration. Set `production` to `true` to
+require TLS and authentication on non-loopback client/WebSocket listeners and
+admin TLS on a non-loopback admin listener. The explicit
+`allow_insecure_development` override is intended only for isolated local
+testing.
+
 ### WebSocket listener
 
 The WebSocket listener is independent from the native TCP listener. Enable it
