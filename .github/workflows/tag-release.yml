@@ -126,7 +126,7 @@ jobs:
           cp "target/release/morrow-cli${BINARY_SUFFIX}" "${archive_root}/"
           cp "target/release/morrow-connector${BINARY_SUFFIX}" "${archive_root}/"
           cp morrow.json.example client.json.example LICENSE README.md "${archive_root}/"
-          cp docs/building.md docs/operations.md "${archive_root}/docs/"
+          cp docs/building.md docs/operations.md docs/packaging-systemd.md "${archive_root}/docs/"
           tar -czf "${archive_root}.tar.gz" "${archive_root}"
           if command -v sha256sum >/dev/null 2>&1; then
             sha256sum "${archive_root}.tar.gz" > "${archive_root}.tar.gz.sha256"
