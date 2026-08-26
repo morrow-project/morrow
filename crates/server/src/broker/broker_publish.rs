@@ -659,38 +659,47 @@ impl Morrow {
         if valid {
             let message = inner.messages.get(&ack.seq).cloned();
             acknowledged_record = message.clone();
-            let acknowledged_cursors = match message.as_ref() {
+            let acknowledged_cursor = match message.as_ref() {
                 Some(message) if message.offset.is_some() => {
-                    let consumer = &inner.consumers[&ack.consumer_id];
-                    let mut cursors = consumer.cursors.clone();
-                    cursors.acknowledge(
+                    let mut consumer = inner.consumers.remove(&ack.consumer_id).unwrap();
+                    consumer.cursors.acknowledge(
                         message,
                         &consumer.record.filter_subject,
                         &inner.messages,
                     )?;
-                    Some(cursors)
+                    let stream = message.stream.as_deref().unwrap_or_default();
+                    let partition = message.partition.unwrap_or_default();
+                    let key = format!("{stream}:{partition}");
+                    let delta = consumer
+                        .cursors
+                        .partitions
+                        .get(&key)
+                        .cloned()
+                        .map(|cursor| crate::wal::ConsumerCursorDeltaRecord {
+                            consumer_id: ack.consumer_id.clone(),
+                            cursor,
+                            ack_window: consumer.cursors.ack_window,
+                        });
+                    inner.consumers.insert(ack.consumer_id.clone(), consumer);
+                    delta
                 }
                 _ => None,
             };
             inner
                 .wal
                 .append_ack(ack.seq, &ack.consumer_id, ack.delivery_id)?;
-            let cursor_snapshot = {
+            {
                 let consumer = inner.consumers.get_mut(&ack.consumer_id).unwrap();
                 consumer.in_flight.remove(&ack.seq);
                 consumer.pending.remove(&ack.seq);
                 consumer.pending_attempts.remove(&ack.seq);
-                if let Some(cursors) = acknowledged_cursors {
-                    consumer.cursors = cursors;
-                } else if message.is_some() {
+                if acknowledged_cursor.is_none() && message.is_some() {
                     consumer.acked.insert(ack.seq);
                 }
-                consumer.cursors.clone()
-            };
-            inner.wal.append_consumer_cursor(&ConsumerCursorRecord {
-                consumer_id: ack.consumer_id.clone(),
-                cursors: cursor_snapshot,
-            })?;
+            }
+            if let Some(cursor) = acknowledged_cursor {
+                inner.wal.append_consumer_cursor_delta(&cursor)?;
+            }
             inner.mark_consumer_ready(&ack.consumer_id);
             should_cleanup = true;
         }

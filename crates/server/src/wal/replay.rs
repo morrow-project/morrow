@@ -205,6 +205,17 @@ fn apply_record(kind: u8, body: &[u8], state: &mut ReplayState) -> Result<()> {
                 consumer.cursors = Some(record.cursors);
             }
         }
+        KIND_CONSUMER_CURSOR_DELTA => {
+            let record = decode_consumer_cursor_delta(body)?;
+            if let Some(consumer) = state.consumers.get_mut(&record.consumer_id) {
+                let cursors = consumer.cursors.get_or_insert_with(Default::default);
+                cursors.ack_window = record.ack_window;
+                cursors.partitions.insert(
+                    format!("{}:{}", record.cursor.stream, record.cursor.partition),
+                    record.cursor,
+                );
+            }
+        }
         KIND_CONSUMER_DELETE => {
             let record = decode_consumer_delete(body)?;
             state.consumers.remove(&record.consumer_id);

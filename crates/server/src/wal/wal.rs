@@ -138,6 +138,16 @@ impl Wal {
         self.append_record(KIND_CONSUMER_CURSOR, &consumer_cursor_body(record)?)
     }
 
+    pub fn append_consumer_cursor_delta(
+        &mut self,
+        record: &ConsumerCursorDeltaRecord,
+    ) -> Result<()> {
+        self.append_record(
+            KIND_CONSUMER_CURSOR_DELTA,
+            &consumer_cursor_delta_body(record)?,
+        )
+    }
+
     pub fn append_consumer_delete(&mut self, consumer_id: &str) -> Result<()> {
         self.append_record(
             KIND_CONSUMER_DELETE,

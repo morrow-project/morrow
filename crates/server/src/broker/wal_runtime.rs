@@ -24,6 +24,7 @@ enum WalCommand {
     PartitionAppend(PartitionAppendRecord, mpsc::Sender<Result<()>>),
     ConsumerUpsert(ConsumerRecord, mpsc::Sender<Result<()>>),
     ConsumerCursor(ConsumerCursorRecord, mpsc::Sender<Result<()>>),
+    ConsumerCursorDelta(ConsumerCursorDeltaRecord, mpsc::Sender<Result<()>>),
     ConsumerDelete(String, mpsc::Sender<Result<()>>),
     DeliveryAttempt {
         seq: u64,
@@ -127,6 +128,13 @@ impl WalRuntime {
 
     pub(super) fn append_consumer_cursor(&self, record: &ConsumerCursorRecord) -> Result<()> {
         self.request(|response| WalCommand::ConsumerCursor(record.clone(), response))
+    }
+
+    pub(super) fn append_consumer_cursor_delta(
+        &self,
+        record: &ConsumerCursorDeltaRecord,
+    ) -> Result<()> {
+        self.request(|response| WalCommand::ConsumerCursorDelta(record.clone(), response))
     }
 
     pub(super) async fn append_consumer_cursor_async(
@@ -393,6 +401,9 @@ fn wal_worker(mut wal: Wal, receiver: mpsc::Receiver<WalCommand>) {
             }
             WalCommand::ConsumerCursor(record, response) => {
                 let _ = response.send(wal.append_consumer_cursor(&record));
+            }
+            WalCommand::ConsumerCursorDelta(record, response) => {
+                let _ = response.send(wal.append_consumer_cursor_delta(&record));
             }
             WalCommand::ConsumerDelete(consumer_id, response) => {
                 let _ = response.send(wal.append_consumer_delete(&consumer_id));
