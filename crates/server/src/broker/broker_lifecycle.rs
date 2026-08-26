@@ -1601,6 +1601,22 @@ impl Morrow {
         metrics.push_str("# HELP morrow_cluster_peers Current configured cluster peers.\n");
         metrics.push_str("# TYPE morrow_cluster_peers gauge\n");
         metrics.push_str(&format!("morrow_cluster_peers {}\n", cluster.peers.len()));
+        let (registered_brokers, control_revision, retained_updates) =
+            self.broker_control.status().await;
+        metrics.push_str("# HELP morrow_registered_brokers Current broker-control sessions.\n");
+        metrics.push_str("# TYPE morrow_registered_brokers gauge\n");
+        metrics.push_str(&format!("morrow_registered_brokers {registered_brokers}\n"));
+        metrics.push_str("# HELP morrow_broker_control_revision Latest metadata revision.\n");
+        metrics.push_str("# TYPE morrow_broker_control_revision gauge\n");
+        metrics.push_str(&format!(
+            "morrow_broker_control_revision {control_revision}\n"
+        ));
+        metrics
+            .push_str("# HELP morrow_broker_control_retained_updates Retained metadata deltas.\n");
+        metrics.push_str("# TYPE morrow_broker_control_retained_updates gauge\n");
+        metrics.push_str(&format!(
+            "morrow_broker_control_retained_updates {retained_updates}\n"
+        ));
         metrics
             .push_str("# HELP morrow_cluster_delta_applications_total Applied cluster deltas.\n");
         metrics.push_str("# TYPE morrow_cluster_delta_applications_total counter\n");

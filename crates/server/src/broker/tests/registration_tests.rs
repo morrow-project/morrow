@@ -69,3 +69,13 @@ async fn metadata_updates_are_resumable_and_fall_back_to_snapshot() {
     bounded.publish_update(b"c".to_vec()).await;
     assert!(bounded.updates_after(0).await.is_none());
 }
+
+#[tokio::test]
+async fn registration_status_is_bounded_and_tracks_revision() {
+    let registry = BrokerControlRegistry::with_update_window(2);
+    registry.publish_update(b"one".to_vec()).await;
+    registry.publish_update(b"two".to_vec()).await;
+    registry.publish_update(b"three".to_vec()).await;
+
+    assert_eq!(registry.status().await, (0, 3, 2));
+}
