@@ -497,6 +497,8 @@ pub use self::{
 };
 
 #[cfg(test)]
+mod role_tests;
+#[cfg(test)]
 mod storage_tests;
 #[cfg(test)]
 mod tests;

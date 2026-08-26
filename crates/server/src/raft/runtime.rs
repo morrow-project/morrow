@@ -114,15 +114,11 @@ impl RaftRuntime {
                 )
             })
             .collect::<HashMap<_, _>>();
-        let data_node_ids = nodes
-            .keys()
-            .copied()
-            .filter(|node_id| {
-                !matches!(config.role, crate::config::ClusterRole::Controller)
-                    && (matches!(config.role, crate::config::ClusterRole::Combined)
-                        || !config.controller_voters.contains(node_id))
-            })
-            .collect();
+        let data_node_ids = data_node_ids_for_role(
+            config.role,
+            config.controller_voters.as_slice(),
+            nodes.keys().copied(),
+        );
         let raft_nodes = config
             .nodes
             .iter()
@@ -558,6 +554,20 @@ impl RaftRuntime {
 
 pub(super) fn initial_partition_leader(replica_order: &[u64], partition: u32) -> u64 {
     replica_order[partition as usize % replica_order.len()]
+}
+
+pub(super) fn data_node_ids_for_role(
+    role: crate::config::ClusterRole,
+    controller_voters: &[u64],
+    node_ids: impl IntoIterator<Item = u64>,
+) -> BTreeSet<u64> {
+    node_ids
+        .into_iter()
+        .filter(|node_id| {
+            matches!(role, crate::config::ClusterRole::Combined)
+                || !controller_voters.contains(node_id)
+        })
+        .collect()
 }
 
 pub(super) async fn load_partition_delta(
