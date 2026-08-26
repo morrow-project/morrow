@@ -494,6 +494,7 @@ async fn routed_cluster_forms_full_mesh_and_forwards_transient_publish() {
     subscriber.ping_roundtrip().await.unwrap();
 
     harness.wait_for_route_interest(0, "orders/*").await;
+    harness.wait_for_route_interest(2, "orders/*").await;
 
     let mut publisher = Client::connect(harness.nodes[2].client_addr, harness.max_payload)
         .await

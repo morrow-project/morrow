@@ -378,6 +378,29 @@ async fn route_frame_rejects_invalid_auth_token() {
         .unwrap_err();
     assert!(err.to_string().contains("invalid route auth token"));
 }
+
+#[tokio::test]
+async fn route_session_authenticates_once_and_round_trips_binary_frames() {
+    let (mut writer, mut reader) = tokio::io::duplex(4096);
+    let write_task = tokio::spawn(async move {
+        write_route_handshake(&mut writer, "route-secret")
+            .await
+            .unwrap();
+        write_route_session_frame(&mut writer, &RouteFrame::Pong)
+            .await
+            .unwrap();
+    });
+
+    read_route_handshake(&mut reader, "route-secret")
+        .await
+        .unwrap();
+    assert!(matches!(
+        read_route_session_frame(&mut reader).await.unwrap(),
+        Some(RouteFrame::Pong)
+    ));
+    write_task.await.unwrap();
+}
+
 #[tokio::test]
 async fn fake_cluster_follower_without_known_leader_returns_error() {
     let scenario = Scenario::new_fake_cluster_local_node(3, 1, None);
