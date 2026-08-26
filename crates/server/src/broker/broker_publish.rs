@@ -697,6 +697,7 @@ impl Morrow {
                     consumer.acked.insert(ack.seq);
                 }
             }
+            inner.acked_cleanup.insert(ack.seq);
             if let Some(cursor) = acknowledged_cursor {
                 inner.wal.append_consumer_cursor_delta(&cursor)?;
             }

@@ -412,10 +412,10 @@ impl DurableBrokerState {
     }
 
     pub(super) fn cleanup_acked_messages(&mut self) {
-        let removable: Vec<_> = self
-            .messages
-            .iter()
-            .filter(|(seq, _)| {
+        let candidates = std::mem::take(&mut self.acked_cleanup);
+        let removable: Vec<_> = candidates
+            .into_iter()
+            .filter(|seq| {
                 if self
                     .messages
                     .get(seq)
@@ -437,7 +437,6 @@ impl DurableBrokerState {
                 }
                 interested
             })
-            .map(|(seq, _)| *seq)
             .collect();
         for seq in removable {
             if let Some(record) = self.messages.remove(&seq)

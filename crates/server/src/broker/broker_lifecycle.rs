@@ -644,6 +644,7 @@ impl Morrow {
                 producer_epochs,
                 producer_sequences,
                 producer_in_flight: HashSet::new(),
+                acked_cleanup: HashSet::new(),
                 compaction_latest,
                 superseded_since_compaction: 0,
             })),
