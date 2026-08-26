@@ -8,6 +8,7 @@ pub mod encryption;
 pub mod error;
 pub mod materialized_view;
 pub mod middleware;
+pub mod partition_batch;
 pub mod partition_log;
 pub mod partition_replication;
 pub(crate) mod quota;
@@ -21,6 +22,9 @@ pub mod tenancy;
 pub mod tls;
 pub mod transaction;
 pub mod wal;
+
+#[cfg(test)]
+mod partition_batch_tests;
 
 pub use broker::Morrow;
 pub use config::Config;
