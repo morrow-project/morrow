@@ -772,7 +772,7 @@ impl Morrow {
             storage_permits: Arc::new(tokio::sync::Semaphore::new(MAX_BLOCKING_STORAGE_OPS)),
             storage_gate: Arc::new(tokio::sync::RwLock::new(())),
             state_shard_gates: Arc::new(
-                (0..STATE_SHARD_COUNT)
+                (0..crate::broker::state_shard_count())
                     .map(|_| tokio::sync::Mutex::new(()))
                     .collect(),
             ),
@@ -1726,6 +1726,13 @@ impl Morrow {
             "morrow_state_shard_hold_us",
             &self.metrics.state_shard_hold_us,
         );
+        metrics
+            .push_str("# HELP morrow_state_shard_count Configured hot-path state shard count.\n");
+        metrics.push_str("# TYPE morrow_state_shard_count gauge\n");
+        metrics.push_str(&format!(
+            "morrow_state_shard_count {}\n",
+            self.state_shard_gates.len()
+        ));
         metrics.push_str("# HELP morrow_wal_bytes Total WAL bytes.\n");
         metrics.push_str("# TYPE morrow_wal_bytes gauge\n");
         metrics.push_str(&format!("morrow_wal_bytes {}\n", wal.total_wal_bytes));
