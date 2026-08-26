@@ -1,5 +1,6 @@
 //! Client-side partition leader metadata and deterministic routing.
 
+use serde::Deserialize;
 use std::collections::{HashMap, VecDeque};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,6 +24,29 @@ pub struct StreamMetadata {
     pub partitioning_epoch: u64,
     pub partitioning: Partitioning,
     pub leaders: Vec<PartitionLeader>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct PartitionMetadataResponse {
+    version: u32,
+    partitions: Vec<PartitionMetadataEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct PartitionMetadataEntry {
+    stream: String,
+    partition: u32,
+    leader_epoch: u64,
+    partitioning_epoch: u64,
+    partitioning: WirePartitioning,
+    leader_client_addr: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct WirePartitioning {
+    strategy: String,
+    #[serde(default)]
+    token: Option<u32>,
 }
 
 #[derive(Debug)]
@@ -69,6 +93,69 @@ impl PartitionLeaderCache {
             }
         }
         true
+    }
+
+    /// Apply the server's versioned partition metadata response. Entries
+    /// without a routable leader address are ignored so callers retain their
+    /// existing proxy fallback.
+    pub fn apply_metadata_json(&mut self, payload: &[u8]) -> Result<usize, String> {
+        let response: PartitionMetadataResponse =
+            serde_json::from_slice(payload).map_err(|error| error.to_string())?;
+        if response.version != 1 {
+            return Err(format!(
+                "unsupported partition metadata version {}",
+                response.version
+            ));
+        }
+        let mut grouped = HashMap::<String, Vec<PartitionMetadataEntry>>::new();
+        for entry in response.partitions {
+            if entry.leader_client_addr.is_some() {
+                grouped.entry(entry.stream.clone()).or_default().push(entry);
+            }
+        }
+        let mut applied = 0;
+        for (name, mut entries) in grouped {
+            entries.sort_by_key(|entry| entry.partition);
+            let Some(first) = entries.first() else {
+                continue;
+            };
+            if entries.iter().enumerate().any(|(index, entry)| {
+                entry.partition != index as u32
+                    || entry.partitioning_epoch != first.partitioning_epoch
+                    || entry.partitioning != first.partitioning
+            }) {
+                continue;
+            }
+            let Some(leaders) = entries
+                .iter()
+                .map(|entry| {
+                    Some(PartitionLeader {
+                        partition: entry.partition,
+                        leader_epoch: entry.leader_epoch,
+                        address: entry.leader_client_addr.clone()?,
+                    })
+                })
+                .collect::<Option<Vec<_>>>()
+            else {
+                continue;
+            };
+            if self.insert(StreamMetadata {
+                name,
+                partitions: leaders.len() as u32,
+                partitioning_epoch: first.partitioning_epoch,
+                partitioning: match first.partitioning.strategy.as_str() {
+                    "key" => Partitioning::Key,
+                    "subject_token" => Partitioning::SubjectToken {
+                        token: first.partitioning.token.unwrap_or_default() as usize,
+                    },
+                    _ => continue,
+                },
+                leaders,
+            }) {
+                applied += 1;
+            }
+        }
+        Ok(applied)
     }
 
     pub fn route(
