@@ -222,14 +222,14 @@ impl RoutedClient {
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<Vec<u8>, String>>,
     {
+        let address = self.route_address(stream, subject, key);
         match self
-            .publish_to_stream_with_qos_and_headers(
-                stream, subject, payload, level, msg_id, key, headers,
-            )
+            .publish_qos_once(address, subject, payload, level, msg_id, key, headers)
             .await
         {
             Ok(ack) => Ok(ack),
             Err(first_error) => {
+                self.cache.invalidate(stream, u64::MAX);
                 let metadata = refresh().await.map_err(|refresh_error| {
                     super::error::ClientError::msg(format!(
                         "publish failed and metadata refresh failed: {first_error}; refresh: {refresh_error}"
@@ -240,10 +240,22 @@ impl RoutedClient {
                         "publish failed and refreshed metadata was invalid: {first_error}; metadata: {error}"
                     ))
                 })?;
-                self.publish_to_stream_with_qos_and_headers(
-                    stream, subject, payload, level, msg_id, key, headers,
+                let retry_address = self.route_address(stream, subject, key);
+                self.publish_qos_once(
+                    retry_address,
+                    subject,
+                    payload,
+                    level,
+                    msg_id,
+                    key,
+                    headers,
                 )
                 .await
+                .map_err(|retry_error| {
+                    super::error::ClientError::msg(format!(
+                        "publish failed after metadata refresh: {first_error}; retry: {retry_error}"
+                    ))
+                })
             }
         }
     }
