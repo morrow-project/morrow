@@ -841,6 +841,25 @@ async fn http_cluster_endpoint_reports_standalone_node() {
     assert!(response.contains("\"leader_id\":null"));
     assert!(response.contains("\"peers\":[]"));
 }
+
+#[tokio::test]
+async fn partition_metadata_response_is_versioned_and_filterable() {
+    let scenario = Scenario::new_fake_cluster_local_node(3, 1, Some(1));
+
+    let response = scenario
+        .broker()
+        .partition_metadata_response(Some("orders"))
+        .await;
+
+    assert_eq!(response.version, 1);
+    assert!(
+        response
+            .partitions
+            .iter()
+            .all(|partition| partition.stream == "orders")
+    );
+}
+
 #[tokio::test]
 async fn http_cluster_endpoint_reports_cluster_role_and_leader() {
     let scenario = Scenario::new_fake_cluster_local_node(3, 1, Some(1));

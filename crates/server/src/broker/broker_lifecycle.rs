@@ -1812,6 +1812,14 @@ impl Morrow {
                             leader_id: assignment.leader_id,
                             leader_client_addr,
                             leader_epoch: assignment.leader_epoch,
+                            partitioning_epoch: self
+                                .config
+                                .streams
+                                .definitions()
+                                .iter()
+                                .find(|definition| definition.name.as_str() == stream)
+                                .map(|definition| definition.partitioning.epoch)
+                                .unwrap_or_default(),
                             high_watermark,
                         })
                     })
@@ -1846,6 +1854,26 @@ impl Morrow {
                     .full_reconciliations
                     .load(Ordering::Relaxed),
             },
+        }
+    }
+
+    pub(super) async fn partition_metadata_response(
+        &self,
+        stream_filter: Option<&str>,
+    ) -> PartitionMetadataResponse {
+        const MAX_ENTRIES: usize = 10_000;
+        let mut partitions = self
+            .cluster_response()
+            .await
+            .partitions
+            .into_iter()
+            .filter(|partition| stream_filter.is_none_or(|stream| partition.stream == stream))
+            .take(MAX_ENTRIES)
+            .collect::<Vec<_>>();
+        partitions.sort_by_key(|partition| (partition.stream.clone(), partition.partition));
+        PartitionMetadataResponse {
+            version: 1,
+            partitions,
         }
     }
 

@@ -354,6 +354,12 @@ pub(super) struct ClusterResponse {
 }
 
 #[derive(Debug, serde::Serialize)]
+pub(super) struct PartitionMetadataResponse {
+    pub(super) version: u32,
+    pub(super) partitions: Vec<PartitionLeaderResponse>,
+}
+
+#[derive(Debug, serde::Serialize)]
 pub(super) struct HealthResponse {
     pub(super) status: &'static str,
     pub(super) cluster_status: &'static str,
@@ -509,6 +515,7 @@ pub(super) struct PartitionLeaderResponse {
     pub(super) leader_id: u64,
     pub(super) leader_client_addr: Option<String>,
     pub(super) leader_epoch: u64,
+    pub(super) partitioning_epoch: u64,
     pub(super) high_watermark: Option<u64>,
 }
 
