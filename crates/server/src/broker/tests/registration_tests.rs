@@ -22,21 +22,26 @@ async fn registration_fences_old_incarnations_and_accepts_heartbeats() {
     let broker = Scenario::new().broker().clone();
     let first = broker.register_broker(registration(9, 1, 0)).await.unwrap();
     assert_eq!(first.accepted.session_id, 1);
-    assert!(
-        broker
-            .heartbeat_broker(BrokerHeartbeat {
-                protocol_version: BROKER_CONTROL_PROTOCOL_VERSION,
-                broker_id: 9,
-                incarnation: 1,
-                session_id: first.accepted.session_id,
-                capacity: CapacitySummary {
-                    partition_count: 3,
-                    ..Default::default()
-                },
-            })
-            .await
-            .is_ok()
-    );
+    broker
+        .publish_broker_metadata_update(b"assignment".to_vec())
+        .await;
+    let heartbeat = broker
+        .heartbeat_broker(BrokerHeartbeat {
+            protocol_version: BROKER_CONTROL_PROTOCOL_VERSION,
+            broker_id: 9,
+            incarnation: 1,
+            session_id: first.accepted.session_id,
+            capacity: CapacitySummary {
+                partition_count: 3,
+                ..Default::default()
+            },
+            last_revision: 0,
+        })
+        .await
+        .unwrap();
+    assert_eq!(heartbeat.controller_revision, 1);
+    assert_eq!(heartbeat.updates.len(), 1);
+    assert!(!heartbeat.snapshot_required);
     let second = broker.register_broker(registration(9, 2, 0)).await.unwrap();
     assert_eq!(second.fenced_session, Some(first.accepted.session_id));
     assert!(
@@ -47,6 +52,7 @@ async fn registration_fences_old_incarnations_and_accepts_heartbeats() {
                 incarnation: 1,
                 session_id: first.accepted.session_id,
                 capacity: CapacitySummary::default(),
+                last_revision: 1,
             })
             .await
             .is_err()
@@ -93,6 +99,7 @@ async fn registration_metrics_track_sessions_and_snapshot_fallbacks() {
             incarnation: 2,
             session_id: 2,
             capacity: CapacitySummary::default(),
+            last_revision: 2,
         })
         .await
         .unwrap();

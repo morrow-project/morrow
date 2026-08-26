@@ -67,13 +67,18 @@ impl Morrow {
                         incarnation,
                         session_id: session,
                         capacity: protocol::broker_control::CapacitySummary::default(),
+                        last_revision,
                     };
-                    if runtime
+                    match runtime
                         .heartbeat_with_controller(controller_id, heartbeat)
                         .await
-                        .is_err()
                     {
-                        session_id = None;
+                        Ok(accepted) => {
+                            last_revision = accepted.controller_revision;
+                        }
+                        Err(_) => {
+                            session_id = None;
+                        }
                     }
                 } else {
                     let registration = protocol::broker_control::BrokerRegistration {

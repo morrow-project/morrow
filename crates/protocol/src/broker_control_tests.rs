@@ -8,6 +8,17 @@ fn control_frames_round_trip_with_checksum() {
 }
 
 #[test]
+fn heartbeat_acceptance_carries_resumable_updates() {
+    let frame = BrokerControlFrame::HeartbeatAccepted(HeartbeatAccepted {
+        controller_revision: 8,
+        updates: vec![MetadataUpdate::new(8, b"assignment".to_vec())],
+        snapshot_required: false,
+    });
+    let encoded = frame.encode().unwrap();
+    assert_eq!(BrokerControlFrame::decode(&encoded).unwrap(), frame);
+}
+
+#[test]
 fn tampered_metadata_is_rejected() {
     let frame = BrokerControlFrame::MetadataUpdate(MetadataUpdate::new(7, b"delta".to_vec()));
     let mut encoded = frame.encode().unwrap();

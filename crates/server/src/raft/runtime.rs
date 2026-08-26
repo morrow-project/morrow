@@ -67,7 +67,7 @@ impl RaftRuntime {
         &self,
         controller_id: u64,
         heartbeat: protocol::broker_control::BrokerHeartbeat,
-    ) -> Result<()> {
+    ) -> Result<protocol::broker_control::HeartbeatAccepted> {
         match self
             .data_client(controller_id)
             .await?
@@ -76,7 +76,9 @@ impl RaftRuntime {
             ))
             .await?
         {
-            protocol::broker_control::BrokerControlFrame::HeartbeatAccepted => Ok(()),
+            protocol::broker_control::BrokerControlFrame::HeartbeatAccepted(accepted) => {
+                Ok(accepted)
+            }
             protocol::broker_control::BrokerControlFrame::Error(error) => {
                 Err(BrokerError::msg(format!(
                     "broker heartbeat rejected ({}): {}",

@@ -329,7 +329,7 @@ where
                         }
                         BrokerControlFrame::Heartbeat(heartbeat) => {
                             match broker_control.heartbeat(heartbeat).await {
-                                Ok(()) => BrokerControlFrame::HeartbeatAccepted,
+                                Ok(accepted) => BrokerControlFrame::HeartbeatAccepted(accepted),
                                 Err(error) => BrokerControlFrame::Error(
                                     protocol::broker_control::ControlError {
                                         code: "heartbeat_rejected".to_string(),

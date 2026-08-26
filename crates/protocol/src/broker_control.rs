@@ -39,6 +39,14 @@ pub struct BrokerHeartbeat {
     pub incarnation: u64,
     pub session_id: u64,
     pub capacity: CapacitySummary,
+    pub last_revision: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeartbeatAccepted {
+    pub controller_revision: u64,
+    pub updates: Vec<MetadataUpdate>,
+    pub snapshot_required: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -84,7 +92,7 @@ pub enum BrokerControlFrame {
     Register(BrokerRegistration),
     RegisterAccepted(RegistrationAccepted),
     Heartbeat(BrokerHeartbeat),
-    HeartbeatAccepted,
+    HeartbeatAccepted(HeartbeatAccepted),
     MetadataUpdate(MetadataUpdate),
     MetadataSnapshot(MetadataUpdate),
     Error(ControlError),
@@ -119,10 +127,13 @@ impl BrokerControlFrame {
                 std::slice::from_ref(update)
             }
             Self::RegisterAccepted(accepted) => accepted.updates.as_slice(),
+            Self::HeartbeatAccepted(accepted) => accepted.updates.as_slice(),
             _ => &[],
         };
         if updates.iter().any(|update| !update.verify())
             || matches!(&frame, Self::RegisterAccepted(accepted)
+                if accepted.updates.windows(2).any(|w| w[0].revision >= w[1].revision))
+            || matches!(&frame, Self::HeartbeatAccepted(accepted)
                 if accepted.updates.windows(2).any(|w| w[0].revision >= w[1].revision))
         {
             return Err(ControlCodecError::ChecksumMismatch);

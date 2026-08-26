@@ -1,7 +1,7 @@
 use super::*;
 use protocol::broker_control::{
     BROKER_CONTROL_PROTOCOL_VERSION, BrokerHeartbeat, BrokerRegistration, CapacitySummary,
-    MetadataUpdate, RegistrationAccepted,
+    HeartbeatAccepted, MetadataUpdate, RegistrationAccepted,
 };
 use std::collections::VecDeque;
 
@@ -169,7 +169,7 @@ impl BrokerControlRegistry {
     pub(crate) async fn heartbeat(
         &self,
         heartbeat: BrokerHeartbeat,
-    ) -> std::result::Result<(), RegistrationError> {
+    ) -> std::result::Result<HeartbeatAccepted, RegistrationError> {
         if heartbeat.protocol_version != BROKER_CONTROL_PROTOCOL_VERSION {
             return Err(RegistrationError::UnsupportedVersion(
                 heartbeat.protocol_version,
@@ -189,7 +189,29 @@ impl BrokerControlRegistry {
             return Err(RegistrationError::StaleIncarnation);
         }
         session.capacity = heartbeat.capacity;
-        Ok(())
+        let snapshot_required = heartbeat.last_revision.saturating_add(1)
+            < state
+                .updates
+                .front()
+                .map_or(state.revision.saturating_add(1), |update| update.revision);
+        let updates = if snapshot_required {
+            self.metrics
+                .snapshot_fallbacks_total
+                .fetch_add(1, Ordering::Relaxed);
+            Vec::new()
+        } else {
+            state
+                .updates
+                .iter()
+                .filter(|update| update.revision > heartbeat.last_revision)
+                .cloned()
+                .collect()
+        };
+        Ok(HeartbeatAccepted {
+            controller_revision: state.revision,
+            updates,
+            snapshot_required,
+        })
     }
 
     pub(super) async fn publish_update(&self, payload: Vec<u8>) -> MetadataUpdate {
@@ -260,7 +282,7 @@ impl Morrow {
     pub async fn heartbeat_broker(
         &self,
         heartbeat: BrokerHeartbeat,
-    ) -> std::result::Result<(), RegistrationError> {
+    ) -> std::result::Result<HeartbeatAccepted, RegistrationError> {
         self.broker_control.heartbeat(heartbeat).await
     }
 

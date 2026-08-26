@@ -21,7 +21,12 @@ The current release keeps the authenticated internal control and replication
 listeners for compatibility. Controller-only processes do not accept client
 connections or start the route mesh; broker-only processes serve the data
 plane but remain outside the metadata voter set. A fully independent
-controller-to-broker registration transport remains a follow-up concern.
+controller-to-broker registration transport remains a follow-up concern. Once
+registered, brokers send their last applied controller revision with each
+heartbeat. The controller responds with all retained metadata updates after
+that revision, or sets `snapshot_required` when the broker has fallen behind
+the bounded update window. This makes assignment propagation resumable without
+re-registering on every change.
 
 ## Compatibility and migration
 
