@@ -255,8 +255,8 @@ pub async fn read_command<R: AsyncBufRead + Unpin>(
         return Err(ProtocolError("empty protocol line".into()));
     };
 
-    match op.to_ascii_uppercase().as_str() {
-        "CONN" => {
+    match canonical_operation(op) {
+        Some("CONN") => {
             let payload = line
                 .strip_prefix(op)
                 .map(str::trim)
@@ -265,21 +265,30 @@ pub async fn read_command<R: AsyncBufRead + Unpin>(
             let connect = parse_connect(payload)?;
             Ok(Some(connect))
         }
-        "PING" => Ok(Some(Command::Ping)),
-        "PONG" => Ok(Some(Command::Pong)),
-        "SUB" => parse_sub(parts).map(Some),
-        "UNSUB" => parse_unsub(parts).map(Some),
-        "CONSUMER" => parse_consumer(parts).map(Some),
-        "FETCH" => parse_fetch(parts).map(Some),
-        "ACK" => parse_delivery_control(parts, "ACK").map(Some),
-        "NACK" => parse_delivery_control(parts, "NACK").map(Some),
-        "EXTEND" => parse_delivery_control(parts, "EXTEND").map(Some),
-        "CREDIT" => parse_credit(parts).map(Some),
-        "GROUP" => parse_group(parts).map(Some),
-        "PUB" => read_pub(reader, parts, max_payload).await.map(Some),
-        "HPUB" => read_hpub(reader, parts, max_payload).await.map(Some),
-        _ => Err(ProtocolError(format!("unsupported command {op}"))),
+        Some("PING") => Ok(Some(Command::Ping)),
+        Some("PONG") => Ok(Some(Command::Pong)),
+        Some("SUB") => parse_sub(parts).map(Some),
+        Some("UNSUB") => parse_unsub(parts).map(Some),
+        Some("CONSUMER") => parse_consumer(parts).map(Some),
+        Some("FETCH") => parse_fetch(parts).map(Some),
+        Some("ACK") => parse_delivery_control(parts, "ACK").map(Some),
+        Some("NACK") => parse_delivery_control(parts, "NACK").map(Some),
+        Some("EXTEND") => parse_delivery_control(parts, "EXTEND").map(Some),
+        Some("CREDIT") => parse_credit(parts).map(Some),
+        Some("GROUP") => parse_group(parts).map(Some),
+        Some("PUB") => read_pub(reader, parts, max_payload).await.map(Some),
+        Some("HPUB") => read_hpub(reader, parts, max_payload).await.map(Some),
+        Some(_) | None => Err(ProtocolError(format!("unsupported command {op}"))),
     }
+}
+
+fn canonical_operation(operation: &str) -> Option<&'static str> {
+    [
+        "CONN", "PING", "PONG", "SUB", "UNSUB", "CONSUMER", "FETCH", "ACK", "NACK", "EXTEND",
+        "CREDIT", "GROUP", "PUB", "HPUB",
+    ]
+    .into_iter()
+    .find(|candidate| operation.eq_ignore_ascii_case(candidate))
 }
 
 async fn read_control_line<R: AsyncBufRead + Unpin>(
