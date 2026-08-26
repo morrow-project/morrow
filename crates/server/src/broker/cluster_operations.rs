@@ -55,6 +55,9 @@ impl Morrow {
                 if let Err(err) = self.sync_cluster_deltas(&cluster).await {
                     error!(error = ?err, "cluster delta application failed");
                 }
+                if let Err(err) = self.sync_local_partition_commits(&cluster).await {
+                    error!(error = ?err, "local partition commit application failed");
+                }
                 if cluster.is_leader().await
                     && let Err(err) = cluster.ensure_metadata_ready().await
                 {

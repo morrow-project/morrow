@@ -1,6 +1,19 @@
 use super::*;
 
 impl Morrow {
+    pub(super) async fn sync_local_partition_commits(
+        &self,
+        cluster: &ClusterRuntime,
+    ) -> Result<()> {
+        for envelope in cluster.local_committed_records()? {
+            self.apply_cluster_partition(envelope).await?;
+            self.cluster_application_metrics
+                .delta_applications
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(())
+    }
+
     pub(super) async fn sync_cluster_deltas(&self, cluster: &ClusterRuntime) -> Result<()> {
         let _delta_application = self.cluster_delta_gate.lock().await;
         let Some(batch) = cluster.deltas_after(self.cluster_applied_log_index()) else {

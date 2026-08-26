@@ -5,6 +5,39 @@ use crate::{
 };
 use std::sync::Mutex as StdMutex;
 
+const PARTITION_COMMIT_JOURNAL: &str = "commit-state.journal";
+const COMMIT_CHECKPOINT_RECORDS: u64 = 1_024;
+const COMMIT_CHECKPOINT_BYTES: u64 = 8 * 1024 * 1024;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(super) struct PartitionCommitRecord {
+    pub(super) stream: String,
+    pub(super) partition: PartitionId,
+    pub(super) replica_set_generation: u64,
+    pub(super) leader_id: u64,
+    pub(super) leader_epoch: u64,
+    pub(super) high_watermark: u64,
+    pub(super) checksum: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(super) struct DataCommitRequest {
+    pub(super) leader_id: u64,
+    pub(super) leader_epoch: u64,
+    pub(super) replica_set_generation: u64,
+    pub(super) stream: String,
+    pub(super) partition: PartitionId,
+    pub(super) high_watermark: u64,
+    pub(super) checksum: u32,
+    pub(super) fsync: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub(super) struct DataCommitResponse {
+    pub(super) high_watermark: u64,
+    pub(super) flushed: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct DataAppendRequest {
     pub(super) leader_id: u64,
@@ -86,6 +119,11 @@ pub(super) struct DataSnapshotChunk {
 pub(super) struct ReplicaDataStore {
     logs: PartitionLogSet,
     records: HashMap<(String, PartitionId), BTreeMap<u64, MessageEnvelope>>,
+    commits: HashMap<String, PartitionCommitMetadata>,
+    commit_journal: PathBuf,
+    commit_records: u64,
+    commit_bytes: u64,
+    unsafe_commits: bool,
 }
 
 impl ReplicaDataStore {
@@ -98,7 +136,74 @@ impl ReplicaDataStore {
                 .or_default()
                 .insert(envelope.offset, envelope);
         }
-        Ok(Self { logs, records })
+        let commit_journal = root.join(PARTITION_COMMIT_JOURNAL);
+        let commit_bytes = commit_journal
+            .metadata()
+            .map(|meta| meta.len())
+            .unwrap_or_default();
+        let mut commits: HashMap<String, PartitionCommitMetadata> = HashMap::new();
+        let commit_history = crate::raft::read_journal::<PartitionCommitRecord>(&commit_journal)?;
+        let mut journal_conflict = false;
+        for record in commit_history.iter().cloned() {
+            let key = partition_key(record.stream.as_str(), record.partition.0);
+            let candidate = PartitionCommitMetadata {
+                replica_set_generation: record.replica_set_generation,
+                high_watermark: record.high_watermark,
+                checksum: record.checksum,
+                leader_id: record.leader_id,
+                leader_epoch: record.leader_epoch,
+            };
+            if let Some(current) = commits.get(&key) {
+                if candidate.leader_epoch == current.leader_epoch
+                    && candidate.high_watermark == current.high_watermark
+                    && (candidate.checksum != current.checksum
+                        || candidate.replica_set_generation != current.replica_set_generation)
+                {
+                    journal_conflict = true;
+                }
+            }
+            if commits.get(&key).is_none_or(|current| {
+                candidate.leader_epoch > current.leader_epoch
+                    || (candidate.leader_epoch == current.leader_epoch
+                        && candidate.high_watermark > current.high_watermark)
+            }) {
+                commits.insert(key, candidate);
+            }
+        }
+        let mut store = Self {
+            logs,
+            records,
+            commits,
+            commit_journal,
+            commit_records: commit_history.len() as u64,
+            commit_bytes,
+            unsafe_commits: journal_conflict,
+        };
+        store.unsafe_commits = store.commits.iter().any(|(key, commit)| {
+            let Some((stream, partition)) = key.rsplit_once(':') else {
+                return true;
+            };
+            let Ok(partition) = partition.parse::<u32>() else {
+                return true;
+            };
+            let Some(record) = store
+                .records
+                .get(&(stream.to_string(), PartitionId(partition)))
+                .and_then(|records| records.get(&commit.high_watermark))
+            else {
+                return false;
+            };
+            store
+                .logs
+                .load_envelope(stream, PartitionId(partition), record.offset)
+                .ok()
+                .flatten()
+                .and_then(|envelope| {
+                    crate::partition_log::committed_envelope_checksum(&envelope).ok()
+                })
+                .is_some_and(|checksum| checksum != commit.checksum)
+        });
+        Ok(store)
     }
 
     pub(super) fn append(&mut self, request: &DataAppendRequest) -> Result<DataAppendResponse> {
@@ -119,6 +224,17 @@ impl ReplicaDataStore {
                 current_offset == Some(predecessor_offset),
                 "partition append has a gap or stale predecessor"
             );
+            if let Some(expected_checksum) = request.predecessor_checksum {
+                let predecessor = self
+                    .logs
+                    .load_envelope(&key.0, key.1, predecessor_offset)?
+                    .ok_or_else(|| BrokerError::msg("partition predecessor is unavailable"))?;
+                crate::broker_ensure!(
+                    crate::partition_log::committed_envelope_checksum(&predecessor)?
+                        == expected_checksum,
+                    "partition predecessor checksum mismatch"
+                );
+            }
         }
         let existing = self
             .records
@@ -180,6 +296,123 @@ impl ReplicaDataStore {
         })
     }
 
+    pub(super) fn commit(&mut self, request: &DataCommitRequest) -> Result<DataCommitResponse> {
+        let key = (request.stream.clone(), request.partition);
+        let record = self
+            .records
+            .get(&key)
+            .and_then(|records| records.get(&request.high_watermark))
+            .ok_or_else(|| BrokerError::msg("partition commit record is unavailable"))?;
+        let envelope = self
+            .logs
+            .load_envelope(&key.0, key.1, record.offset)?
+            .ok_or_else(|| BrokerError::msg("partition commit envelope is unavailable"))?;
+        crate::broker_ensure!(
+            crate::partition_log::committed_envelope_checksum(&envelope)? == request.checksum,
+            "partition commit checksum mismatch"
+        );
+        let metadata = PartitionCommitMetadata {
+            replica_set_generation: request.replica_set_generation,
+            high_watermark: request.high_watermark,
+            checksum: request.checksum,
+            leader_id: request.leader_id,
+            leader_epoch: request.leader_epoch,
+        };
+        let key_string = partition_key(key.0.as_str(), key.1.0);
+        if let Some(current) = self.commits.get(&key_string) {
+            crate::broker_ensure!(
+                request.leader_epoch >= current.leader_epoch,
+                "stale partition commit epoch"
+            );
+            crate::broker_ensure!(
+                request.replica_set_generation >= current.replica_set_generation,
+                "stale partition commit generation"
+            );
+            if request.leader_epoch == current.leader_epoch {
+                crate::broker_ensure!(
+                    request.high_watermark >= current.high_watermark,
+                    "partition commit watermark regressed"
+                );
+                if request.high_watermark == current.high_watermark {
+                    crate::broker_ensure!(
+                        request.checksum == current.checksum,
+                        "partition commit bytes conflict"
+                    );
+                    return Ok(DataCommitResponse {
+                        high_watermark: request.high_watermark,
+                        flushed: true,
+                    });
+                }
+            }
+            crate::broker_ensure!(
+                request.high_watermark == current.high_watermark.saturating_add(1),
+                "partition commit has a gap"
+            );
+        }
+        let appended_bytes = crate::raft::append_journal(
+            &self.commit_journal,
+            &PartitionCommitRecord {
+                stream: key.0,
+                partition: key.1,
+                replica_set_generation: request.replica_set_generation,
+                leader_id: request.leader_id,
+                leader_epoch: request.leader_epoch,
+                high_watermark: request.high_watermark,
+                checksum: request.checksum,
+            },
+        )?;
+        self.commits.insert(key_string, metadata);
+        self.commit_records = self.commit_records.saturating_add(1);
+        self.commit_bytes = self.commit_bytes.saturating_add(appended_bytes);
+        if self.commit_records >= COMMIT_CHECKPOINT_RECORDS
+            || self.commit_bytes >= COMMIT_CHECKPOINT_BYTES
+        {
+            let checkpoint = self
+                .commits
+                .iter()
+                .filter_map(|(key, commit)| {
+                    let (stream, partition) = key.rsplit_once(':')?;
+                    Some(PartitionCommitRecord {
+                        stream: stream.to_string(),
+                        partition: PartitionId(partition.parse().ok()?),
+                        replica_set_generation: commit.replica_set_generation,
+                        leader_id: commit.leader_id,
+                        leader_epoch: commit.leader_epoch,
+                        high_watermark: commit.high_watermark,
+                        checksum: commit.checksum,
+                    })
+                })
+                .collect::<Vec<_>>();
+            crate::raft::rewrite_journal(&self.commit_journal, &checkpoint)?;
+            self.commit_records = checkpoint.len() as u64;
+            self.commit_bytes = self
+                .commit_journal
+                .metadata()
+                .map(|meta| meta.len())
+                .unwrap_or_default();
+        }
+        Ok(DataCommitResponse {
+            high_watermark: request.high_watermark,
+            flushed: true,
+        })
+    }
+
+    pub(super) fn local_commits(
+        &self,
+    ) -> impl Iterator<Item = (&String, &PartitionCommitMetadata)> {
+        self.commits.iter()
+    }
+
+    pub(super) fn commit_metadata(
+        &self,
+        stream: &str,
+        partition: PartitionId,
+    ) -> Option<PartitionCommitMetadata> {
+        self.commits
+            .get(&partition_key(stream, partition.0))
+            .cloned()
+    }
+
     pub(super) fn committed_records(
         &self,
         metadata: &DurableState,
@@ -235,7 +468,10 @@ impl ReplicaDataStore {
     ) -> DataManifestResponse {
         let key = partition_key(&request.stream, request.partition.0);
         let assignment = metadata.partition_assignments.get(&key);
-        let commit = metadata.partition_commits.get(&key);
+        let commit = self
+            .commits
+            .get(&key)
+            .or_else(|| metadata.partition_commits.get(&key));
         let last_offset = self.progress(&DataProgressRequest {
             stream: request.stream.clone(),
             partition: request.partition,
@@ -293,6 +529,9 @@ impl ReplicaDataStore {
     }
 
     pub(super) fn has_committed_prefix(&self, metadata: &DurableState) -> bool {
+        if self.unsafe_commits {
+            return false;
+        }
         metadata.partition_commits.iter().all(|(key, commit)| {
             let Some((stream, partition)) = key.rsplit_once(':') else {
                 return false;
@@ -341,114 +580,3 @@ impl ReplicaDataStore {
 }
 
 pub(super) type SharedReplicaData = Arc<StdMutex<ReplicaDataStore>>;
-
-pub(super) async fn send_data_append(
-    addr: &str,
-    auth_token: String,
-    node_id: u64,
-    target: u64,
-    tls: Option<RaftTlsRuntime>,
-    request: DataAppendRequest,
-) -> Result<DataAppendResponse> {
-    let client = NetworkClient {
-        addr: addr.to_string(),
-        auth_token,
-        node_id,
-        target,
-        tls,
-        connection: Arc::new(tokio::sync::Mutex::new(None)),
-    };
-    match client
-        .request(RaftRequest::DataAppend(request))
-        .await
-        .map_err(|err| BrokerError::msg(err.to_string()))?
-    {
-        RaftResponse::DataAppend(response) => Ok(response),
-        RaftResponse::Error(message) => Err(BrokerError::msg(message)),
-        _ => Err(BrokerError::msg("unexpected partition replica response")),
-    }
-}
-
-pub(super) async fn send_data_append_on_client(
-    client: &NetworkClient,
-    request: DataAppendRequest,
-) -> Result<DataAppendResponse> {
-    match client
-        .request(RaftRequest::DataAppend(request))
-        .await
-        .map_err(|err| BrokerError::msg(err.to_string()))?
-    {
-        RaftResponse::DataAppend(response) => Ok(response),
-        RaftResponse::Error(message) => Err(BrokerError::msg(message)),
-        _ => Err(BrokerError::msg("unexpected partition replica response")),
-    }
-}
-
-pub(super) async fn send_data_progress(
-    addr: &str,
-    auth_token: String,
-    node_id: u64,
-    target: u64,
-    tls: Option<RaftTlsRuntime>,
-    request: DataProgressRequest,
-) -> Result<Option<u64>> {
-    let client = NetworkClient {
-        addr: addr.to_string(),
-        auth_token,
-        node_id,
-        target,
-        tls,
-        connection: Arc::new(tokio::sync::Mutex::new(None)),
-    };
-    match client
-        .request(RaftRequest::DataProgress(request))
-        .await
-        .map_err(|err| BrokerError::msg(err.to_string()))?
-    {
-        RaftResponse::DataProgress(progress) => Ok(progress),
-        RaftResponse::Error(message) => Err(BrokerError::msg(message)),
-        _ => Err(BrokerError::msg("unexpected partition progress response")),
-    }
-}
-
-pub(super) async fn send_data_progress_on_client(
-    client: &NetworkClient,
-    request: DataProgressRequest,
-) -> Result<Option<u64>> {
-    match client
-        .request(RaftRequest::DataProgress(request))
-        .await
-        .map_err(|err| BrokerError::msg(err.to_string()))?
-    {
-        RaftResponse::DataProgress(progress) => Ok(progress),
-        RaftResponse::Error(message) => Err(BrokerError::msg(message)),
-        _ => Err(BrokerError::msg("unexpected partition progress response")),
-    }
-}
-
-pub(super) async fn send_data_manifest(
-    addr: &str,
-    auth_token: String,
-    node_id: u64,
-    target: u64,
-    tls: Option<RaftTlsRuntime>,
-    request: DataManifestRequest,
-) -> Result<DataManifestResponse> {
-    let client = NetworkClient {
-        addr: addr.to_string(),
-        auth_token,
-        node_id,
-        target,
-        tls,
-        connection: Arc::new(tokio::sync::Mutex::new(None)),
-    };
-    match client
-        .request(RaftRequest::DataManifest(request))
-        .await
-        .map_err(|err| BrokerError::msg(err.to_string()))?
-    {
-        RaftResponse::DataManifest(response) => Ok(response),
-        RaftResponse::Error(message) => Err(BrokerError::msg(message)),
-        _ => Err(BrokerError::msg("unexpected partition manifest response")),
-    }
-}

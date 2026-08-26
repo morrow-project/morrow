@@ -1,4 +1,5 @@
 use super::*;
+use crate::stream::StreamDefinition;
 use openraft::CommittedLeaderId;
 use std::io::Write;
 
@@ -17,6 +18,86 @@ fn nodes() -> BTreeMap<u64, BasicNode> {
     [(1, BasicNode::new("127.0.0.1:5221"))]
         .into_iter()
         .collect()
+}
+
+fn commit_stream() -> StreamDefinition {
+    StreamDefinition {
+        name: crate::stream::StreamId::new("orders").unwrap(),
+        subjects: vec!["orders/**".into()],
+        partitions: 1,
+        partitioning: crate::stream::PartitioningPolicy {
+            strategy: crate::stream::PartitioningStrategy::Key,
+            fallback: crate::stream::PartitionFallback::Sticky,
+            epoch: 1,
+        },
+        storage: crate::stream::StoragePolicy::default(),
+        retention: crate::stream::RetentionPolicy::default(),
+    }
+}
+
+fn commit_envelope(offset: u64) -> crate::partition_log::MessageEnvelope {
+    crate::partition_log::MessageEnvelope {
+        namespace: "default".into(),
+        stream: crate::stream::StreamId::new("orders").unwrap(),
+        partition: crate::stream::PartitionId(0),
+        offset,
+        subject: "orders/created".into(),
+        key: None,
+        headers: Vec::new(),
+        timestamp_ms: offset,
+        reply_to: None,
+        schema_id: None,
+        payload: vec![offset as u8],
+        partitioning_epoch: 1,
+        leader_epoch: 1,
+        legacy_seq: offset,
+    }
+}
+
+#[test]
+fn partition_commit_journal_survives_reopen() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let definition = commit_stream();
+    let catalog = crate::stream::StreamCatalog::new(vec![definition]).unwrap();
+    let envelope = commit_envelope(0);
+    let checksum = crate::partition_log::committed_envelope_checksum(&envelope).unwrap();
+    let mut store = ReplicaDataStore::open(dir.path(), &catalog, 256).unwrap();
+    store
+        .append(&DataAppendRequest {
+            leader_id: 1,
+            leader_epoch: 1,
+            replica_set_generation: 1,
+            fsync: false,
+            committed_high_watermark: None,
+            predecessor_offset: None,
+            predecessor_checksum: None,
+            batch_digest: checksum,
+            durability: DurabilityBoundary::Memory,
+            envelope: envelope.clone(),
+        })
+        .unwrap();
+    store
+        .commit(&DataCommitRequest {
+            leader_id: 1,
+            leader_epoch: 1,
+            replica_set_generation: 1,
+            stream: "orders".into(),
+            partition: crate::stream::PartitionId(0),
+            high_watermark: 0,
+            checksum,
+            fsync: false,
+        })
+        .unwrap();
+    drop(store);
+
+    let reopened = ReplicaDataStore::open(dir.path(), &catalog, 256).unwrap();
+    assert_eq!(
+        reopened
+            .local_commits()
+            .next()
+            .map(|(_, commit)| commit.high_watermark),
+        Some(0)
+    );
 }
 
 #[test]

@@ -22,8 +22,10 @@ Partition replicas use authenticated data-plane RPCs on the cluster listener:
    each replica in parallel.
 4. A quorum append requires the configured majority to report the offset.
    Quorum-fsync additionally requires that majority to report a durable flush.
-5. The leader appends locally only after enough followers respond, then commits
-   the payload-free high-watermark through metadata consensus.
+5. The leader appends locally only after enough followers respond, then sends a
+   fenced partition-local commit notification to the required replicas. Each
+   replica persists the committed high-watermark in its checksummed
+   `commit-state.journal`; global metadata Raft is not proposed per message.
 6. Producer acknowledgements report the committed partition offset and leader
    epoch.
 
@@ -37,16 +39,16 @@ the metadata leader; the metadata model permits a later per-partition allocator.
 ## Failure and recovery rules
 
 - A broker accepts a partition append only while it is the current OpenRaft
-  leader and its local replica contains every metadata-committed high-watermark.
+  leader and its local replica contains every committed high-watermark.
   Otherwise it returns `not partition leader` or `no safe replica available`.
 - A stale leader epoch cannot commit metadata. Replica suffixes above the
   committed high-watermark may be truncated and rewritten; committed offsets
   remain immutable.
 - Lagging followers report their match position and receive the missing committed
   prefix before the next append.
-- Metadata quorum loss prevents the high-watermark commit. Data already sent to
-  replicas remains an invisible uncommitted suffix and is repaired on retry or
-  leadership change; it is never exposed as committed history.
+- Partition quorum loss prevents the local high-watermark commit. Data already
+  sent to replicas remains an invisible uncommitted suffix and is repaired on
+  retry or leadership change; it is never exposed as committed history.
 - A candidate missing the committed high-watermark is not safe and is not
   automatically promoted by the data plane. If OpenRaft elects such a node, the
   broker refuses partition writes until catch-up or operator recovery.

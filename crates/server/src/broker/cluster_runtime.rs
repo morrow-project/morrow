@@ -60,6 +60,16 @@ impl ClusterRuntime {
         }
     }
 
+    pub(super) fn local_committed_records(
+        &self,
+    ) -> Result<Vec<crate::partition_log::MessageEnvelope>> {
+        match self {
+            Self::Real(runtime) => runtime.local_committed_records(),
+            #[cfg(test)]
+            Self::Fake(_) => Ok(Vec::new()),
+        }
+    }
+
     pub(super) fn is_local_partition_replica(&self, stream: &str, partition: u32) -> bool {
         match self {
             Self::Real(runtime) => runtime.is_local_partition_replica(stream, partition),
