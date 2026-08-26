@@ -1,7 +1,7 @@
 use super::*;
 
 const SAMPLES: usize = 250;
-const HISTORY_LEVELS: &[usize] = &[0, 1_000, 10_000];
+const HISTORY_LEVELS: &[usize] = &[0, 1_000, 10_000, 100_000];
 
 #[tokio::test]
 #[ignore = "release-mode standalone durability baseline"]
@@ -223,4 +223,56 @@ async fn benchmark_cluster_durable_publish_with_slow_follower() {
         SAMPLES as f64 / elapsed.as_secs_f64(),
     );
     harness.shutdown().await;
+}
+
+#[tokio::test]
+#[ignore = "release-mode acknowledgement-level matrix benchmark"]
+async fn benchmark_cluster_publish_ack_level_matrix() {
+    let levels = [
+        client::protocol::AckLevel::Accepted,
+        client::protocol::AckLevel::Durable,
+        client::protocol::AckLevel::HighDurability,
+        client::protocol::AckLevel::ClusterDurable,
+    ];
+    for level in levels {
+        let harness = ClusterHarness::start_three().await;
+        let leader = harness.wait_for_leader().await;
+        let leader_node = harness
+            .nodes
+            .iter()
+            .find(|node| node.node_id == leader)
+            .unwrap();
+        let mut publisher = Client::connect(leader_node.client_addr, harness.max_payload)
+            .await
+            .unwrap();
+        publisher.read_info().await.unwrap();
+        publisher
+            .connect_durable("ack-level-benchmark", false, 5_000, 16)
+            .await
+            .unwrap();
+        let started = std::time::Instant::now();
+        let mut completed = 0;
+        for sample in 0..SAMPLES {
+            if publisher
+                .publish_with_qos(
+                    "orders/created",
+                    None,
+                    b"ack-level",
+                    level,
+                    &format!("ack-{level:?}-{sample}"),
+                )
+                .await
+                .is_err()
+            {
+                break;
+            }
+            completed += 1;
+        }
+        let elapsed = started.elapsed();
+        eprintln!(
+            "cluster_ack_level level={level:?} samples={completed} throughput={:.1}/s",
+            completed as f64 / elapsed.as_secs_f64(),
+        );
+        harness.shutdown().await;
+    }
 }
