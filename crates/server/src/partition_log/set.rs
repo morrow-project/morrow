@@ -34,6 +34,18 @@ impl PartitionLogSet {
         segment_bytes: u64,
         encryption: Option<std::sync::Arc<crate::encryption::KeyRing>>,
     ) -> Result<(Self, Vec<MessageEnvelope>)> {
+        Self::open_with_encryption_for_partitions(wal_dir, catalog, segment_bytes, encryption, None)
+    }
+
+    /// Open only the partitions assigned to this broker. An empty assignment
+    /// is valid and defers all partition-log recovery until placement is known.
+    pub(crate) fn open_with_encryption_for_partitions(
+        wal_dir: &Path,
+        catalog: &StreamCatalog,
+        segment_bytes: u64,
+        encryption: Option<std::sync::Arc<crate::encryption::KeyRing>>,
+        assigned: Option<&BTreeSet<(String, u32)>>,
+    ) -> Result<(Self, Vec<MessageEnvelope>)> {
         let root = wal_dir.join("streams");
         std::fs::create_dir_all(&root)
             .with_context(|| format!("creating stream data directory {}", root.display()))?;
@@ -43,6 +55,11 @@ impl PartitionLogSet {
             .iter()
             .flat_map(|stream| {
                 (0..stream.partitions)
+                    .filter(|partition| {
+                        assigned.is_none_or(|assigned| {
+                            assigned.contains(&(stream.name.as_str().to_string(), *partition))
+                        })
+                    })
                     .map(|partition| (stream.name.clone(), PartitionId(partition)))
             })
             .collect::<Vec<_>>();
