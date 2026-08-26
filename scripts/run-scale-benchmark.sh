@@ -90,22 +90,28 @@ case_index="$output_dir/cases.ndjson"
 started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 batch_records=${MORROW_DATA_APPEND_BATCH_RECORDS:-256}
 batch_bytes=${MORROW_DATA_APPEND_BATCH_BYTES:-8388608}
+metadata_cache_capacity=${MORROW_PARTITION_METADATA_CACHE_CAPACITY:-4096}
 case "$batch_records" in
   ''|*[!0-9]*) batch_records=256 ;;
 esac
 case "$batch_bytes" in
   ''|*[!0-9]*) batch_bytes=8388608 ;;
 esac
+case "$metadata_cache_capacity" in
+  ''|*[!0-9]*) metadata_cache_capacity=4096 ;;
+esac
 test "$batch_records" -ge 1 || batch_records=1
 test "$batch_records" -le 256 || batch_records=256
 test "$batch_bytes" -ge 1 || batch_bytes=1
 test "$batch_bytes" -le 8388608 || batch_bytes=8388608
+test "$metadata_cache_capacity" -ge 1 || metadata_cache_capacity=1
+test "$metadata_cache_capacity" -le 1000000 || metadata_cache_capacity=1000000
 hostname_value=$(hostname 2>/dev/null || true)
 os_name=$(uname -s 2>/dev/null || true)
 os_release=$(uname -r 2>/dev/null || true)
-printf '{"commit":"%s","server":"%s","clients":%s,"duration":"%s","payload_size":%s,"broker_counts":[%s],"topics":[%s],"partitions":[%s],"modes":"%s","ack_levels":"%s","deployment_profile":"%s","controller_voter_count":%s,"roles_share_process":%s,"batch_records":%s,"batch_bytes":%s,"started_at":"%s","hostname":"%s","os":"%s","kernel":"%s","cpu_cores":%s,"memory_bytes":%s,"cpu_model":"%s","cpu_hz":%s,"uname":"%s"}\n' \
+printf '{"commit":"%s","server":"%s","clients":%s,"duration":"%s","payload_size":%s,"broker_counts":[%s],"topics":[%s],"partitions":[%s],"modes":"%s","ack_levels":"%s","deployment_profile":"%s","controller_voter_count":%s,"roles_share_process":%s,"batch_records":%s,"batch_bytes":%s,"metadata_cache_capacity":%s,"started_at":"%s","hostname":"%s","os":"%s","kernel":"%s","cpu_cores":%s,"memory_bytes":%s,"cpu_model":"%s","cpu_hz":%s,"uname":"%s"}\n' \
   "$(git rev-parse HEAD)" "$server" "$clients" "$duration" "$payload_size" "$broker_counts" "$topics" "$partitions" \
-  "$modes" "$ack_levels" "$deployment_profile" "$controller_voters" "$roles_share_process" "$batch_records" "$batch_bytes" "$started_at" "$(json_escape "$hostname_value")" "$(json_escape "$os_name")" "$(json_escape "$os_release")" \
+  "$modes" "$ack_levels" "$deployment_profile" "$controller_voters" "$roles_share_process" "$batch_records" "$batch_bytes" "$metadata_cache_capacity" "$started_at" "$(json_escape "$hostname_value")" "$(json_escape "$os_name")" "$(json_escape "$os_release")" \
   "${cpu_cores:-null}" "${memory_bytes:-null}" "$(json_escape "$(cpu_model)")" "${cpu_hz:-null}" "$(json_escape "$(uname -a)")" >"$output_dir/manifest.json"
 old_ifs=$IFS
 IFS=,
@@ -119,8 +125,8 @@ for broker_count in $broker_counts; do
         curl -sSfL "$metrics_url" >"$case_dir/metrics.prom" || die "failed to capture metrics from $metrics_url"
         validate_topology_metrics "$case_dir/metrics.prom"
       fi
-      printf '{"broker_count":%s,"topics":%s,"partitions":%s,"deployment_profile":"%s","controller_voter_count":%s,"roles_share_process":%s,"batch_records":%s,"batch_bytes":%s,"modes":"%s","ack_levels":"%s","result_dir":"%s"}\n' \
-        "$broker_count" "$topic_count" "$partition_count" "$deployment_profile" "$controller_voters" "$roles_share_process" "$batch_records" "$batch_bytes" "$modes" "$ack_levels" \
+      printf '{"broker_count":%s,"topics":%s,"partitions":%s,"deployment_profile":"%s","controller_voter_count":%s,"roles_share_process":%s,"batch_records":%s,"batch_bytes":%s,"metadata_cache_capacity":%s,"modes":"%s","ack_levels":"%s","result_dir":"%s"}\n' \
+        "$broker_count" "$topic_count" "$partition_count" "$deployment_profile" "$controller_voters" "$roles_share_process" "$batch_records" "$batch_bytes" "$metadata_cache_capacity" "$modes" "$ack_levels" \
         "$(json_escape "$case_dir")" >> "$case_index"
     done
   done
