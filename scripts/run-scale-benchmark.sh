@@ -113,8 +113,8 @@ fi
 if test "$deployment_profile" = combined && test "$roles_share_process" = false; then
   die "combined deployments must set --roles-share-process true"
 fi
-if "$build"; then cargo build --release -p cli --locked; fi
-test -x target/release/morrow || die "target/release/morrow is not executable"
+if "$build"; then cargo build --release -p cli --bin morrow-cli --locked; fi
+test -x target/release/morrow-cli || die "target/release/morrow-cli is not executable"
 mkdir -p "$output_dir"
 case_index="$output_dir/cases.ndjson"
 : > "$case_index"
