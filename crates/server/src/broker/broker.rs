@@ -172,19 +172,33 @@ impl Morrow {
     }
 
     pub async fn activate_partition_expansion(&self, stream: &str) -> Result<(u32, u64)> {
-        let mut expansions = self.partition_expansions.lock().await;
-        let expansion = expansions
-            .get_mut(stream)
-            .ok_or_else(|| BrokerError::msg("unknown stream"))?;
-        let (current_partitions, _) = expansion.current();
-        let target_partitions = expansion
-            .pending()
-            .map(|plan| plan.to_partitions)
-            .ok_or_else(|| BrokerError::msg("partition expansion is not pending"))?;
+        let (current_partitions, target_partitions, pending_epoch) = {
+            let expansions = self.partition_expansions.lock().await;
+            let expansion = expansions
+                .get(stream)
+                .ok_or_else(|| BrokerError::msg("unknown stream"))?;
+            let (current_partitions, _) = expansion.current();
+            let pending = expansion
+                .pending()
+                .ok_or_else(|| BrokerError::msg("partition expansion is not pending"))?;
+            (current_partitions, pending.to_partitions, pending.epoch)
+        };
         for partition in current_partitions..target_partitions {
             self.partition_logs
                 .activate_partition(stream, crate::stream::PartitionId(partition))?;
         }
+
+        let mut expansions = self.partition_expansions.lock().await;
+        let expansion = expansions
+            .get_mut(stream)
+            .ok_or_else(|| BrokerError::msg("unknown stream"))?;
+        let pending = expansion
+            .pending()
+            .ok_or_else(|| BrokerError::msg("partition expansion is not pending"))?;
+        crate::broker_ensure!(
+            pending.to_partitions == target_partitions && pending.epoch == pending_epoch,
+            "partition expansion changed while activating"
+        );
         crate::broker_ensure!(
             expansion.activate(),
             "partition expansion is not fully prepared"
