@@ -95,6 +95,29 @@ impl PartitionLeaderCache {
             .get((value % u64::from(metadata.partitions)) as usize)
     }
 
+    /// Return the partition selected by the same key/sticky rules as `route`.
+    pub fn partition_for(
+        &self,
+        stream: &str,
+        subject: &str,
+        key: Option<&[u8]>,
+        sticky: u64,
+    ) -> Option<u32> {
+        let metadata = self.streams.get(stream)?;
+        let value = key
+            .map(stable_hash)
+            .or_else(|| match metadata.partitioning {
+                Partitioning::SubjectToken { token } => subject
+                    .split('/')
+                    .nth(token)
+                    .map(|part| stable_hash(part.as_bytes())),
+                Partitioning::Key => None,
+                Partitioning::Sticky => Some(sticky),
+            })
+            .unwrap_or_else(|| stable_hash(subject.as_bytes()));
+        Some((value % u64::from(metadata.partitions)) as u32)
+    }
+
     pub fn invalidate(&mut self, stream: &str, partitioning_epoch: u64) {
         if self
             .streams

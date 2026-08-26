@@ -30,6 +30,10 @@ fn cache_routes_keys_and_rejects_stale_metadata() {
         .route("orders", "orders.created", Some(b"key"), 0)
         .unwrap();
     assert!(route.address == "a" || route.address == "b");
+    assert_eq!(
+        cache.partition_for("orders", "orders.created", Some(b"key"), 0),
+        Some(route.partition)
+    );
     cache.invalidate("orders", 2);
     assert!(
         cache
