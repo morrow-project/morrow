@@ -408,6 +408,90 @@ impl Client {
         .await
     }
 
+    pub async fn publish_batch_with_qos_and_key(
+        &mut self,
+        requests: &[BatchPublishRequest<'_>],
+    ) -> Result<Vec<ProducerAck>> {
+        if requests.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut message_ids = HashSet::with_capacity(requests.len());
+        for request in requests {
+            validate_producer_msg_id(request.msg_id)?;
+            if !message_ids.insert(request.msg_id) {
+                return Err(ClientError::msg("batch publish message IDs must be unique"));
+            }
+            if request
+                .key
+                .is_some_and(|key| key.is_empty() || key.contains(['\r', '\n']))
+            {
+                return Err(ClientError::msg(
+                    "publish key must be non-empty and single-line",
+                ));
+            }
+            let mut headers = format!(
+                "MORROW/1.0\r\nMorrow-QoS: {}\r\nMorrow-Msg-Id: {}\r\n\r\n",
+                request.level as u8, request.msg_id
+            );
+            if let Some(key) = request.key {
+                headers.truncate(headers.len() - 2);
+                headers.push_str(&format!("Morrow-Key: {key}\r\n\r\n"));
+            }
+            let total_len = headers.len().saturating_add(request.payload.len());
+            if total_len > self.max_payload {
+                return Err(ClientError::msg("HPUB payload exceeds max payload"));
+            }
+            self.write_line(&format!(
+                "HPUB {} {} {}",
+                request.subject,
+                headers.len(),
+                total_len
+            ))
+            .await?;
+            self.stream
+                .get_mut()
+                .write_all(headers.as_bytes())
+                .await
+                .map_err(|err| ClientError::with_source("writing batch HPUB headers", err))?;
+            self.stream
+                .get_mut()
+                .write_all(request.payload)
+                .await
+                .map_err(|err| ClientError::with_source("writing batch HPUB payload", err))?;
+            self.stream
+                .get_mut()
+                .write_all(b"\r\n")
+                .await
+                .map_err(|err| ClientError::with_source("writing batch HPUB terminator", err))?;
+        }
+        let mut acknowledgements = HashMap::with_capacity(requests.len());
+        while acknowledgements.len() < requests.len() {
+            match self.next_frame().await? {
+                Some(ServerFrame::ProducerAck(ack)) => {
+                    acknowledgements.insert(ack.msg_id.clone(), ack);
+                }
+                Some(ServerFrame::Err(error)) => return Err(ClientError::msg(error)),
+                Some(ServerFrame::Message(_)) => {
+                    return Err(ClientError::msg("unexpected message during batch publish"));
+                }
+                Some(frame) => {
+                    return Err(ClientError::msg(format!(
+                        "unexpected frame in batch publish: {frame:?}"
+                    )));
+                }
+                None => return Err(ClientError::msg("connection closed before batch P-ACKs")),
+            }
+        }
+        requests
+            .iter()
+            .map(|request| {
+                acknowledgements
+                    .remove(request.msg_id)
+                    .ok_or_else(|| ClientError::msg("missing batch P-ACK"))
+            })
+            .collect()
+    }
+
     pub async fn publish_with_producer_sequence(
         &mut self,
         subject: &str,

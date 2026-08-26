@@ -1,5 +1,5 @@
 use crate::{SourceRecord, SourceTask};
-use client::{Client, protocol::AckLevel};
+use client::{BatchPublishRequest, Client, protocol::AckLevel};
 
 #[derive(Debug, Clone)]
 pub struct BrokerSourceConfig {
@@ -17,28 +17,42 @@ pub async fn run_source_batch<T: SourceTask + ?Sized>(
     }
     let records = source.poll(config.max_records, config.max_bytes)?;
     validate_batch(&records, config)?;
-    for record in &records {
-        let message_id = format!(
-            "source-{:016x}-{}",
-            stable_hash(record.source_offset.as_bytes()),
-            source.generation()
-        );
-        let ack = client
-            .publish_with_qos_and_key(
-                &record.subject,
-                None,
-                &record.payload,
-                AckLevel::HighDurability,
-                &message_id,
-                record.key.as_deref(),
+    let message_ids = records
+        .iter()
+        .map(|record| {
+            format!(
+                "source-{:016x}-{}",
+                stable_hash(record.source_offset.as_bytes()),
+                source.generation()
             )
-            .await
-            .map_err(display)?;
+        })
+        .collect::<Vec<_>>();
+    let requests = records
+        .iter()
+        .zip(&message_ids)
+        .map(|(record, message_id)| BatchPublishRequest {
+            subject: &record.subject,
+            payload: &record.payload,
+            level: AckLevel::HighDurability,
+            msg_id: message_id,
+            key: record.key.as_deref(),
+        })
+        .collect::<Vec<_>>();
+    let acknowledgements = client
+        .publish_batch_with_qos_and_key(&requests)
+        .await
+        .map_err(display)?;
+    for ack in acknowledgements {
         if !ack.retained || ack.offset.is_none() {
             return Err("broker did not commit source record to a durable stream".to_string());
         }
-        source.commit_source_offset(&record.source_offset)?;
     }
+    source.commit_source_offsets(
+        &records
+            .iter()
+            .map(|record| record.source_offset.clone())
+            .collect::<Vec<_>>(),
+    )?;
     Ok(records.len())
 }
 

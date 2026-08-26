@@ -5,8 +5,14 @@ use rustls::{
     pki_types::{CertificateDer, ServerName},
 };
 use std::{
-    collections::VecDeque, error::Error, fmt, net::SocketAddr, path::Path, path::PathBuf,
-    sync::Arc, time::Duration,
+    collections::{HashMap, HashSet, VecDeque},
+    error::Error,
+    fmt,
+    net::SocketAddr,
+    path::Path,
+    path::PathBuf,
+    sync::Arc,
+    time::Duration,
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader},
@@ -80,6 +86,14 @@ pub struct ProducerAck {
     pub partitioning_epoch: Option<u64>,
     pub leader_epoch: Option<u64>,
     pub ack_contract_version: Option<u16>,
+}
+
+pub struct BatchPublishRequest<'a> {
+    pub subject: &'a str,
+    pub payload: &'a [u8],
+    pub level: protocol::AckLevel,
+    pub msg_id: &'a str,
+    pub key: Option<&'a str>,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DurableMessage {
