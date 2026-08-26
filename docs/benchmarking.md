@@ -87,6 +87,7 @@ morrow-cli bench pub orders/bench --clients 8 --messages 100000 --mode batch --b
 | `--subjects N` | Uses the base subject for `1`; otherwise derives `base/0` through `base/N-1`. |
 | `--subject-order sequential\|random` | Cycles subjects or selects them with the seeded deterministic generator. |
 | `--key-cardinality N` | Generates `N` deterministic routing keys; zero sends no generated key. |
+| `--stream NAME --partition-metadata FILE` | Routes publish workloads directly to the partition leaders described by a version-1 `/partition-metadata` JSON response. The stream name must match the metadata; omit both flags to use the normal broker/proxy path. Direct routing currently applies to fire-and-forget and synchronous publish modes. |
 | `--seed N` | Controls deterministic subject and key selection and is recorded in results. |
 | `--warmup D` | Runs the workload before measurement; its operations and latency samples are excluded, while broker state remains. |
 | `--queue GROUP` | Uses queue/group delivery for subscribe, pub/sub, or service-response workloads. |

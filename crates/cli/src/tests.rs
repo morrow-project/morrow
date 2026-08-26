@@ -285,6 +285,33 @@ fn parses_advanced_publish_controls() {
 }
 
 #[test]
+fn parses_direct_partition_routing_controls() {
+    let args = Args::parse(
+        [
+            "morrow-cli",
+            "bench",
+            "pub",
+            "orders.created",
+            "--stream",
+            "orders",
+            "--partition-metadata",
+            "metadata.json",
+        ]
+        .into_iter()
+        .map(str::to_string),
+    )
+    .unwrap();
+    let Command::Bench { options, .. } = args.command else {
+        panic!("expected benchmark command");
+    };
+    assert_eq!(options.stream.as_deref(), Some("orders"));
+    assert_eq!(
+        options.partition_metadata,
+        Some(PathBuf::from("metadata.json"))
+    );
+}
+
+#[test]
 fn rejects_invalid_benchmark_combinations() {
     for arguments in [
         vec![
@@ -309,6 +336,7 @@ fn rejects_invalid_benchmark_combinations() {
         vec!["bench", "request", "service", "--mode", "sync"],
         vec!["bench", "pub", "orders", "--header", "Morrow-QoS:1"],
         vec!["bench", "pub", "orders", "--messages", "0"],
+        vec!["bench", "pub", "orders", "--stream", "orders"],
     ] {
         let result = Args::parse(
             std::iter::once("morrow-cli")

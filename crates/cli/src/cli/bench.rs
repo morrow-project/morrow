@@ -56,6 +56,8 @@ pub(super) struct ResultConfiguration {
     durable_id: Option<String>,
     timeout_ms: u64,
     max_bytes: usize,
+    stream: Option<String>,
+    partition_metadata: Option<String>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -306,6 +308,11 @@ fn build_result(
             durable_id: options.durable_id,
             timeout_ms: options.timeout_ms,
             max_bytes: options.max_bytes,
+            stream: options.stream,
+            partition_metadata: options
+                .partition_metadata
+                .as_ref()
+                .map(|path| path.display().to_string()),
         },
         aggregate,
         roles,

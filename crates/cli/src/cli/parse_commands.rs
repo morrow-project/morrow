@@ -271,6 +271,11 @@ fn parse_benchmark(mode: BenchmarkMode, mut args: impl Iterator<Item = String>) 
             "--stream is required when --partition-metadata is set",
         ));
     }
+    if stream.is_some() && partition_metadata.is_none() {
+        return Err(CliError::msg(
+            "--partition-metadata is required when --stream is set",
+        ));
+    }
     if partition_metadata.is_some()
         && matches!(publish_mode, PublishMode::Async | PublishMode::Batch)
     {
