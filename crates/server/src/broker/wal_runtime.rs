@@ -479,10 +479,42 @@ impl WalRuntime {
 }
 
 fn wal_worker(mut wal: Wal, receiver: mpsc::Receiver<WalCommand>) {
-    while let Ok(command) = receiver.recv() {
+    let mut pending = None;
+    loop {
+        let command = match pending.take() {
+            Some(command) => command,
+            None => match receiver.recv() {
+                Ok(command) => command,
+                Err(_) => break,
+            },
+        };
         match command {
             WalCommand::PartitionAppend(record, response) => {
-                let _ = response.send(wal.append_partition_append(&record));
+                let mut records = vec![record];
+                let mut responses = vec![response];
+                while records.len() < 256 {
+                    match receiver.try_recv() {
+                        Ok(WalCommand::PartitionAppend(record, response)) => {
+                            records.push(record);
+                            responses.push(response);
+                        }
+                        Ok(command) => {
+                            pending = Some(command);
+                            break;
+                        }
+                        Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => break,
+                    }
+                }
+                let result = records
+                    .iter()
+                    .try_for_each(|record| wal.append_partition_append(record));
+                for response in responses {
+                    let outcome = match &result {
+                        Ok(()) => Ok(()),
+                        Err(error) => Err(BrokerError::msg(error.to_string())),
+                    };
+                    let _ = response.send(outcome);
+                }
             }
             WalCommand::PartitionAppendBatch(records, response) => {
                 let result = records
