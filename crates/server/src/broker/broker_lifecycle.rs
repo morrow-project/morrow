@@ -1446,6 +1446,20 @@ impl Morrow {
             .sum::<usize>();
         let audit = self.audit_status();
         let mut metrics = String::new();
+        metrics
+            .push_str("# HELP morrow_controller_voters Configured metadata controller voters.\n");
+        metrics.push_str("# TYPE morrow_controller_voters gauge\n");
+        metrics.push_str(&format!(
+            "morrow_controller_voters {}\n",
+            cluster.controller_voters.len()
+        ));
+        metrics
+            .push_str("# HELP morrow_node_role Current process role (one bounded role label).\n");
+        metrics.push_str("# TYPE morrow_node_role gauge\n");
+        metrics.push_str(&format!(
+            "morrow_node_role{{role=\"{}\"}} 1\n",
+            cluster.node_role
+        ));
         metrics.push_str("# HELP morrow_connections Current client connections.\n");
         metrics.push_str("# TYPE morrow_connections gauge\n");
         metrics.push_str(&format!("morrow_connections {connections}\n"));

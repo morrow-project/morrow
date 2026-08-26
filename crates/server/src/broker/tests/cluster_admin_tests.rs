@@ -281,6 +281,8 @@ async fn http_metrics_endpoint_is_authenticated_and_bounded() {
     assert!(response.contains("morrow_configured_partitions 3\n"));
     assert!(response.contains("morrow_work_compaction_rejections_total 0\n"));
     assert!(response.contains("morrow_cluster_partitions 0\n"));
+    assert!(response.contains("morrow_controller_voters 0\n"));
+    assert!(response.contains("morrow_node_role{role=\"standalone\"} 1\n"));
     assert!(response.contains("morrow_cluster_ready 1\n"));
     assert!(response.contains("morrow_connectors_connected 0\n"));
     assert!(!response.contains("subject="));

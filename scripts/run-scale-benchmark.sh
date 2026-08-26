@@ -34,6 +34,14 @@ cpu_hz() {
 json_escape() {
   printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
 }
+validate_topology_metrics() {
+  metrics_file=$1
+  expected_role=broker
+  test "$deployment_profile" = combined && expected_role=combined
+  actual_voters=$(awk '/^morrow_controller_voters / { print $2; exit }' "$metrics_file")
+  test "$actual_voters" = "$controller_voters" || die "topology metrics report $actual_voters controller voters; expected $controller_voters"
+  grep -Fq "morrow_node_role{role=\"$expected_role\"} 1" "$metrics_file" || die "topology metrics do not identify the endpoint as role $expected_role"
+}
 server=; client_config=; broker_counts=1,3,5; topics=1,10,100; partitions=1,4,16
 clients=5; duration=10s; payload_size=128
 deployment_profile=combined; controller_voters=3; roles_share_process=true
@@ -97,6 +105,7 @@ for broker_count in $broker_counts; do
       scripts/run-publish-benchmark-matrix.sh --topology external --client-config "$client_config" --server "$server" --clients "$clients" --duration "$duration" --payload-size "$payload_size" --subjects "$topic_count" --partitions "$partition_count" --modes "$modes" --ack-levels "$ack_levels" --output-dir "$case_dir" --quiet
       if test -n "$metrics_url"; then
         curl -sSfL "$metrics_url" >"$case_dir/metrics.prom" || die "failed to capture metrics from $metrics_url"
+        validate_topology_metrics "$case_dir/metrics.prom"
       fi
       printf '{"broker_count":%s,"topics":%s,"partitions":%s,"deployment_profile":"%s","controller_voter_count":%s,"roles_share_process":%s,"modes":"%s","ack_levels":"%s","result_dir":"%s"}\n' \
         "$broker_count" "$topic_count" "$partition_count" "$deployment_profile" "$controller_voters" "$roles_share_process" "$modes" "$ack_levels" \
