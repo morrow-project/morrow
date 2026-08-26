@@ -135,6 +135,32 @@ async fn parses_application_headers_and_partition_key() {
 }
 
 #[tokio::test]
+async fn preserves_partitioning_epoch_for_routed_publishers() {
+    let headers = "MORROW/1.0\r\nMorrow-Partitioning-Epoch: 7\r\n\r\n";
+    let frame = format!(
+        "HPUB orders/created {} {}\r\n{headers}hello\r\n",
+        headers.len(),
+        headers.len() + 5
+    );
+    let mut reader = BufReader::new(frame.as_bytes());
+    let command = read_command(&mut reader, 1024, 8192)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        command,
+        Command::Pub {
+            subject: "orders/created".into(),
+            reply_to: None,
+            headers: vec![("Morrow-Partitioning-Epoch".into(), "7".into())],
+            key: None,
+            payload: b"hello".to_vec(),
+            ack: None,
+        }
+    );
+}
+
+#[tokio::test]
 async fn parses_all_qos_levels() {
     for (raw, level) in [
         ("0", AckLevel::Accepted),

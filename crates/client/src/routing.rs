@@ -117,18 +117,19 @@ impl RoutedClient {
         key: Option<&str>,
         headers: &[(String, String)],
     ) -> super::error::Result<()> {
-        let address = self.route_address(stream, subject, key);
+        let (address, epoch) = self.route_target(stream, subject, key);
+        let headers = routed_headers(headers, epoch);
         let mut client = self.take_client(address).await?;
         let result = match key {
             Some(key) => {
                 client
-                    .publish_with_key_and_headers(subject, None, payload, key, headers)
+                    .publish_with_key_and_headers(subject, None, payload, key, &headers)
                     .await
             }
             None if headers.is_empty() => client.publish(subject, payload).await,
             None => {
                 client
-                    .publish_with_headers(subject, None, payload, headers)
+                    .publish_with_headers(subject, None, payload, &headers)
                     .await
             }
         };
@@ -169,9 +170,10 @@ impl RoutedClient {
         key: Option<&str>,
         headers: &[(String, String)],
     ) -> super::error::Result<ProducerAck> {
-        let address = self.route_address(stream, subject, key);
+        let (address, epoch) = self.route_target(stream, subject, key);
+        let headers = routed_headers(headers, epoch);
         let result = self
-            .publish_qos_once(address, subject, payload, level, msg_id, key, headers)
+            .publish_qos_once(address, subject, payload, level, msg_id, key, &headers)
             .await;
         match result {
             Ok(ack) => Ok(ack),
@@ -183,7 +185,8 @@ impl RoutedClient {
                 // not have this retry behavior.
                 self.clients.remove(&address);
                 self.cache.invalidate(stream, u64::MAX);
-                let retry_address = self.route_address(stream, subject, key);
+                let (retry_address, retry_epoch) = self.route_target(stream, subject, key);
+                let retry_headers = routed_headers(headers, retry_epoch);
                 self.publish_qos_once(
                     retry_address,
                     subject,
@@ -191,7 +194,7 @@ impl RoutedClient {
                     level,
                     msg_id,
                     key,
-                    headers,
+                    &retry_headers,
                 )
                     .await
                     .map_err(|retry_error| {
@@ -222,9 +225,10 @@ impl RoutedClient {
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<Vec<u8>, String>>,
     {
-        let address = self.route_address(stream, subject, key);
+        let (address, epoch) = self.route_target(stream, subject, key);
+        let headers = routed_headers(headers, epoch);
         match self
-            .publish_qos_once(address, subject, payload, level, msg_id, key, headers)
+            .publish_qos_once(address, subject, payload, level, msg_id, key, &headers)
             .await
         {
             Ok(ack) => Ok(ack),
@@ -240,7 +244,8 @@ impl RoutedClient {
                         "publish failed and refreshed metadata was invalid: {first_error}; metadata: {error}"
                     ))
                 })?;
-                let retry_address = self.route_address(stream, subject, key);
+                let (retry_address, retry_epoch) = self.route_target(stream, subject, key);
+                let retry_headers = routed_headers(headers, retry_epoch);
                 self.publish_qos_once(
                     retry_address,
                     subject,
@@ -248,7 +253,7 @@ impl RoutedClient {
                     level,
                     msg_id,
                     key,
-                    headers,
+                    &retry_headers,
                 )
                 .await
                 .map_err(|retry_error| {
@@ -280,13 +285,25 @@ impl RoutedClient {
         result
     }
 
-    fn route_address(&mut self, stream: &str, subject: &str, key: Option<&str>) -> SocketAddr {
+    fn route_target(
+        &mut self,
+        stream: &str,
+        subject: &str,
+        key: Option<&str>,
+    ) -> (SocketAddr, Option<u64>) {
         let sticky = self.sticky;
         self.sticky = self.sticky.wrapping_add(1);
-        self.cache
+        let leader = self
+            .cache
             .route(stream, subject, key.map(str::as_bytes), sticky)
-            .and_then(|leader| leader.address.parse().ok())
-            .unwrap_or(self.options.addr)
+            .cloned();
+        (
+            leader
+                .as_ref()
+                .and_then(|leader| leader.address.parse().ok())
+                .unwrap_or(self.options.addr),
+            leader.map(|leader| leader.partitioning_epoch),
+        )
     }
 
     async fn take_client(&mut self, address: SocketAddr) -> super::error::Result<Client> {
@@ -303,6 +320,18 @@ impl RoutedClient {
             self.clients.insert(address, client);
         }
     }
+}
+
+fn routed_headers(headers: &[(String, String)], epoch: Option<u64>) -> Vec<(String, String)> {
+    let mut routed = headers
+        .iter()
+        .filter(|(name, _)| !name.eq_ignore_ascii_case("Morrow-Partitioning-Epoch"))
+        .cloned()
+        .collect::<Vec<_>>();
+    if let Some(epoch) = epoch {
+        routed.push(("Morrow-Partitioning-Epoch".to_string(), epoch.to_string()));
+    }
+    routed
 }
 
 impl PartitionLeaderCache {
