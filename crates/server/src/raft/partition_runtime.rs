@@ -4,6 +4,15 @@ const PARTITION_INGRESS_BATCH_RECORDS: usize = 32;
 const PARTITION_INGRESS_BATCH_BYTES: usize = 1024 * 1024;
 const PARTITION_INGRESS_BATCH_DELAY_MS: u64 = 2;
 const MAX_PARTITION_INGRESS_QUEUES: usize = 4096;
+const MAX_CONFIGURED_PARTITION_INGRESS_QUEUES: usize = 65_536;
+
+fn partition_ingress_queue_limit() -> usize {
+    std::env::var("MORROW_PARTITION_INGRESS_QUEUE_LIMIT")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(MAX_PARTITION_INGRESS_QUEUES)
+        .clamp(1, MAX_CONFIGURED_PARTITION_INGRESS_QUEUES)
+}
 
 pub(super) struct PartitionIngressItem {
     envelope: crate::partition_log::MessageEnvelope,
@@ -33,7 +42,7 @@ impl RaftRuntime {
                 sender.clone()
             } else {
                 crate::broker_ensure!(
-                    queues.len() < MAX_PARTITION_INGRESS_QUEUES,
+                    queues.len() < partition_ingress_queue_limit(),
                     "partition ingress queue budget exhausted"
                 );
                 let (sender, receiver) = tokio::sync::mpsc::channel(1024);
