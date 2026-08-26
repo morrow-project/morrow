@@ -95,6 +95,15 @@ pub struct BatchPublishRequest<'a> {
     pub msg_id: &'a str,
     pub key: Option<&'a str>,
 }
+
+pub struct BatchPublishRequestWithHeaders<'a> {
+    pub subject: &'a str,
+    pub payload: &'a [u8],
+    pub level: protocol::AckLevel,
+    pub msg_id: &'a str,
+    pub key: Option<&'a str>,
+    pub headers: &'a [(String, String)],
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DurableMessage {
     pub consumer: String,
@@ -167,6 +176,8 @@ mod client;
 mod frame_parser;
 #[path = "client/helpers.rs"]
 mod helpers;
+#[path = "client/publish.rs"]
+mod publish;
 #[path = "client/pull.rs"]
 mod pull;
 use self::{frame_parser::*, helpers::*};

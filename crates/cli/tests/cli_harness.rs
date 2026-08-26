@@ -23,6 +23,9 @@ const CLI_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 const SUBSCRIPTION_READY_TIMEOUT: Duration = Duration::from_secs(10);
 static CLI_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+#[path = "cli_harness/benchmark_tests.rs"]
+mod benchmark_tests;
+
 #[tokio::test]
 async fn cli_ping_against_server() {
     let _guard = CLI_TEST_LOCK.lock().await;
@@ -33,41 +36,6 @@ async fn cli_ping_against_server() {
 
     assert!(output.status.success(), "{}", stderr(&output));
     assert_eq!(stdout(&output), "PONG\n");
-    harness.shutdown().await;
-}
-
-#[tokio::test]
-async fn cli_bench_pubsub_reports_json_results() {
-    let _guard = CLI_TEST_LOCK.lock().await;
-    let harness = Harness::start().await;
-    let output = run_cli([
-        "--server",
-        &harness.addr.to_string(),
-        "bench",
-        "pubsub",
-        "orders/bench",
-        "--messages",
-        "20",
-        "--payload-size",
-        "64",
-        "--publishers",
-        "2",
-        "--subscribers",
-        "2",
-        "--ack-level",
-        "durable",
-        "--json",
-    ])
-    .await;
-    assert!(output.status.success(), "{}", stderr(&output));
-    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(result["messages_published"], 20);
-    assert_eq!(result["messages_received"], 40);
-    assert_eq!(result["duplicates"], 0);
-    assert_eq!(result["network_mode"], "local");
-    assert_eq!(result["requested_ack_level"], "durable");
-    assert_eq!(result["observed_ack_level"], "durable");
-    assert_eq!(result["ack_contract_version"], 1);
     harness.shutdown().await;
 }
 
@@ -441,6 +409,12 @@ async fn admin_subscriptions(addr: SocketAddr) -> Option<serde_json::Value> {
 
 async fn run_cli<const N: usize>(args: [&str; N]) -> Output {
     let args = args.map(str::to_string);
+    tokio::task::spawn_blocking(move || Command::new(cli_bin()).args(args).output().unwrap())
+        .await
+        .unwrap()
+}
+
+async fn run_cli_args(args: Vec<String>) -> Output {
     tokio::task::spawn_blocking(move || Command::new(cli_bin()).args(args).output().unwrap())
         .await
         .unwrap()

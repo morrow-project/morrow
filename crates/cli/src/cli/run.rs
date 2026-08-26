@@ -128,40 +128,22 @@ pub(super) async fn run_command(config: &CliConfig, command: Command) -> Result<
                 }
             }
         }
-        Command::BenchPubSub {
-            subject,
-            messages,
-            duration_ms,
-            payload_size,
-            publishers,
-            subscribers,
-            concurrency,
-            ack,
-            ack_level,
-            durable_id,
-            json,
+        Command::Bench {
+            mode,
+            target,
+            options,
         } => {
             if !config.server.ip().is_loopback() && !config.has_transport_security() {
                 eprintln!(
                     "warning: benchmark is using a remote plaintext connection; configure TLS and authentication for production use"
                 );
             }
-            let result = bench::run_pubsub(
-                config.clone(),
-                bench::PubSubOptions {
-                    subject,
-                    messages,
-                    duration_ms,
-                    payload_size,
-                    publishers,
-                    subscribers,
-                    concurrency,
-                    ack,
-                    ack_level,
-                    durable_id,
-                },
-            )
-            .await?;
+            let json = options.json;
+            let csv = options.csv.clone();
+            let result = bench::run_benchmark(config.clone(), mode, target, options).await?;
+            if let Some(path) = csv {
+                result.write_csv(&path)?;
+            }
             if json {
                 println!(
                     "{}",
@@ -192,4 +174,23 @@ pub(super) async fn expect_ok(client: &mut Client) -> Result<()> {
             None => return Err(CliError::msg("connection closed before +OK")),
         }
     }
+}
+
+async fn read_stdin_line() -> Result<String> {
+    tokio::task::spawn_blocking(|| {
+        let mut line = String::new();
+        let read = std::io::stdin()
+            .lock()
+            .read_line(&mut line)
+            .map_err(|err| CliError::with_source("reading response from stdin", err))?;
+        if read == 0 {
+            return Err(CliError::msg("stdin closed before response was provided"));
+        }
+        while line.ends_with('\n') || line.ends_with('\r') {
+            line.pop();
+        }
+        Ok(line)
+    })
+    .await
+    .map_err(|err| CliError::with_source("joining stdin reader task", err))?
 }

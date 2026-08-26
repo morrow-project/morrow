@@ -42,19 +42,70 @@ pub enum Command {
         ack: bool,
         max_messages: Option<usize>,
     },
-    BenchPubSub {
-        subject: String,
-        messages: Option<usize>,
-        duration_ms: Option<u64>,
-        payload_size: usize,
-        publishers: usize,
-        subscribers: usize,
-        concurrency: usize,
-        ack: bool,
-        ack_level: Option<AckLevel>,
-        durable_id: Option<String>,
-        json: bool,
+    Bench {
+        mode: BenchmarkMode,
+        target: String,
+        options: BenchmarkOptions,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BenchmarkMode {
+    Pub,
+    Sub,
+    PubSub,
+    Request,
+    Serve,
+    Consume,
+    Fetch,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PublishMode {
+    FireAndForget,
+    Sync,
+    Async,
+    Batch,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SubjectOrder {
+    Sequential,
+    Random,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BenchmarkOptions {
+    pub messages: Option<usize>,
+    pub duration_ms: Option<u64>,
+    pub clients: usize,
+    pub publishers: usize,
+    pub subscribers: usize,
+    pub concurrency: usize,
+    pub throughput: u64,
+    pub payload_size: usize,
+    pub payload_file: Option<PathBuf>,
+    pub headers: Vec<(String, String)>,
+    pub publish_mode: PublishMode,
+    pub ack_level: Option<AckLevel>,
+    pub max_in_flight: usize,
+    pub batch_size: usize,
+    pub subjects: usize,
+    pub subject_order: SubjectOrder,
+    pub key_cardinality: usize,
+    pub sleep_ms: u64,
+    pub warmup_ms: u64,
+    pub seed: u64,
+    pub queue: Option<String>,
+    pub ack: bool,
+    pub durable_id: Option<String>,
+    pub timeout_ms: u64,
+    pub max_bytes: usize,
+    pub json: bool,
+    pub csv: Option<PathBuf>,
 }
 #[derive(Debug, Clone)]
 pub struct Args {
@@ -101,7 +152,9 @@ mod error;
 mod parse_commands;
 #[path = "cli/run.rs"]
 mod run;
-use self::{parse_commands::*, run::Result};
+#[path = "cli/usage.rs"]
+mod usage;
+use self::{parse_commands::*, run::Result, usage::usage};
 pub use run::{CliError, run};
 
 #[cfg(test)]
