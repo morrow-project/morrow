@@ -19,14 +19,8 @@ pub struct RaftRuntime {
     pub(super) quotas: Arc<crate::quota::QuotaRuntime>,
     pub(super) data_clients: Arc<tokio::sync::Mutex<HashMap<u64, NetworkClient>>>,
     pub(super) work_scheduler: Arc<tokio::sync::Mutex<crate::work_scheduler::WorkScheduler>>,
-    pub(super) partition_ingress_queues: Arc<
-        tokio::sync::Mutex<
-            HashMap<
-                String,
-                tokio::sync::mpsc::Sender<super::partition_runtime::PartitionIngressItem>,
-            >,
-        >,
-    >,
+    pub(super) partition_ingress_queues:
+        Arc<tokio::sync::Mutex<HashMap<String, super::partition_runtime::PartitionIngressQueue>>>,
 }
 #[derive(Debug, Clone)]
 pub struct ClusterNode {

@@ -8,6 +8,8 @@ const MAX_PARTITION_INGRESS_BATCH_BYTES: usize = 8 * 1024 * 1024;
 const MAX_PARTITION_INGRESS_BATCH_DELAY_MS: u64 = 100;
 const MAX_PARTITION_INGRESS_QUEUES: usize = 4096;
 const MAX_CONFIGURED_PARTITION_INGRESS_QUEUES: usize = 65_536;
+const PARTITION_INGRESS_QUEUE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_PARTITION_INGRESS_QUEUE_BYTES: usize = 256 * 1024 * 1024;
 
 fn partition_ingress_queue_limit() -> usize {
     std::env::var("MORROW_PARTITION_INGRESS_QUEUE_LIMIT")
@@ -41,11 +43,25 @@ fn partition_ingress_batch_delay_ms() -> u64 {
         .clamp(1, MAX_PARTITION_INGRESS_BATCH_DELAY_MS)
 }
 
+fn partition_ingress_queue_bytes() -> usize {
+    std::env::var("MORROW_PARTITION_INGRESS_QUEUE_BYTES")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(PARTITION_INGRESS_QUEUE_BYTES)
+        .clamp(1, MAX_PARTITION_INGRESS_QUEUE_BYTES)
+}
+
+pub(super) struct PartitionIngressQueue {
+    sender: tokio::sync::mpsc::Sender<PartitionIngressItem>,
+    bytes: Arc<tokio::sync::Semaphore>,
+}
+
 pub(super) struct PartitionIngressItem {
     envelope: crate::partition_log::MessageEnvelope,
     fsync: bool,
     cluster_durable: bool,
     response: tokio::sync::oneshot::Sender<Result<crate::partition_log::MessageEnvelope>>,
+    _byte_permit: tokio::sync::OwnedSemaphorePermit,
 }
 
 impl RaftRuntime {
@@ -57,31 +73,56 @@ impl RaftRuntime {
     ) -> Result<crate::partition_log::MessageEnvelope> {
         let key = partition_key(envelope.stream.as_str(), envelope.partition.0);
         let (response, receiver) = tokio::sync::oneshot::channel();
-        let item = PartitionIngressItem {
-            envelope,
-            fsync,
-            cluster_durable,
-            response,
-        };
+        let envelope_bytes = data_append_envelope_bytes(&envelope);
+        crate::broker_ensure!(
+            envelope_bytes <= partition_ingress_queue_bytes(),
+            "partition ingress envelope exceeds byte budget"
+        );
+        let permits = u32::try_from(envelope_bytes)
+            .map_err(|_| BrokerError::msg("partition ingress envelope is too large"))?;
         let sender = {
             let mut queues = self.partition_ingress_queues.lock().await;
-            if let Some(sender) = queues.get(&key) {
-                sender.clone()
+            if let Some(queue) = queues.get(&key) {
+                PartitionIngressQueue {
+                    sender: queue.sender.clone(),
+                    bytes: queue.bytes.clone(),
+                }
             } else {
                 crate::broker_ensure!(
                     queues.len() < partition_ingress_queue_limit(),
                     "partition ingress queue budget exhausted"
                 );
                 let (sender, receiver) = tokio::sync::mpsc::channel(1024);
-                queues.insert(key.clone(), sender.clone());
+                let bytes = Arc::new(tokio::sync::Semaphore::new(partition_ingress_queue_bytes()));
+                queues.insert(
+                    key.clone(),
+                    PartitionIngressQueue {
+                        sender: sender.clone(),
+                        bytes: bytes.clone(),
+                    },
+                );
                 let runtime = self.clone();
                 tokio::spawn(async move {
                     run_partition_ingress_queue(runtime, key, receiver).await;
                 });
-                sender
+                PartitionIngressQueue { sender, bytes }
             }
         };
+        let byte_permit = sender
+            .bytes
+            .clone()
+            .acquire_many_owned(permits.max(1))
+            .await
+            .map_err(|_| BrokerError::msg("partition ingress byte budget unavailable"))?;
+        let item = PartitionIngressItem {
+            envelope,
+            fsync,
+            cluster_durable,
+            response,
+            _byte_permit: byte_permit,
+        };
         sender
+            .sender
             .send(item)
             .await
             .map_err(|_| BrokerError::msg("partition ingress queue is unavailable"))?;

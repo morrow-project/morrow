@@ -31,4 +31,6 @@ queues receive explicit backpressure instead of allocating unbounded runtime
 state. `MORROW_PARTITION_INGRESS_BATCH_RECORDS` (default 32, maximum 256),
 `MORROW_PARTITION_INGRESS_BATCH_BYTES` (default 1 MiB, maximum 8 MiB), and
 `MORROW_PARTITION_INGRESS_BATCH_DELAY_MS` (default 2 ms, maximum 100 ms) tune
-coalescing within those hard bounds.
+coalescing within those hard bounds. `MORROW_PARTITION_INGRESS_QUEUE_BYTES`
+limits queued envelope memory per partition (default 64 MiB, hard maximum 256
+MiB); a saturated byte budget returns explicit backpressure.
