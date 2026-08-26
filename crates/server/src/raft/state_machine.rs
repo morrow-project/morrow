@@ -17,6 +17,7 @@ pub(crate) enum DeltaBatch {
 #[derive(Clone)]
 pub struct StateMachineStore {
     path: PathBuf,
+    metadata_path: PathBuf,
     snapshot_path: PathBuf,
     inner: Arc<Mutex<StateMachineData>>,
     deltas: Arc<Mutex<VecDeque<CommittedDelta>>>,
@@ -56,6 +57,12 @@ impl StateMachineStore {
         let mut data = StateMachineData {
             state: DurableState::new(nodes),
             snapshot: None,
+        };
+        let metadata_path = path.with_extension("controller-metadata.json");
+        let persisted_metadata = if metadata_path.exists() {
+            read_json::<MetadataSnapshot>(&metadata_path)?
+        } else {
+            None
         };
         if snapshot_path.exists() {
             let snapshot = read_json::<StoredSnapshot>(&snapshot_path)?.expect("snapshot exists");
@@ -104,11 +111,12 @@ impl StateMachineStore {
             .map_or(0, |log_id| log_id.index.saturating_add(1));
         Ok(Self {
             path,
+            metadata_path,
             snapshot_path,
             inner: Arc::new(Mutex::new(data)),
             deltas: Arc::new(Mutex::new(VecDeque::new())),
             applied_index: Arc::new(AtomicU64::new(applied_index)),
-            metadata_override: Arc::new(Mutex::new(None)),
+            metadata_override: Arc::new(Mutex::new(persisted_metadata)),
         })
     }
 
@@ -125,6 +133,9 @@ impl StateMachineStore {
     }
 
     pub(crate) fn install_metadata(&self, metadata: MetadataSnapshot) {
+        if let Err(error) = write_json_atomically(&self.metadata_path, &metadata) {
+            tracing::warn!(?error, "persisting controller metadata snapshot failed");
+        }
         *self.metadata_override.lock().unwrap() = Some(metadata);
     }
 
