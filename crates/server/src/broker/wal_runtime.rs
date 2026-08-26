@@ -88,16 +88,46 @@ impl WalRuntime {
         self.request(|response| WalCommand::PartitionAppend(record.clone(), response))
     }
 
+    /// Async callers use these adapters so bounded queue backpressure and WAL
+    /// response waits never block a Tokio worker. The synchronous methods are
+    /// retained for startup/recovery code that is not running on an async
+    /// executor.
+    pub(super) async fn append_partition_append_async(
+        &self,
+        record: PartitionAppendRecord,
+    ) -> Result<()> {
+        self.request_async(move |response| WalCommand::PartitionAppend(record, response))
+            .await
+    }
+
     pub(super) fn append_consumer_upsert(&self, record: &ConsumerRecord) -> Result<()> {
         self.request(|response| WalCommand::ConsumerUpsert(record.clone(), response))
+    }
+
+    pub(super) async fn append_consumer_upsert_async(&self, record: ConsumerRecord) -> Result<()> {
+        self.request_async(move |response| WalCommand::ConsumerUpsert(record, response))
+            .await
     }
 
     pub(super) fn append_consumer_cursor(&self, record: &ConsumerCursorRecord) -> Result<()> {
         self.request(|response| WalCommand::ConsumerCursor(record.clone(), response))
     }
 
+    pub(super) async fn append_consumer_cursor_async(
+        &self,
+        record: ConsumerCursorRecord,
+    ) -> Result<()> {
+        self.request_async(move |response| WalCommand::ConsumerCursor(record, response))
+            .await
+    }
+
     pub(super) fn append_consumer_delete(&self, consumer_id: &str) -> Result<()> {
         self.request(|response| WalCommand::ConsumerDelete(consumer_id.to_string(), response))
+    }
+
+    pub(super) async fn append_consumer_delete_async(&self, consumer_id: String) -> Result<()> {
+        self.request_async(move |response| WalCommand::ConsumerDelete(consumer_id, response))
+            .await
     }
 
     pub(super) fn append_delivery_attempt(
@@ -116,8 +146,33 @@ impl WalRuntime {
         })
     }
 
+    pub(super) async fn append_delivery_attempt_async(
+        &self,
+        seq: u64,
+        consumer_id: String,
+        deadline_ms: u64,
+        attempt: u32,
+    ) -> Result<DeliveryAttemptRecord> {
+        self.request_async(move |response| WalCommand::DeliveryAttempt {
+            seq,
+            consumer_id,
+            deadline_ms,
+            attempt,
+            response,
+        })
+        .await
+    }
+
     pub(super) fn append_delivery_lease(&self, record: &DeliveryAttemptRecord) -> Result<()> {
         self.request(|response| WalCommand::DeliveryLease(record.clone(), response))
+    }
+
+    pub(super) async fn append_delivery_lease_async(
+        &self,
+        record: DeliveryAttemptRecord,
+    ) -> Result<()> {
+        self.request_async(move |response| WalCommand::DeliveryLease(record, response))
+            .await
     }
 
     pub(super) fn append_delivery_batch(
@@ -125,6 +180,14 @@ impl WalRuntime {
         entries: Vec<DeliveryBatchEntry>,
     ) -> Result<Vec<DeliveryAttemptRecord>> {
         self.request(|response| WalCommand::DeliveryBatch { entries, response })
+    }
+
+    pub(super) async fn append_delivery_batch_async(
+        &self,
+        entries: Vec<DeliveryBatchEntry>,
+    ) -> Result<Vec<DeliveryAttemptRecord>> {
+        self.request_async(move |response| WalCommand::DeliveryBatch { entries, response })
+            .await
     }
 
     pub(super) fn append_ack(&self, seq: u64, consumer_id: &str, delivery_id: u64) -> Result<()> {
@@ -136,16 +199,49 @@ impl WalRuntime {
         })
     }
 
+    pub(super) async fn append_ack_async(
+        &self,
+        seq: u64,
+        consumer_id: String,
+        delivery_id: u64,
+    ) -> Result<()> {
+        self.request_async(move |response| WalCommand::Ack {
+            seq,
+            consumer_id,
+            delivery_id,
+            response,
+        })
+        .await
+    }
+
     pub(super) fn append_dead_letter(&self, record: &DeadLetterRecord) -> Result<()> {
         self.request(|response| WalCommand::DeadLetter(record.clone(), response))
+    }
+
+    pub(super) async fn append_dead_letter_async(&self, record: DeadLetterRecord) -> Result<()> {
+        self.request_async(move |response| WalCommand::DeadLetter(record, response))
+            .await
     }
 
     pub(super) fn purge_dead_letter(&self, id: u64) -> Result<()> {
         self.request(|response| WalCommand::DeadLetterPurge(id, response))
     }
 
+    pub(super) async fn purge_dead_letter_async(&self, id: u64) -> Result<()> {
+        self.request_async(move |response| WalCommand::DeadLetterPurge(id, response))
+            .await
+    }
+
     pub(super) fn append_producer_sequence(&self, record: &ProducerSequenceRecord) -> Result<()> {
         self.request(|response| WalCommand::ProducerSequence(record.clone(), response))
+    }
+
+    pub(super) async fn append_producer_sequence_async(
+        &self,
+        record: ProducerSequenceRecord,
+    ) -> Result<()> {
+        self.request_async(move |response| WalCommand::ProducerSequence(record, response))
+            .await
     }
 
     pub(super) fn append_group_state(
@@ -154,6 +250,15 @@ impl WalRuntime {
         record: &crate::consumer_group::GroupRecord,
     ) -> Result<()> {
         self.request(|response| WalCommand::GroupState(group.to_string(), record.clone(), response))
+    }
+
+    pub(super) async fn append_group_state_async(
+        &self,
+        group: String,
+        record: crate::consumer_group::GroupRecord,
+    ) -> Result<()> {
+        self.request_async(move |response| WalCommand::GroupState(group, record, response))
+            .await
     }
 
     pub(super) async fn flush_due(&self) -> Result<()> {
@@ -210,6 +315,17 @@ impl WalRuntime {
         result
             .recv()
             .map_err(|_| BrokerError::msg("WAL worker dropped response"))?
+    }
+
+    async fn request_async<T, F>(&self, command: F) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(mpsc::Sender<Result<T>>) -> WalCommand + Send + 'static,
+    {
+        let runtime = self.clone();
+        tokio::task::spawn_blocking(move || runtime.request(command))
+            .await
+            .map_err(|err| BrokerError::with_source("WAL request worker failed", err))?
     }
 }
 
