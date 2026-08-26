@@ -27,6 +27,31 @@ async fn partition_expansion_is_epoch_fenced_by_broker_runtime() {
 }
 
 #[tokio::test]
+async fn partition_expansion_state_survives_restart() {
+    let dir = TempDir::new().unwrap();
+    let config = test_config(dir.path());
+    let broker = deterministic_broker(config.clone(), Arc::new(ManualClock::new(1_000)), None);
+    broker.begin_partition_expansion("orders", 4).await.unwrap();
+    broker
+        .mark_partition_expansion_prepared("orders", 4)
+        .await
+        .unwrap();
+    assert_eq!(
+        broker.activate_partition_expansion("orders").await.unwrap(),
+        (4, 2)
+    );
+    drop(broker);
+
+    let restarted = deterministic_broker(config, Arc::new(ManualClock::new(2_000)), None);
+    assert!(
+        restarted
+            .partition_expansion_epoch("orders", 2)
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
 async fn configured_materialized_view_projects_committed_records() {
     let dir = TempDir::new().unwrap();
     let mut config = test_config(dir.path());
