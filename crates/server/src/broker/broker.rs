@@ -91,6 +91,21 @@ pub struct Morrow {
 }
 
 impl Morrow {
+    pub(super) async fn reserve_retention_work(&self) -> bool {
+        self.work_scheduler.lock().await.try_reserve(
+            crate::work_scheduler::WorkClass::Retention,
+            0,
+            0,
+        )
+    }
+
+    pub(super) async fn release_retention_work(&self) {
+        self.work_scheduler
+            .lock()
+            .await
+            .release(crate::work_scheduler::WorkClass::Retention, 0, 0);
+    }
+
     pub async fn begin_partition_expansion(
         &self,
         stream: &str,

@@ -429,17 +429,29 @@ impl Morrow {
                 Err(error) => return Err(error),
             };
             disk_reservation.commit();
-            cluster.enforce_retention(self.hooks.clock.now_ms())?;
+            crate::broker_ensure!(
+                self.reserve_retention_work().await,
+                "retention work budget exhausted"
+            );
+            let retention_result = cluster.enforce_retention(self.hooks.clock.now_ms());
+            self.release_retention_work().await;
+            retention_result?;
             self.apply_cluster_partition(envelope.clone()).await?;
             drop(state_shard_guard);
             let _storage_operation = self.storage_gate.read().await;
             let tenants = self.config.tenant_quotas.keys().cloned().collect();
-            let released = self.inner.lock().await.enforce_stream_retention(
+            crate::broker_ensure!(
+                self.reserve_retention_work().await,
+                "retention work budget exhausted"
+            );
+            let released_result = self.inner.lock().await.enforce_stream_retention(
                 &self.partition_logs,
                 &self.config.streams,
                 self.hooks.clock.now_ms(),
                 &tenants,
-            )?;
+            );
+            self.release_retention_work().await;
+            let released = released_result?;
             for (tenant, bytes) in released {
                 self.tenant_quotas.release(
                     &tenant,
@@ -559,12 +571,18 @@ impl Morrow {
             inner.observe_published_record(&record);
             inner.mark_subject_ready(&record.subject);
             let tenants = self.config.tenant_quotas.keys().cloned().collect();
-            let released = inner.enforce_stream_retention(
+            crate::broker_ensure!(
+                self.reserve_retention_work().await,
+                "retention work budget exhausted"
+            );
+            let released_result = inner.enforce_stream_retention(
                 &self.partition_logs,
                 &self.config.streams,
                 self.hooks.clock.now_ms(),
                 &tenants,
-            )?;
+            );
+            self.release_retention_work().await;
+            let released = released_result?;
             inner.apply_record_compaction(record.seq, &self.config.streams);
             (record, released)
         };
