@@ -3,11 +3,46 @@ use super::*;
 impl RaftRuntime {
     pub async fn replicate_partition(
         &self,
-        mut envelope: crate::partition_log::MessageEnvelope,
+        envelope: crate::partition_log::MessageEnvelope,
         fsync: bool,
         cluster_durable: bool,
     ) -> Result<crate::partition_log::MessageEnvelope> {
-        let key = partition_key(envelope.stream.as_str(), envelope.partition.0);
+        self.replicate_partition_batch(vec![envelope], fsync, cluster_durable)
+            .await?
+            .pop()
+            .ok_or_else(|| BrokerError::msg("partition replication batch was empty"))
+    }
+
+    /// Replicate an ordered range of records in one partition batch.
+    pub async fn replicate_partition_batch(
+        &self,
+        mut envelopes: Vec<crate::partition_log::MessageEnvelope>,
+        fsync: bool,
+        cluster_durable: bool,
+    ) -> Result<Vec<crate::partition_log::MessageEnvelope>> {
+        let (max_records, max_bytes) = data_append_batch_limits();
+        crate::broker_ensure!(
+            !envelopes.is_empty() && envelopes.len() <= max_records,
+            "partition replication batch is outside the supported bound"
+        );
+        let encoded_bytes = envelopes
+            .iter()
+            .map(data_append_envelope_bytes)
+            .sum::<usize>();
+        crate::broker_ensure!(
+            encoded_bytes <= max_bytes,
+            "partition replication batch bytes exceed the supported bound"
+        );
+        let first = envelopes
+            .first()
+            .ok_or_else(|| BrokerError::msg("partition replication batch was empty"))?;
+        let key = partition_key(first.stream.as_str(), first.partition.0);
+        crate::broker_ensure!(
+            envelopes.iter().all(|envelope| {
+                partition_key(envelope.stream.as_str(), envelope.partition.0) == key
+            }),
+            "partition replication batch contains multiple partitions"
+        );
         let write_gate = self
             .partition_write_gates
             .get(&key)
@@ -39,25 +74,42 @@ impl RaftRuntime {
                 "partition commit generation is not safe"
             );
         }
-        envelope.offset = previous.map_or(0, |commit| commit.high_watermark.saturating_add(1));
+        let first_offset = previous.map_or(0, |commit| commit.high_watermark.saturating_add(1));
         let leader_epoch = assignment.leader_epoch;
-        envelope.leader_epoch = leader_epoch;
-        let request = DataAppendRequest {
-            leader_id: self.node_id,
-            leader_epoch,
-            replica_set_generation: assignment.replica_set_generation,
-            fsync,
-            committed_high_watermark: previous.map(|commit| commit.high_watermark),
-            predecessor_offset: previous.map(|commit| commit.high_watermark),
-            predecessor_checksum: previous.map(|commit| commit.checksum),
-            batch_digest: crate::partition_log::committed_envelope_checksum(&envelope)?,
-            durability: if fsync {
-                DurabilityBoundary::LocalFlush
-            } else {
-                DurabilityBoundary::Memory
-            },
-            envelope: envelope.clone(),
-        };
+        let mut checksums = Vec::with_capacity(envelopes.len());
+        for (index, envelope) in envelopes.iter_mut().enumerate() {
+            envelope.offset = first_offset.saturating_add(index as u64);
+            envelope.leader_epoch = leader_epoch;
+            checksums.push(crate::partition_log::committed_envelope_checksum(envelope)?);
+        }
+        let requests = envelopes
+            .iter()
+            .enumerate()
+            .map(|(index, envelope)| DataAppendRequest {
+                leader_id: self.node_id,
+                leader_epoch,
+                replica_set_generation: assignment.replica_set_generation,
+                fsync,
+                committed_high_watermark: previous.map(|commit| commit.high_watermark),
+                predecessor_offset: if index == 0 {
+                    previous.map(|commit| commit.high_watermark)
+                } else {
+                    Some(envelope.offset.saturating_sub(1))
+                },
+                predecessor_checksum: if index == 0 {
+                    previous.map(|commit| commit.checksum)
+                } else {
+                    Some(checksums[index - 1])
+                },
+                batch_digest: checksums[index],
+                durability: if fsync {
+                    DurabilityBoundary::LocalFlush
+                } else {
+                    DurabilityBoundary::Memory
+                },
+                envelope: envelope.clone(),
+            })
+            .collect::<Vec<_>>();
         let required_nodes = if cluster_durable {
             assignment.replicas.clone()
         } else {
@@ -68,6 +120,10 @@ impl RaftRuntime {
             "partition leader is outside the required commit set"
         );
         let required_count = required_nodes.len();
+        let final_offset = requests
+            .last()
+            .map(|request| request.envelope.offset)
+            .ok_or_else(|| BrokerError::msg("partition replication batch was empty"))?;
         let mut replicated = 1usize;
         let mut flushed = usize::from(fsync);
         let mut joins = tokio::task::JoinSet::new();
@@ -77,7 +133,7 @@ impl RaftRuntime {
                 continue;
             }
             let client = self.data_client(*node_id).await?;
-            let request = request.clone();
+            let requests = requests.clone();
             let partition_data = self.partition_data.clone();
             let metadata = metadata.clone();
             let required = required_nodes.contains(node_id);
@@ -85,70 +141,79 @@ impl RaftRuntime {
                 let progress = send_data_progress_on_client(
                     &client,
                     DataProgressRequest {
-                        stream: request.envelope.stream.as_str().to_string(),
-                        partition: request.envelope.partition,
+                        stream: requests[0].envelope.stream.as_str().to_string(),
+                        partition: requests[0].envelope.partition,
                     },
                 )
                 .await?;
                 let committed_records = super::runtime::load_partition_delta(
                     partition_data,
                     metadata,
-                    request.envelope.stream.as_str().to_string(),
-                    request.envelope.partition,
+                    requests[0].envelope.stream.as_str().to_string(),
+                    requests[0].envelope.partition,
                     progress,
                 )
                 .await?;
-                let mut predecessor_checksum = request.predecessor_checksum;
-                let (max_batch_records, max_batch_bytes) = data_append_batch_limits();
-                let mut append_batch = Vec::with_capacity(max_batch_records);
+                let mut append_batch = Vec::with_capacity(max_records);
                 let mut append_batch_bytes = 0usize;
+                let mut predecessor_checksum = requests[0].predecessor_checksum;
+                let mut last_response = None;
                 for record in committed_records {
-                    let record_checksum =
-                        crate::partition_log::committed_envelope_checksum(&record)?;
+                    let checksum = crate::partition_log::committed_envelope_checksum(&record)?;
                     let record_bytes = data_append_envelope_bytes(&record);
                     if !append_batch.is_empty()
-                        && (append_batch.len() == max_batch_records
-                            || append_batch_bytes.saturating_add(record_bytes) > max_batch_bytes)
+                        && (append_batch.len() == max_records
+                            || append_batch_bytes.saturating_add(record_bytes) > max_bytes)
                     {
-                        send_data_append_batch_on_client(
+                        last_response = send_data_append_batch_on_client(
                             &client,
                             std::mem::take(&mut append_batch),
                         )
-                        .await?;
+                        .await?
+                        .into_iter()
+                        .last();
                         append_batch_bytes = 0;
                     }
                     append_batch.push(DataAppendRequest {
-                        leader_id: request.leader_id,
-                        leader_epoch: request.leader_epoch,
-                        replica_set_generation: request.replica_set_generation,
-                        fsync: request.fsync,
-                        committed_high_watermark: request.committed_high_watermark,
+                        leader_id: requests[0].leader_id,
+                        leader_epoch: requests[0].leader_epoch,
+                        replica_set_generation: requests[0].replica_set_generation,
+                        fsync: requests[0].fsync,
+                        committed_high_watermark: requests[0].committed_high_watermark,
                         predecessor_offset: record.offset.checked_sub(1),
                         predecessor_checksum,
-                        batch_digest: record_checksum,
-                        durability: request.durability,
+                        batch_digest: checksum,
+                        durability: requests[0].durability,
                         envelope: record,
                     });
                     append_batch_bytes = append_batch_bytes.saturating_add(record_bytes);
-                    predecessor_checksum = Some(record_checksum);
-                    if append_batch.len() == max_batch_records
-                        || append_batch_bytes >= max_batch_bytes
+                    predecessor_checksum = Some(checksum);
+                }
+                for request in requests {
+                    let record_bytes = data_append_envelope_bytes(&request.envelope);
+                    if !append_batch.is_empty()
+                        && (append_batch.len() == max_records
+                            || append_batch_bytes.saturating_add(record_bytes) > max_bytes)
                     {
-                        send_data_append_batch_on_client(
+                        last_response = send_data_append_batch_on_client(
                             &client,
                             std::mem::take(&mut append_batch),
                         )
-                        .await?;
+                        .await?
+                        .into_iter()
+                        .last();
                         append_batch_bytes = 0;
                     }
+                    append_batch.push(request);
+                    append_batch_bytes = append_batch_bytes.saturating_add(record_bytes);
                 }
-                append_batch.push(request);
-                let response = send_data_append_batch_on_client(&client, append_batch)
-                    .await?
-                    .into_iter()
-                    .last()
-                    .ok_or_else(|| BrokerError::msg("partition append batch was empty"))?;
-                Ok::<_, BrokerError>(response)
+                if !append_batch.is_empty() {
+                    last_response = send_data_append_batch_on_client(&client, append_batch)
+                        .await?
+                        .into_iter()
+                        .last();
+                }
+                last_response.ok_or_else(|| BrokerError::msg("partition append batch was empty"))
             };
             if required {
                 let node_id = *node_id;
@@ -165,10 +230,10 @@ impl RaftRuntime {
         while let Some(result) = joins.join_next().await {
             match result {
                 Ok((_, Ok(response))) => {
-                    if response.match_offset == envelope.offset {
+                    if response.match_offset == final_offset {
                         replicated += 1;
                     }
-                    if response.flushed_offset == Some(envelope.offset) {
+                    if response.flushed_offset == Some(final_offset) {
                         flushed += 1;
                     }
                 }
@@ -196,17 +261,27 @@ impl RaftRuntime {
                 "partition fsync quorum unavailable"
             );
         }
-        self.partition_data.lock().unwrap().append(&request)?;
+        self.partition_data
+            .lock()
+            .unwrap()
+            .append_batch(&requests)?;
+        let final_envelope = envelopes
+            .last()
+            .cloned()
+            .ok_or_else(|| BrokerError::msg("partition replication batch was empty"))?;
+        let commit_checksum = checksums
+            .last()
+            .copied()
+            .ok_or_else(|| BrokerError::msg("partition replication batch was empty"))?;
         if metadata.feature_gates.contains("partition-local-commit-v1") {
-            let checksum = crate::partition_log::committed_envelope_checksum(&envelope)?;
             let commit_request = DataCommitRequest {
                 leader_id: self.node_id,
                 leader_epoch,
                 replica_set_generation: assignment.replica_set_generation,
-                stream: envelope.stream.as_str().to_string(),
-                partition: envelope.partition,
-                high_watermark: envelope.offset,
-                checksum,
+                stream: final_envelope.stream.as_str().to_string(),
+                partition: final_envelope.partition,
+                high_watermark: final_envelope.offset,
+                checksum: commit_checksum,
                 fsync,
             };
             let commit_clients = self
@@ -225,28 +300,30 @@ impl RaftRuntime {
                 .lock()
                 .unwrap()
                 .commit(&commit_request)?;
-            return Ok(envelope);
+        } else {
+            for envelope in &envelopes {
+                let response = self
+                    .client_write(BrokerCommand::PartitionCommit {
+                        stream: envelope.stream.as_str().to_string(),
+                        partition: envelope.partition.0,
+                        offset: envelope.offset,
+                        checksum: crate::partition_log::committed_envelope_checksum(envelope)?,
+                        leader_id: self.node_id,
+                        leader_epoch,
+                    })
+                    .await?;
+                crate::broker_ensure!(
+                    matches!(
+                        response,
+                        BrokerResponse::PartitionCommit {
+                            high_watermark,
+                            leader_epoch: committed_epoch,
+                        } if high_watermark == envelope.offset && committed_epoch == leader_epoch
+                    ),
+                    "partition metadata commit rejected"
+                );
+            }
         }
-        let response = self
-            .client_write(BrokerCommand::PartitionCommit {
-                stream: envelope.stream.as_str().to_string(),
-                partition: envelope.partition.0,
-                offset: envelope.offset,
-                checksum: crate::partition_log::committed_envelope_checksum(&envelope)?,
-                leader_id: self.node_id,
-                leader_epoch,
-            })
-            .await?;
-        crate::broker_ensure!(
-            matches!(
-                response,
-                BrokerResponse::PartitionCommit {
-                    high_watermark,
-                    leader_epoch: committed_epoch,
-                } if high_watermark == envelope.offset && committed_epoch == leader_epoch
-            ),
-            "partition metadata commit rejected"
-        );
-        Ok(envelope)
+        Ok(envelopes)
     }
 }
