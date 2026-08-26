@@ -25,6 +25,7 @@ const KIND_DEAD_LETTER: u8 = 8;
 const KIND_DEAD_LETTER_PURGE: u8 = 9;
 const KIND_PRODUCER_SEQUENCE: u8 = 10;
 const KIND_GROUP_STATE: u8 = 11;
+const KIND_CONSUMER_CURSOR_DELTA: u8 = 12;
 pub(super) const ENCRYPTED_BODY_MAGIC: &[u8] = b"MORROW-WAL-ENC1\n";
 pub const DEFAULT_WAL_SEGMENT_BYTES: u64 = 64 * 1024 * 1024;
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -148,6 +149,12 @@ pub struct PartitionAppendRecord {
 pub struct ConsumerCursorRecord {
     pub consumer_id: String,
     pub cursors: crate::consumer_cursor::ConsumerCursorSet,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConsumerCursorDeltaRecord {
+    pub consumer_id: String,
+    pub cursor: crate::consumer_cursor::PartitionCursor,
+    pub ack_window: usize,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConsumerDeleteRecord {

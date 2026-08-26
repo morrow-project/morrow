@@ -81,6 +81,34 @@ pub(super) fn consumer_cursor_body(record: &ConsumerCursorRecord) -> Result<Vec<
     )?;
     Ok(body)
 }
+pub(super) fn consumer_cursor_delta_body(record: &ConsumerCursorDeltaRecord) -> Result<Vec<u8>> {
+    let mut body = Vec::new();
+    put_string(&mut body, &record.consumer_id)?;
+    put_u32(
+        &mut body,
+        record
+            .ack_window
+            .try_into()
+            .context("ack window too large")?,
+    );
+    put_string(&mut body, &record.cursor.stream)?;
+    put_u32(&mut body, record.cursor.partition);
+    put_u64(&mut body, record.cursor.committed_offset);
+    match record.cursor.delivered_offset {
+        Some(offset) => {
+            body.push(1);
+            put_u64(&mut body, offset);
+        }
+        None => body.push(0),
+    }
+    put_bytes(
+        &mut body,
+        &serde_json::to_vec(&record.cursor.acknowledged_offsets)
+            .context("encoding acknowledged offsets")?,
+    )?;
+    put_u64(&mut body, record.cursor.retention_gaps);
+    Ok(body)
+}
 pub(super) fn consumer_delete_body(record: &ConsumerDeleteRecord) -> Result<Vec<u8>> {
     let mut body = Vec::new();
     put_string(&mut body, &record.consumer_id)?;
@@ -234,6 +262,38 @@ pub(super) fn decode_consumer_cursor(body: &[u8]) -> Result<ConsumerCursorRecord
     Ok(ConsumerCursorRecord {
         consumer_id,
         cursors,
+    })
+}
+pub(super) fn decode_consumer_cursor_delta(body: &[u8]) -> Result<ConsumerCursorDeltaRecord> {
+    let mut cursor = Cursor {
+        bytes: body,
+        pos: 0,
+    };
+    let consumer_id = cursor.string()?;
+    let ack_window = cursor.u32()? as usize;
+    let stream = cursor.string()?;
+    let partition = cursor.u32()?;
+    let committed_offset = cursor.u64()?;
+    let delivered_offset = if cursor.take(1)?[0] != 0 {
+        Some(cursor.u64()?)
+    } else {
+        None
+    };
+    let acknowledged_offsets =
+        serde_json::from_slice(&cursor.bytes()?).context("decoding acknowledged offsets")?;
+    let retention_gaps = cursor.u64()?;
+    cursor.finish()?;
+    Ok(ConsumerCursorDeltaRecord {
+        consumer_id,
+        ack_window,
+        cursor: crate::consumer_cursor::PartitionCursor {
+            stream,
+            partition,
+            committed_offset,
+            delivered_offset,
+            acknowledged_offsets,
+            retention_gaps,
+        },
     })
 }
 pub(super) fn decode_consumer_delete(body: &[u8]) -> Result<ConsumerDeleteRecord> {
