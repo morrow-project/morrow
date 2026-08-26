@@ -86,7 +86,7 @@ pub(super) enum RouteFrame {
     Publish {
         subject: String,
         reply_to: Option<String>,
-        payload: Vec<u8>,
+        payload: Arc<Vec<u8>>,
     },
     Ping,
     Pong,

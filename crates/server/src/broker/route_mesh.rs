@@ -413,6 +413,7 @@ impl RouteMesh {
         payload: &[u8],
     ) {
         let _span = tracing::info_span!("morrow.route.forward", payload_bytes = payload.len());
+        let payload = Arc::new(payload.to_vec());
         let targets = {
             let state = self.inner.lock().await;
             state
@@ -423,13 +424,11 @@ impl RouteMesh {
                 .collect::<Vec<_>>()
         };
         for sender in targets {
-            let _ = sender
-                .send(RouteFrame::Publish {
-                    subject: subject.to_string(),
-                    reply_to: reply_to.map(str::to_string),
-                    payload: payload.to_vec(),
-                })
-                .await;
+            let _ = sender.try_send(RouteFrame::Publish {
+                subject: subject.to_string(),
+                reply_to: reply_to.map(str::to_string),
+                payload: Arc::clone(&payload),
+            });
         }
     }
 
