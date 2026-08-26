@@ -9,6 +9,7 @@ const PARTITION_COMMIT_JOURNAL: &str = "commit-state.journal";
 const COMMIT_CHECKPOINT_RECORDS: u64 = 1_024;
 const COMMIT_CHECKPOINT_BYTES: u64 = 8 * 1024 * 1024;
 pub(super) const MAX_DATA_APPEND_BATCH_RECORDS: usize = 256;
+pub(super) const MAX_DATA_APPEND_BATCH_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct PartitionCommitRecord {
@@ -327,6 +328,14 @@ impl ReplicaDataStore {
         crate::broker_ensure!(
             !requests.is_empty() && requests.len() <= MAX_DATA_APPEND_BATCH_RECORDS,
             "partition append batch size is outside the supported bound"
+        );
+        let payload_bytes = requests
+            .iter()
+            .map(|request| request.envelope.payload.len())
+            .sum::<usize>();
+        crate::broker_ensure!(
+            payload_bytes <= MAX_DATA_APPEND_BATCH_BYTES,
+            "partition append batch bytes exceed the supported bound"
         );
         let mut responses = Vec::with_capacity(requests.len());
         let should_flush = requests.iter().any(|request| request.fsync);
