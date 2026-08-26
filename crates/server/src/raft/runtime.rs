@@ -330,7 +330,7 @@ impl RaftRuntime {
                         replica_order[(partition as usize + offset) % replica_order.len()]
                     })
                     .collect::<BTreeSet<_>>();
-                let leader_id = replica_order[partition as usize % replica_order.len()];
+                let leader_id = initial_partition_leader(&replica_order, partition);
                 let active_count = usize::try_from(stream.storage.min_ack_replicas)
                     .unwrap_or(replica_count)
                     .min(replica_count)
@@ -446,6 +446,10 @@ impl RaftRuntime {
     pub fn node_id(&self) -> u64 {
         self.node_id
     }
+}
+
+fn initial_partition_leader(replica_order: &[u64], partition: u32) -> u64 {
+    replica_order[partition as usize % replica_order.len()]
 }
 
 pub(super) async fn load_partition_delta(
