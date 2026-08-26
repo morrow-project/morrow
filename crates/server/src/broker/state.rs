@@ -516,6 +516,7 @@ pub(super) struct PartitionLeaderResponse {
     pub(super) leader_client_addr: Option<String>,
     pub(super) leader_epoch: u64,
     pub(super) partitioning_epoch: u64,
+    pub(super) partitioning: crate::stream::PartitioningPolicy,
     pub(super) high_watermark: Option<u64>,
 }
 

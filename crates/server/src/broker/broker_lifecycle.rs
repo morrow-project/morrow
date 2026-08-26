@@ -705,14 +705,24 @@ impl Morrow {
             broker_control: BrokerControlRegistry::new(),
             compaction_running: Arc::new(AtomicBool::new(false)),
             work_scheduler: Arc::new(tokio::sync::Mutex::new(
-                crate::work_scheduler::WorkScheduler::new([(
-                    crate::work_scheduler::WorkClass::Compaction,
-                    crate::work_scheduler::WorkBudget {
-                        max_records: u64::MAX,
-                        max_bytes: u64::MAX,
-                        max_concurrency: 1,
-                    },
-                )]),
+                crate::work_scheduler::WorkScheduler::new([
+                    (
+                        crate::work_scheduler::WorkClass::Compaction,
+                        crate::work_scheduler::WorkBudget {
+                            max_records: u64::MAX,
+                            max_bytes: u64::MAX,
+                            max_concurrency: 1,
+                        },
+                    ),
+                    (
+                        crate::work_scheduler::WorkClass::Retention,
+                        crate::work_scheduler::WorkBudget {
+                            max_records: u64::MAX,
+                            max_bytes: u64::MAX,
+                            max_concurrency: 1,
+                        },
+                    ),
+                ]),
             )),
             route_mesh,
             middleware: hooks.middleware.clone(),
@@ -1584,6 +1594,11 @@ impl Morrow {
             .lock()
             .await
             .usage(crate::work_scheduler::WorkClass::Compaction);
+        let retention_usage = self
+            .work_scheduler
+            .lock()
+            .await
+            .usage(crate::work_scheduler::WorkClass::Retention);
         metrics.push_str(
             "# HELP morrow_work_compaction_rejections_total Compaction jobs rejected by the work budget.\n",
         );
@@ -1597,6 +1612,20 @@ impl Morrow {
         metrics.push_str(&format!(
             "morrow_work_compaction_active {}\n",
             compaction_usage.concurrency
+        ));
+        metrics.push_str(
+            "# HELP morrow_work_retention_rejections_total Retention jobs rejected by the work budget.\n",
+        );
+        metrics.push_str("# TYPE morrow_work_retention_rejections_total counter\n");
+        metrics.push_str(&format!(
+            "morrow_work_retention_rejections_total {}\n",
+            retention_usage.rejected
+        ));
+        metrics.push_str("# HELP morrow_work_retention_active Active retention jobs.\n");
+        metrics.push_str("# TYPE morrow_work_retention_active gauge\n");
+        metrics.push_str(&format!(
+            "morrow_work_retention_active {}\n",
+            retention_usage.concurrency
         ));
         metrics.push_str("# HELP morrow_cluster_peers Current configured cluster peers.\n");
         metrics.push_str("# TYPE morrow_cluster_peers gauge\n");
@@ -1867,6 +1896,14 @@ impl Morrow {
                                 .iter()
                                 .find(|definition| definition.name.as_str() == stream)
                                 .map(|definition| definition.partitioning.epoch)
+                                .unwrap_or_default(),
+                            partitioning: self
+                                .config
+                                .streams
+                                .definitions()
+                                .iter()
+                                .find(|definition| definition.name.as_str() == stream)
+                                .map(|definition| definition.partitioning.clone())
                                 .unwrap_or_default(),
                             high_watermark,
                         })
