@@ -10,6 +10,7 @@ pub(super) enum RaftRequest {
         data: Vec<u8>,
     },
     DataAppend(DataAppendRequest),
+    DataCommit(DataCommitRequest),
     DataProgress(DataProgressRequest),
     DataManifest(DataManifestRequest),
     DataHeartbeat(DataHeartbeatRequest),
@@ -29,6 +30,7 @@ pub(super) enum RaftResponse {
     Vote(VoteResponse<u64>),
     FullSnapshot(SnapshotResponse<u64>),
     DataAppend(DataAppendResponse),
+    DataCommit(DataCommitResponse),
     DataProgress(Option<u64>),
     DataManifest(DataManifestResponse),
     DataHeartbeat(DataHeartbeatResponse),
@@ -175,6 +177,29 @@ where
                     }
                 }
             }
+            RaftRequest::DataCommit(request) => {
+                let metadata = state_machine.durable_state();
+                let key = partition_key(&request.stream, request.partition.0);
+                let assignment = metadata.partition_assignments.get(&key);
+                if raft.current_leader().await != Some(request.leader_id)
+                    || assignment.is_none_or(|assignment| {
+                        assignment.leader_id != request.leader_id
+                            || assignment.leader_epoch != request.leader_epoch
+                            || assignment.replica_set_generation != request.replica_set_generation
+                    })
+                {
+                    RaftResponse::Error("fenced partition commit".to_string())
+                } else {
+                    match run_replica_io(io_gate.clone(), partition_data.clone(), move |store| {
+                        store.commit(&request)
+                    })
+                    .await
+                    {
+                        Ok(response) => RaftResponse::DataCommit(response),
+                        Err(err) => RaftResponse::Error(err.to_string()),
+                    }
+                }
+            }
             RaftRequest::DataProgress(request) => {
                 match run_replica_io(io_gate.clone(), partition_data.clone(), move |store| {
                     Ok(store.progress(&request))
@@ -208,11 +233,17 @@ where
                 }) {
                     RaftResponse::Error("fenced partition heartbeat".to_string())
                 } else {
+                    let local_commit = partition_data.lock().ok().and_then(|store| {
+                        store.commit_metadata(&request.stream, request.partition)
+                    });
                     RaftResponse::DataHeartbeat(DataHeartbeatResponse {
                         replica_set_generation: request.replica_set_generation,
                         leader_id: request.leader_id,
                         leader_epoch: request.leader_epoch,
-                        high_watermark: commit.map(|commit| commit.high_watermark),
+                        high_watermark: local_commit
+                            .as_ref()
+                            .map(|commit| commit.high_watermark)
+                            .or_else(|| commit.map(|commit| commit.high_watermark)),
                     })
                 }
             }

@@ -1,6 +1,39 @@
 use super::*;
 
 impl Morrow {
+    pub(super) async fn sync_local_partition_commits(
+        &self,
+        cluster: &ClusterRuntime,
+    ) -> Result<()> {
+        let pending = {
+            let applied = self.local_partition_applied.lock().await;
+            cluster
+                .local_committed_records()?
+                .into_iter()
+                .filter(|envelope| {
+                    let key =
+                        crate::raft::partition_key(envelope.stream.as_str(), envelope.partition.0);
+                    !applied
+                        .get(&key)
+                        .is_some_and(|offset| *offset >= envelope.offset)
+                })
+                .collect::<Vec<_>>()
+        };
+        for envelope in pending {
+            let key = crate::raft::partition_key(envelope.stream.as_str(), envelope.partition.0);
+            let offset = envelope.offset;
+            self.apply_cluster_partition(envelope).await?;
+            self.local_partition_applied
+                .lock()
+                .await
+                .insert(key, offset);
+            self.cluster_application_metrics
+                .delta_applications
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(())
+    }
+
     pub(super) async fn sync_cluster_deltas(&self, cluster: &ClusterRuntime) -> Result<()> {
         let _delta_application = self.cluster_delta_gate.lock().await;
         let Some(batch) = cluster.deltas_after(self.cluster_applied_log_index()) else {

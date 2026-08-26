@@ -674,6 +674,7 @@ impl Morrow {
             schema_registry: Arc::new(Mutex::new(schema_registry)),
             cluster: Arc::new(Mutex::new(cluster)),
             cluster_applied_index: Arc::new(AtomicU64::new(0)),
+            local_partition_applied: Arc::new(Mutex::new(HashMap::new())),
             cluster_delta_gate: Arc::new(Mutex::new(())),
             cluster_application_metrics: Arc::new(ClusterApplicationMetrics::default()),
             metrics: Arc::new(BrokerMetrics::default()),

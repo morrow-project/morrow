@@ -162,6 +162,8 @@ pub struct DurableState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PartitionCommitMetadata {
+    #[serde(default)]
+    pub replica_set_generation: u64,
     pub high_watermark: u64,
     pub checksum: u32,
     pub leader_id: u64,
@@ -325,6 +327,7 @@ impl DurableState {
                 self.partition_commits.insert(
                     key.clone(),
                     PartitionCommitMetadata {
+                        replica_set_generation: assignment.replica_set_generation,
                         high_watermark: offset,
                         checksum,
                         leader_id,
@@ -471,8 +474,10 @@ pub(crate) fn partition_key(stream: &str, partition: u32) -> String {
 }
 
 mod data_plane;
+mod data_plane_client;
 mod log_store;
 mod network;
+mod partition_runtime;
 mod proxy;
 mod rpc;
 mod runtime;
@@ -482,7 +487,10 @@ mod storage_io;
 pub(crate) use self::proxy::proxy_stream_to_leader;
 use self::runtime::RaftTlsRuntime;
 pub(crate) use self::state_machine::{CommittedDelta, DeltaBatch};
-use self::{data_plane::*, log_store::*, network::*, rpc::*, state_machine::*, storage_io::*};
+use self::{
+    data_plane::*, data_plane_client::*, log_store::*, network::*, rpc::*, state_machine::*,
+    storage_io::*,
+};
 pub use self::{
     proxy::proxy_to_leader,
     runtime::{ClusterNode, RaftRuntime},

@@ -14,6 +14,13 @@ renamed, and followed by journal rotation. Recovery loads the atomic snapshot
 first and replays only journal entries newer than its last-applied index, so
 interruption on either side of the rename/rotation boundary is safe.
 
+Clustered partition replicas also persist their local committed high-watermark
+and digest in `partition-data/commit-state.journal`. The record is fenced by the
+replica-set generation and leader epoch, and is replayed before the broker can
+accept a new partition write. A local commit notification is accepted only when
+the corresponding envelope is present and its checksum matches; conflicting or
+unsafe state refuses the partition rather than silently acknowledging a gap.
+
 Existing `raft-log.json`, `raft-state.json`, and `raft-snapshot.json` files are
 migrated on first open. The new journal or snapshot is synced before the source
 is renamed with a `.migrated` suffix. An existing new-format file always wins,
