@@ -205,7 +205,12 @@ impl RaftRuntime {
         Ok(client)
     }
 
-    pub fn spawn_listener(&self, listener: TcpListener) {
+    pub(crate) fn spawn_listener(
+        &self,
+        listener: TcpListener,
+        broker_control: crate::broker::BrokerControlRegistry,
+        accepts_broker_control: bool,
+    ) {
         let raft = self.raft.clone();
         let state_machine = self.state_machine.clone();
         let auth_token = self.auth_token.clone();
@@ -221,6 +226,8 @@ impl RaftRuntime {
                 partition_data,
                 tls,
                 quotas,
+                broker_control,
+                accepts_broker_control,
             )
             .await
             {

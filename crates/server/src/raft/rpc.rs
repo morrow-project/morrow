@@ -15,6 +15,7 @@ pub(super) enum RaftRequest {
     DataManifest(DataManifestRequest),
     DataHeartbeat(DataHeartbeatRequest),
     DataSnapshotChunk(DataSnapshotChunk),
+    BrokerControl(protocol::broker_control::BrokerControlFrame),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -35,6 +36,7 @@ pub(super) enum RaftResponse {
     DataManifest(DataManifestResponse),
     DataHeartbeat(DataHeartbeatResponse),
     DataSnapshotChunkAck { offset: u64, checksum: u32 },
+    BrokerControl(protocol::broker_control::BrokerControlFrame),
     Error(String),
 }
 
@@ -46,6 +48,8 @@ pub(super) async fn serve_raft(
     partition_data: SharedReplicaData,
     tls: Option<RaftTlsRuntime>,
     quotas: Arc<crate::quota::QuotaRuntime>,
+    broker_control: crate::broker::BrokerControlRegistry,
+    accepts_broker_control: bool,
 ) -> Result<()> {
     let io_gate = Arc::new(tokio::sync::Semaphore::new(64));
     loop {
@@ -59,6 +63,8 @@ pub(super) async fn serve_raft(
         let partition_data = partition_data.clone();
         let tls = tls.clone();
         let io_gate = io_gate.clone();
+        let broker_control = broker_control.clone();
+        let accepts_broker_control = accepts_broker_control;
         tokio::spawn(async move {
             let _permit = permit;
             let result = if let Some(tls) = tls {
@@ -81,6 +87,8 @@ pub(super) async fn serve_raft(
                                 partition_data,
                                 Some(peer_id),
                                 io_gate,
+                                broker_control,
+                                accepts_broker_control,
                             )
                             .await
                         }
@@ -98,6 +106,8 @@ pub(super) async fn serve_raft(
                     partition_data,
                     None,
                     io_gate,
+                    broker_control,
+                    accepts_broker_control,
                 )
                 .await
             };
@@ -116,6 +126,8 @@ pub(super) async fn handle_raft_stream<S>(
     partition_data: SharedReplicaData,
     tls_peer_id: Option<u64>,
     io_gate: Arc<tokio::sync::Semaphore>,
+    broker_control: crate::broker::BrokerControlRegistry,
+    accepts_broker_control: bool,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -256,6 +268,46 @@ where
                         offset: chunk.offset,
                         checksum,
                     }
+                }
+            }
+            RaftRequest::BrokerControl(frame) => {
+                use protocol::broker_control::BrokerControlFrame;
+                if !accepts_broker_control {
+                    RaftResponse::BrokerControl(BrokerControlFrame::Error(
+                        protocol::broker_control::ControlError {
+                            code: "control_plane_unavailable".to_string(),
+                            message: "broker-only nodes do not host the control plane".to_string(),
+                        },
+                    ))
+                } else {
+                    RaftResponse::BrokerControl(match frame {
+                        BrokerControlFrame::Register(registration) => {
+                            match broker_control.register(registration).await {
+                                Ok(result) => BrokerControlFrame::RegisterAccepted(result.accepted),
+                                Err(error) => BrokerControlFrame::Error(
+                                    protocol::broker_control::ControlError {
+                                        code: "registration_rejected".to_string(),
+                                        message: error.to_string(),
+                                    },
+                                ),
+                            }
+                        }
+                        BrokerControlFrame::Heartbeat(heartbeat) => {
+                            match broker_control.heartbeat(heartbeat).await {
+                                Ok(()) => BrokerControlFrame::HeartbeatAccepted,
+                                Err(error) => BrokerControlFrame::Error(
+                                    protocol::broker_control::ControlError {
+                                        code: "heartbeat_rejected".to_string(),
+                                        message: error.to_string(),
+                                    },
+                                ),
+                            }
+                        }
+                        _ => BrokerControlFrame::Error(protocol::broker_control::ControlError {
+                            code: "unsupported_control_request".to_string(),
+                            message: "control frame is not a request".to_string(),
+                        }),
+                    })
                 }
             }
         };

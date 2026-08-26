@@ -13,7 +13,11 @@ impl Morrow {
             self.quotas.clone(),
         )
         .await?;
-        runtime.spawn_listener(listener.expect("configured Raft listener was not pre-bound"));
+        runtime.spawn_listener(
+            listener.expect("configured Raft listener was not pre-bound"),
+            self.broker_control.clone(),
+            cluster_config.role.participates_in_metadata_quorum(),
+        );
         let runtime = ClusterRuntime::real(runtime);
         self.sync_from_cluster(&runtime).await?;
         *self.cluster.lock().await = Some(runtime);
