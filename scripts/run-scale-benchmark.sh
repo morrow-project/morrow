@@ -90,6 +90,16 @@ case_index="$output_dir/cases.ndjson"
 started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 batch_records=${MORROW_DATA_APPEND_BATCH_RECORDS:-256}
 batch_bytes=${MORROW_DATA_APPEND_BATCH_BYTES:-8388608}
+case "$batch_records" in
+  ''|*[!0-9]*) batch_records=256 ;;
+esac
+case "$batch_bytes" in
+  ''|*[!0-9]*) batch_bytes=8388608 ;;
+esac
+test "$batch_records" -ge 1 || batch_records=1
+test "$batch_records" -le 256 || batch_records=256
+test "$batch_bytes" -ge 1 || batch_bytes=1
+test "$batch_bytes" -le 8388608 || batch_bytes=8388608
 hostname_value=$(hostname 2>/dev/null || true)
 os_name=$(uname -s 2>/dev/null || true)
 os_release=$(uname -r 2>/dev/null || true)
