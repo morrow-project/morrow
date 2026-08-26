@@ -5,7 +5,10 @@ use crate::stream::PartitionId;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, VecDeque};
 use std::fs;
+use std::io::{Read, Write};
 use std::path::PathBuf;
+
+const VIEW_CHECKPOINT_INTERVAL: u64 = 64;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ViewPosition {
@@ -52,6 +55,7 @@ struct DurableView {
 #[derive(Debug)]
 pub struct MaterializedView {
     path: Option<PathBuf>,
+    journal_path: Option<PathBuf>,
     tenant: String,
     name: String,
     limits: ViewLimits,
@@ -59,6 +63,7 @@ pub struct MaterializedView {
     positions: BTreeMap<String, u64>,
     last_sequence: u64,
     watch: VecDeque<ViewEvent>,
+    updates_since_checkpoint: u64,
 }
 
 impl MaterializedView {
@@ -74,6 +79,7 @@ impl MaterializedView {
         validate_limits(limits)?;
         Ok(Self {
             path: None,
+            journal_path: None,
             tenant,
             name,
             limits,
@@ -81,6 +87,7 @@ impl MaterializedView {
             positions: BTreeMap::new(),
             last_sequence: 0,
             watch: VecDeque::new(),
+            updates_since_checkpoint: 0,
         })
     }
 
@@ -93,6 +100,7 @@ impl MaterializedView {
         let path = path.into();
         let mut view = Self::new(tenant, name, limits)?;
         view.path = Some(path.clone());
+        view.journal_path = Some(path.with_extension("delta"));
         if path.exists() {
             let durable: DurableView = serde_json::from_slice(&fs::read(&path)?)
                 .map_err(|error| BrokerError::with_source("decoding materialized view", error))?;
@@ -100,6 +108,7 @@ impl MaterializedView {
             view.watch = durable.watch;
             view.watch.truncate(view.limits.watch_capacity);
         }
+        view.replay_journal()?;
         Ok(view)
     }
 
@@ -158,7 +167,12 @@ impl MaterializedView {
         while self.watch.len() > self.limits.watch_capacity {
             self.watch.pop_front();
         }
-        self.persist()?;
+        self.append_delta(self.watch.back().expect("watch event was appended"))?;
+        self.updates_since_checkpoint = self.updates_since_checkpoint.saturating_add(1);
+        if self.updates_since_checkpoint >= VIEW_CHECKPOINT_INTERVAL {
+            self.persist()?;
+            self.updates_since_checkpoint = 0;
+        }
         Ok(true)
     }
 
@@ -245,6 +259,85 @@ impl MaterializedView {
         let temporary = path.with_extension("tmp");
         fs::write(&temporary, body)?;
         fs::rename(temporary, path)?;
+        if let Some(journal) = &self.journal_path {
+            if journal.exists() {
+                fs::remove_file(journal)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn append_delta(&self, event: &ViewEvent) -> Result<()> {
+        let Some(path) = &self.journal_path else {
+            return Ok(());
+        };
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let body = serde_json::to_vec(event)
+            .map_err(|error| BrokerError::with_source("encoding materialized view delta", error))?;
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?;
+        file.write_all(&(body.len() as u32).to_le_bytes())?;
+        file.write_all(&crc32fast::hash(&body).to_le_bytes())?;
+        file.write_all(&body)?;
+        file.sync_data()?;
+        Ok(())
+    }
+
+    fn replay_journal(&mut self) -> Result<()> {
+        let Some(path) = &self.journal_path else {
+            return Ok(());
+        };
+        if !path.exists() {
+            return Ok(());
+        }
+        let mut file = fs::File::open(path)?;
+        loop {
+            let mut length = [0; 4];
+            match file.read_exact(&mut length) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                Err(error) => return Err(error.into()),
+            }
+            let length = u32::from_le_bytes(length) as usize;
+            let mut checksum = [0; 4];
+            file.read_exact(&mut checksum)?;
+            let mut body = vec![0; length];
+            file.read_exact(&mut body)?;
+            crate::broker_ensure!(
+                crc32fast::hash(&body) == u32::from_le_bytes(checksum),
+                "materialized view delta checksum mismatch"
+            );
+            let event: ViewEvent = serde_json::from_slice(&body).map_err(|error| {
+                BrokerError::with_source("decoding materialized view delta", error)
+            })?;
+            self.apply_replayed(event)?;
+        }
+        Ok(())
+    }
+
+    fn apply_replayed(&mut self, event: ViewEvent) -> Result<()> {
+        validate_update(&event.update, self.limits.max_value_bytes)?;
+        match &event.update.value {
+            Some(value) => {
+                self.entries.insert(event.update.key.clone(), value.clone());
+            }
+            None => {
+                self.entries.remove(&event.update.key);
+            }
+        }
+        self.positions.insert(
+            position_key(&event.update.position),
+            event.update.position.offset,
+        );
+        self.last_sequence = self.last_sequence.max(event.sequence);
+        self.watch.push_back(event);
+        while self.watch.len() > self.limits.watch_capacity {
+            self.watch.pop_front();
+        }
         Ok(())
     }
 }
