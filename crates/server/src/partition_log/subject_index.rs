@@ -9,16 +9,12 @@ use std::sync::Arc;
 
 const SUBJECT_INDEX_EXTENSION: &str = "sidx";
 const SUBJECT_INDEX_VERSION: u32 = 1;
-const MAX_INDEX_SUBJECTS: usize = 4_096;
-const MAX_INDEX_POSTINGS: usize = 65_536;
-const MAX_INDEX_BYTES: usize = 4 * 1024 * 1024;
 pub(super) const MAX_PARTITION_INDEX_CACHE_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug)]
 pub(super) struct SubjectSegment {
     pub(super) path: PathBuf,
     records: Vec<(String, u64)>,
-    record_count: usize,
     source_checksum: u64,
     index: Option<SubjectIndexFile>,
     encryption: Option<Arc<KeyRing>>,
@@ -40,11 +36,9 @@ impl SubjectSegment {
         encryption: Option<Arc<KeyRing>>,
     ) -> Self {
         let source_checksum = records_checksum(&records);
-        let record_count = records.len();
         Self {
             path,
             records,
-            record_count,
             source_checksum,
             index: None,
             encryption,
@@ -53,24 +47,9 @@ impl SubjectSegment {
 
     pub(super) fn rebuild(&mut self, cache_budget: usize) -> Result<usize> {
         let index_path = self.path.with_extension(SUBJECT_INDEX_EXTENSION);
-        let Some(mut index) = build_index(&self.records, self.source_checksum) else {
-            if index_path.exists() {
-                std::fs::remove_file(index_path)?;
-            }
-            self.index = None;
-            self.release_records();
-            return Ok(0);
-        };
+        let mut index = build_index(&self.records, self.source_checksum);
         index.index_checksum = index_checksum(&index);
         let body = serde_json::to_vec(&index).context("encoding segment subject index")?;
-        if body.len() > MAX_INDEX_BYTES {
-            if index_path.exists() {
-                std::fs::remove_file(index_path)?;
-            }
-            self.index = None;
-            self.release_records();
-            return Ok(0);
-        }
         let tmp_path = self.path.with_extension("sidx.tmp");
         std::fs::write(&tmp_path, &body)?;
         std::fs::rename(tmp_path, index_path)?;
@@ -89,9 +68,15 @@ impl SubjectSegment {
         if let Some(query) = self
             .index
             .as_ref()
-            .and_then(|index| indexed_offsets(index, filter, self.record_count / 4))
+            .and_then(|index| indexed_offsets(index, filter))
         {
             return Ok(query);
+        }
+        let index_path = self.path.with_extension(SUBJECT_INDEX_EXTENSION);
+        if let Some(index) = load_index(&index_path, self.source_checksum)? {
+            if let Some(query) = indexed_offsets(&index, filter) {
+                return Ok(query);
+            }
         }
         scan_segment(&self.path, filter, self.encryption.as_ref())
     }
@@ -112,28 +97,22 @@ pub(super) fn active_matching_offsets(
     }
 }
 
-fn build_index(records: &[(String, u64)], source_checksum: u64) -> Option<SubjectIndexFile> {
+fn build_index(records: &[(String, u64)], source_checksum: u64) -> SubjectIndexFile {
     let mut postings: BTreeMap<String, Vec<u64>> = BTreeMap::new();
     for (concrete_subject, offset) in records {
-        if !postings.contains_key(concrete_subject) && postings.len() >= MAX_INDEX_SUBJECTS {
-            return None;
-        }
         postings
             .entry(concrete_subject.clone())
             .or_default()
             .push(*offset);
-        if records.len() > MAX_INDEX_POSTINGS {
-            return None;
-        }
     }
     let (dictionary, postings): (Vec<_>, Vec<_>) = postings.into_iter().unzip();
-    Some(SubjectIndexFile {
+    SubjectIndexFile {
         version: SUBJECT_INDEX_VERSION,
         source_checksum,
         dictionary,
         postings,
         index_checksum: 0,
-    })
+    }
 }
 
 fn scan_offsets(records: &[(String, u64)], filter: &str) -> Vec<u64> {
@@ -163,11 +142,7 @@ fn scan_segment(
     })
 }
 
-fn indexed_offsets(
-    index: &SubjectIndexFile,
-    filter: &str,
-    wildcard_posting_budget: usize,
-) -> Option<SubjectIndexQuery> {
+fn indexed_offsets(index: &SubjectIndexFile, filter: &str) -> Option<SubjectIndexQuery> {
     if !filter.contains('*') && !filter.contains('>') {
         let offsets = index
             .dictionary
@@ -180,17 +155,9 @@ fn indexed_offsets(
             used_index: true,
         });
     }
-    if filter == ">" || filter.ends_with("/**") {
-        return None;
-    }
     let mut matching_postings = Vec::new();
-    let mut posting_count = 0usize;
     for (concrete_subject, postings) in index.dictionary.iter().zip(&index.postings) {
         if subject::matches(filter, concrete_subject) {
-            posting_count = posting_count.saturating_add(postings.len());
-            if posting_count > wildcard_posting_budget {
-                return None;
-            }
             matching_postings.push(postings);
         }
     }
@@ -202,6 +169,26 @@ fn indexed_offsets(
         offsets: offsets.into_iter().collect(),
         used_index: true,
     })
+}
+
+fn load_index(path: &Path, source_checksum: u64) -> Result<Option<SubjectIndexFile>> {
+    let body = match std::fs::read(path) {
+        Ok(body) => body,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let index = match serde_json::from_slice::<SubjectIndexFile>(&body) {
+        Ok(index) => index,
+        Err(_) => return Ok(None),
+    };
+    if index.version != SUBJECT_INDEX_VERSION
+        || index.source_checksum != source_checksum
+        || index.index_checksum != index_checksum(&index)
+        || index.dictionary.len() != index.postings.len()
+    {
+        return Ok(None);
+    }
+    Ok(Some(index))
 }
 
 fn records_checksum(records: &[(String, u64)]) -> u64 {
