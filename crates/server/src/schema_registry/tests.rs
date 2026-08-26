@@ -129,3 +129,38 @@ fn references_deletion_and_rollback_are_tenant_scoped() {
     );
     assert!(registry.get("tenant-a", "orders", 1).is_some());
 }
+
+#[test]
+fn duplicate_persisted_ids_fail_closed_during_recovery() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("schemas.json");
+    let schema = SchemaVersion {
+        id: 7,
+        tenant: "tenant-a".into(),
+        subject: "orders".into(),
+        version: 1,
+        format: SchemaFormat::JsonSchema,
+        definition: r#"{"type":"object"}"#.into(),
+        references: Vec::new(),
+        deleted: false,
+    };
+    let duplicate = SchemaVersion {
+        subject: "payments".into(),
+        ..schema.clone()
+    };
+    let state = RegistryState {
+        next_id: 8,
+        subjects: [
+            (key("tenant-a", "orders"), vec![schema]),
+            (key("tenant-a", "payments"), vec![duplicate]),
+        ]
+        .into_iter()
+        .collect(),
+    };
+    fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
+    let error = match SchemaRegistry::open(path) {
+        Ok(_) => panic!("duplicate schema ID was accepted"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("duplicate schema ID"));
+}
