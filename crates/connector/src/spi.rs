@@ -39,6 +39,12 @@ pub trait Connector: Send {
 pub trait SourceTask: Connector {
     fn poll(&mut self, max_records: usize, max_bytes: usize) -> Result<Vec<SourceRecord>, String>;
     fn commit_source_offset(&mut self, source_offset: &str) -> Result<(), String>;
+    fn commit_source_offsets(&mut self, source_offsets: &[String]) -> Result<(), String> {
+        for offset in source_offsets {
+            self.commit_source_offset(offset)?;
+        }
+        Ok(())
+    }
 }
 
 pub trait SinkTask: Connector {
