@@ -84,11 +84,20 @@ impl ClusterRuntime {
         &self,
         envelope: MessageEnvelope,
         fsync: bool,
+        cluster_durable: bool,
     ) -> Result<MessageEnvelope> {
         match self {
-            Self::Real(runtime) => runtime.replicate_partition(envelope, fsync).await,
+            Self::Real(runtime) => {
+                runtime
+                    .replicate_partition(envelope, fsync, cluster_durable)
+                    .await
+            }
             #[cfg(test)]
-            Self::Fake(runtime) => runtime.replicate_partition(envelope, fsync).await,
+            Self::Fake(runtime) => {
+                runtime
+                    .replicate_partition(envelope, fsync, cluster_durable)
+                    .await
+            }
         }
     }
 

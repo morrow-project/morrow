@@ -401,9 +401,16 @@ impl Morrow {
                 leader_epoch: 0,
                 legacy_seq: seq,
             };
-            let fsync = ack.is_none_or(|ack| ack.level == protocol::AckLevel::HighDurability);
+            let cluster_durable =
+                ack.is_some_and(|ack| ack.level == protocol::AckLevel::ClusterDurable);
+            let fsync = ack.is_none_or(|ack| {
+                matches!(
+                    ack.level,
+                    protocol::AckLevel::HighDurability | protocol::AckLevel::ClusterDurable
+                )
+            });
             let envelope = match cluster
-                .replicate_partition(envelope, fsync)
+                .replicate_partition(envelope, fsync, cluster_durable)
                 .instrument(tracing::info_span!("morrow.cluster.commit"))
                 .await
             {

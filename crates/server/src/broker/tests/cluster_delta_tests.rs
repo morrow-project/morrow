@@ -98,7 +98,10 @@ async fn randomized_incremental_application_matches_full_reconciliation() {
                     legacy_seq: next_seq,
                 };
                 next_seq += 1;
-                let committed = cluster.replicate_partition(envelope, false).await.unwrap();
+                let committed = cluster
+                    .replicate_partition(envelope, false, false)
+                    .await
+                    .unwrap();
                 scenario
                     .broker()
                     .apply_cluster_partition(committed)
