@@ -45,6 +45,7 @@ pub(super) async fn serve_raft(
     tls: Option<RaftTlsRuntime>,
     quotas: Arc<crate::quota::QuotaRuntime>,
 ) -> Result<()> {
+    let io_gate = Arc::new(tokio::sync::Semaphore::new(64));
     loop {
         let (stream, _) = listener.accept().await.context("accepting Raft RPC")?;
         let Some(permit) = quotas.try_raft() else {
@@ -55,6 +56,7 @@ pub(super) async fn serve_raft(
         let auth_token = auth_token.clone();
         let partition_data = partition_data.clone();
         let tls = tls.clone();
+        let io_gate = io_gate.clone();
         tokio::spawn(async move {
             let _permit = permit;
             let result = if let Some(tls) = tls {
@@ -76,6 +78,7 @@ pub(super) async fn serve_raft(
                                 &auth_token,
                                 partition_data,
                                 Some(peer_id),
+                                io_gate,
                             )
                             .await
                         }
@@ -92,6 +95,7 @@ pub(super) async fn serve_raft(
                     &auth_token,
                     partition_data,
                     None,
+                    io_gate,
                 )
                 .await
             };
@@ -109,6 +113,7 @@ pub(super) async fn handle_raft_stream<S>(
     auth_token: &str,
     partition_data: SharedReplicaData,
     tls_peer_id: Option<u64>,
+    io_gate: Arc<tokio::sync::Semaphore>,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -160,20 +165,36 @@ where
                 } else {
                     request.committed_high_watermark =
                         committed.map(|commit| commit.high_watermark);
-                    match partition_data.lock().unwrap().append(&request) {
+                    match run_replica_io(io_gate.clone(), partition_data.clone(), move |store| {
+                        store.append(&request)
+                    })
+                    .await
+                    {
                         Ok(response) => RaftResponse::DataAppend(response),
                         Err(err) => RaftResponse::Error(err.to_string()),
                     }
                 }
             }
             RaftRequest::DataProgress(request) => {
-                RaftResponse::DataProgress(partition_data.lock().unwrap().progress(&request))
+                match run_replica_io(io_gate.clone(), partition_data.clone(), move |store| {
+                    Ok(store.progress(&request))
+                })
+                .await
+                {
+                    Ok(progress) => RaftResponse::DataProgress(progress),
+                    Err(err) => RaftResponse::Error(err.to_string()),
+                }
             }
             RaftRequest::DataManifest(request) => {
                 let metadata = state_machine.durable_state();
-                RaftResponse::DataManifest(
-                    partition_data.lock().unwrap().manifest(&request, &metadata),
-                )
+                match run_replica_io(io_gate.clone(), partition_data.clone(), move |store| {
+                    Ok(store.manifest(&request, &metadata))
+                })
+                .await
+                {
+                    Ok(manifest) => RaftResponse::DataManifest(manifest),
+                    Err(err) => RaftResponse::Error(err.to_string()),
+                }
             }
             RaftRequest::DataHeartbeat(request) => {
                 let metadata = state_machine.durable_state();
@@ -213,6 +234,29 @@ where
         };
         write_frame(&mut stream, &response).await?;
     }
+}
+
+async fn run_replica_io<T, F>(
+    io_gate: Arc<tokio::sync::Semaphore>,
+    partition_data: SharedReplicaData,
+    operation: F,
+) -> Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce(&mut ReplicaDataStore) -> Result<T> + Send + 'static,
+{
+    let permit = io_gate
+        .try_acquire_owned()
+        .map_err(|_| BrokerError::msg("partition I/O queue is full"))?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let mut store = partition_data
+            .lock()
+            .map_err(|_| BrokerError::msg("partition I/O lock poisoned"))?;
+        operation(&mut store)
+    })
+    .await
+    .map_err(|err| BrokerError::with_source("partition I/O worker failed", err))?
 }
 
 pub(super) async fn read_authenticated_request<R>(
