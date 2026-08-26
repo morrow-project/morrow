@@ -15,6 +15,9 @@ pub struct RaftRuntime {
     raft_tls: Option<RaftTlsRuntime>,
     quotas: Arc<crate::quota::QuotaRuntime>,
     data_clients: Arc<tokio::sync::Mutex<HashMap<u64, NetworkClient>>>,
+    /// Partition-local commit watermarks used during the versioned migration
+    /// away from per-message global Raft proposals.
+    local_commits: Arc<std::sync::Mutex<HashMap<String, PartitionCommitMetadata>>>,
 }
 #[derive(Debug, Clone)]
 pub struct ClusterNode {
@@ -169,6 +172,7 @@ impl RaftRuntime {
             raft_tls,
             quotas,
             data_clients: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            local_commits: Arc::new(std::sync::Mutex::new(HashMap::new())),
         })
     }
 
@@ -390,6 +394,18 @@ impl RaftRuntime {
             crate::broker_ensure!(flushed >= quorum, "partition fsync quorum unavailable");
         }
         self.partition_data.lock().unwrap().append(&request)?;
+        if metadata.feature_gates.contains("partition-local-commit-v1") {
+            self.local_commits.lock().unwrap().insert(
+                key,
+                PartitionCommitMetadata {
+                    high_watermark: envelope.offset,
+                    checksum: crate::partition_log::committed_envelope_checksum(&envelope)?,
+                    leader_id: self.node_id,
+                    leader_epoch,
+                },
+            );
+            return Ok(envelope);
+        }
         let response = self
             .client_write(BrokerCommand::PartitionCommit {
                 stream: envelope.stream.as_str().to_string(),
