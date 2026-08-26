@@ -316,18 +316,24 @@ impl RaftRuntime {
                 } else {
                     crate::work_scheduler::WorkClass::CatchUp
                 };
-                let reserved = if catch_up_records == 0 {
-                    false
+                let reservation = if catch_up_records == 0 {
+                    None
                 } else {
-                    let mut scheduler = work_scheduler.lock().await;
-                    if !scheduler.try_reserve(work_class, catch_up_records, catch_up_bytes) {
+                    let reservation = crate::work_scheduler::WorkReservation::try_acquire(
+                        work_scheduler.clone(),
+                        work_class,
+                        catch_up_records,
+                        catch_up_bytes,
+                    )
+                    .await;
+                    if reservation.is_none() {
                         return Err(BrokerError::msg(if required {
                             "quorum replication work budget exhausted"
                         } else {
                             "catch-up work budget exhausted"
                         }));
                     }
-                    true
+                    reservation
                 };
                 let result = async {
                     let mut append_batch = Vec::with_capacity(max_records);
@@ -393,13 +399,7 @@ impl RaftRuntime {
                         .ok_or_else(|| BrokerError::msg("partition append batch was empty"))
                 }
                 .await;
-                if reserved {
-                    work_scheduler.lock().await.release(
-                        work_class,
-                        catch_up_records,
-                        catch_up_bytes,
-                    );
-                }
+                drop(reservation);
                 result
             };
             if required {
