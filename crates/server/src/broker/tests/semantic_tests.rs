@@ -1,6 +1,32 @@
 use super::*;
 
 #[tokio::test]
+async fn partition_expansion_is_epoch_fenced_by_broker_runtime() {
+    let dir = TempDir::new().unwrap();
+    let broker = deterministic_broker(
+        test_config(dir.path()),
+        Arc::new(ManualClock::new(1_000)),
+        None,
+    );
+
+    let plan = broker.begin_partition_expansion("orders", 8).await.unwrap();
+    assert_eq!(plan.from_partitions, 1);
+    assert_eq!(plan.to_partitions, 8);
+    assert!(!broker.partition_expansion_epoch("orders", 4).await.unwrap());
+    assert!(
+        broker
+            .mark_partition_expansion_prepared("orders", 8)
+            .await
+            .is_ok()
+    );
+    assert_eq!(
+        broker.activate_partition_expansion("orders").await.unwrap(),
+        (8, 2)
+    );
+    assert!(broker.partition_expansion_epoch("orders", 2).await.unwrap());
+}
+
+#[tokio::test]
 async fn configured_materialized_view_projects_committed_records() {
     let dir = TempDir::new().unwrap();
     let mut config = test_config(dir.path());

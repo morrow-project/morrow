@@ -630,6 +630,18 @@ impl Morrow {
             },
         )?;
         let wal = WalRuntime::new(wal);
+        let partition_expansions = config
+            .streams
+            .definitions()
+            .iter()
+            .filter_map(|stream| {
+                crate::partition_expansion::PartitionExpansion::new(
+                    stream.partitions,
+                    stream.partitioning.epoch,
+                )
+                .map(|expansion| (stream.name.as_str().to_string(), expansion))
+            })
+            .collect();
         Ok(Self {
             inner: Arc::new(Mutex::new(DurableBrokerState {
                 wal: wal.clone(),
@@ -709,6 +721,7 @@ impl Morrow {
             views: Arc::new(Mutex::new(views)),
             reassignment: Arc::new(Mutex::new(reassignment)),
             cross_region: Arc::new(Mutex::new(cross_region)),
+            partition_expansions: Arc::new(Mutex::new(partition_expansions)),
         })
     }
 
