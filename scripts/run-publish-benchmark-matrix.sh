@@ -21,9 +21,11 @@ Options:
   --clients N                     Publisher connections (default: 5)
   --duration D                    Measured duration per case (default: 10s)
   --warmup D                      Unmeasured warm-up per case (default: 0s)
-  --payload-size N                Application payload bytes (default: 1024)
+  --payload-size N                Application payload bytes (default: 128)
   --throughput N                  Aggregate rate limit; 0 is unlimited
                                   (default: 0)
+  --fire-throughput N             Separate bound fire-and-forget rate limit;
+                                  defaults to --throughput
   --subjects N                    Number of generated subjects (default: 1)
   --partitions N                  Partitions in managed fixtures (default: 1)
   --key-cardinality N             Number of generated routing keys (default: 0)
@@ -70,8 +72,9 @@ ack_levels=
 clients=5
 duration=10s
 warmup=0s
-payload_size=1024
+payload_size=128
 throughput=0
+fire_throughput=
 subjects=1
 partitions=1
 key_cardinality=0
@@ -128,6 +131,11 @@ while test "$#" -gt 0; do
     --throughput)
       test "$#" -ge 2 || die "$1 requires a value"
       throughput=$2
+      shift 2
+      ;;
+    --fire-throughput)
+      test "$#" -ge 2 || die "$1 requires a value"
+      fire_throughput=$2
       shift 2
       ;;
     --subjects)
@@ -248,11 +256,12 @@ for value in "$clients" "$payload_size" "$subjects" "$partitions" "$max_in_fligh
     ''|*[!0-9]*|0) die "positive integer options must be greater than zero" ;;
   esac
 done
-for value in "$throughput" "$key_cardinality"; do
+for value in "$throughput" "${fire_throughput:-0}" "$key_cardinality"; do
   case "$value" in
     ''|*[!0-9]*) die "rate and cardinality options must be non-negative integers" ;;
   esac
 done
+test -n "$fire_throughput" || fire_throughput=$throughput
 
 if test -z "$ack_levels"; then
   if test "$topology" = cluster; then
@@ -399,9 +408,9 @@ $stream,
       {"node_id":2,"raft_addr":"127.0.0.1:15222","client_addr":"127.0.0.1:14222"},
       {"node_id":3,"raft_addr":"127.0.0.1:15223","client_addr":"127.0.0.1:14223"}
     ],
-    "election_timeout_min_ms": 150,
-    "election_timeout_max_ms": 300,
-    "heartbeat_interval_ms": 50,
+    "election_timeout_min_ms": 1000,
+    "election_timeout_max_ms": 2000,
+    "heartbeat_interval_ms": 250,
     "snapshot_threshold": 10000
   }
 }
@@ -427,11 +436,28 @@ wait_for_ping() {
 
 wait_for_cluster() {
   attempts=0
-  until curl -fsS http://127.0.0.1:18221/health/ready >/dev/null 2>&1; do
+  until cluster_node_ready 18221 \
+    && cluster_node_ready 18222 \
+    && cluster_node_ready 18223; do
     attempts=$((attempts + 1))
     test "$attempts" -lt 200 || return 1
     sleep 0.1
   done
+}
+
+cluster_node_ready() {
+  http_port=$1
+  cluster_status=$(curl -fsS \
+    -H 'Authorization: Bearer publish-benchmark-admin' \
+    "http://127.0.0.1:$http_port/cluster" 2>/dev/null) || return 1
+  case "$cluster_status" in
+    *'"cluster_status":"ready"'*'"partitions":[{"stream":"publish-benchmark"'*'"leader_id":1'*)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
 }
 
 start_fixture() {
@@ -478,6 +504,10 @@ run_case() {
   result_json=$output_dir/$case_name.json
   result_csv=$output_dir/$case_name.csv
   result_stderr=$output_dir/$case_name.stderr.txt
+  case_throughput=$throughput
+  case "$case_name" in
+    *-stream-fire-and-forget) case_throughput=$fire_throughput ;;
+  esac
   echo "running $case_name"
   case_ok=true
   case "$warmup" in
@@ -486,7 +516,7 @@ run_case() {
           --clients "$clients" \
           --duration "$duration" \
           --payload-size "$payload_size" \
-          --throughput "$throughput" \
+          --throughput "$case_throughput" \
           --subjects "$subjects" \
           --key-cardinality "$key_cardinality" \
           "$@" \
@@ -501,7 +531,7 @@ run_case() {
           --duration "$duration" \
           --warmup "$warmup" \
           --payload-size "$payload_size" \
-          --throughput "$throughput" \
+          --throughput "$case_throughput" \
           --subjects "$subjects" \
           --key-cardinality "$key_cardinality" \
           "$@" \
@@ -540,6 +570,7 @@ duration=$duration
 warmup=$warmup
 payload_size=$payload_size
 throughput=$throughput
+fire_throughput=$fire_throughput
 subjects=$subjects
 partitions=$partitions
 key_cardinality=$key_cardinality

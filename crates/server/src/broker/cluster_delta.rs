@@ -208,6 +208,7 @@ impl DurableBrokerState {
         catalog: &crate::stream::StreamCatalog,
     ) -> Result<()> {
         let record = PublishRecord::from(envelope.clone());
+        let resident_record = record.clone().into_resident_metadata();
         let key = (
             envelope.stream.as_str().to_string(),
             envelope.partition.0,
@@ -215,7 +216,7 @@ impl DurableBrokerState {
         );
         if let Some(existing_seq) = self.partition_sequences.get(&key) {
             crate::broker_ensure!(
-                self.messages.get(existing_seq) == Some(&record),
+                self.messages.get(existing_seq) == Some(&resident_record),
                 "committed partition delta conflicts with local state"
             );
             return Ok(());
@@ -230,8 +231,7 @@ impl DurableBrokerState {
         self.partition_sequences.insert(key, record.seq);
         let subject = record.subject.clone();
         let seq = record.seq;
-        self.messages
-            .insert(seq, record.clone().into_resident_metadata());
+        self.messages.insert(seq, resident_record);
         self.observe_published_record(&record);
         self.mark_subject_ready(&subject);
         self.apply_record_compaction(seq, catalog);

@@ -197,6 +197,51 @@ async fn duplicate_consumer_delta_is_idempotent_and_does_not_regress_cursors() {
     );
 }
 
+#[tokio::test]
+async fn duplicate_committed_partition_with_payload_is_idempotent() {
+    let scenario = Scenario::new();
+    let envelope = MessageEnvelope {
+        namespace: DEFAULT_NAMESPACE.into(),
+        stream: crate::stream::StreamId::new("orders").unwrap(),
+        partition: crate::stream::PartitionId(0),
+        offset: 0,
+        subject: "orders/created".into(),
+        key: None,
+        headers: vec![],
+        timestamp_ms: 1,
+        reply_to: None,
+        schema_id: None,
+        payload: b"non-empty payload".to_vec(),
+        partitioning_epoch: 0,
+        leader_epoch: 1,
+        legacy_seq: 1,
+    };
+
+    scenario
+        .broker()
+        .apply_cluster_partition(envelope.clone())
+        .await
+        .unwrap();
+    scenario
+        .broker()
+        .apply_cluster_partition(envelope.clone())
+        .await
+        .unwrap();
+
+    let mut conflicting = envelope;
+    conflicting.subject = "orders/conflicting".into();
+    let error = scenario
+        .broker()
+        .apply_cluster_partition(conflicting)
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("partition-log append conflicts with an immutable committed record")
+    );
+}
+
 async fn assert_equivalent(incremental: &Morrow, reconciled: &Morrow) {
     let incremental = incremental.inner.lock().await;
     let reconciled = reconciled.inner.lock().await;

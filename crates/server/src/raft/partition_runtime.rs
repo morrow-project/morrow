@@ -7,6 +7,12 @@ impl RaftRuntime {
         fsync: bool,
         cluster_durable: bool,
     ) -> Result<crate::partition_log::MessageEnvelope> {
+        let key = partition_key(envelope.stream.as_str(), envelope.partition.0);
+        let write_gate = self
+            .partition_write_gates
+            .get(&key)
+            .ok_or_else(|| BrokerError::msg("partition has no write coordinator"))?;
+        let _write_guard = write_gate.lock().await;
         crate::broker_ensure!(
             self.raft.current_leader().await == Some(self.node_id),
             "not partition leader"
@@ -20,7 +26,6 @@ impl RaftRuntime {
                 .has_committed_prefix(&metadata),
             "no safe replica available"
         );
-        let key = partition_key(envelope.stream.as_str(), envelope.partition.0);
         let assignment = metadata
             .partition_assignments
             .get(&key)
@@ -123,7 +128,8 @@ impl RaftRuntime {
                 send_data_append_on_client(&client, request).await
             };
             if required {
-                joins.spawn(task);
+                let node_id = *node_id;
+                joins.spawn(async move { (node_id, task.await) });
             } else {
                 tokio::spawn(async move {
                     if let Err(err) = task.await {
@@ -132,17 +138,35 @@ impl RaftRuntime {
                 });
             }
         }
-        while let Some(response) = joins.join_next().await {
-            if let Ok(Ok(response)) = response {
-                if response.match_offset == envelope.offset {
-                    replicated += 1;
+        let mut first_replica_error = None;
+        while let Some(result) = joins.join_next().await {
+            match result {
+                Ok((_, Ok(response))) => {
+                    if response.match_offset == envelope.offset {
+                        replicated += 1;
+                    }
+                    if response.flushed_offset == Some(envelope.offset) {
+                        flushed += 1;
+                    }
                 }
-                if response.flushed_offset == Some(envelope.offset) {
-                    flushed += 1;
+                Ok((node_id, Err(error))) => {
+                    first_replica_error.get_or_insert_with(|| {
+                        BrokerError::msg(format!(
+                            "partition replica {node_id} unavailable: {error}"
+                        ))
+                    });
+                }
+                Err(error) => {
+                    first_replica_error.get_or_insert_with(|| {
+                        BrokerError::with_source("partition replication worker failed", error)
+                    });
                 }
             }
         }
-        crate::broker_ensure!(replicated >= required_count, "partition quorum unavailable");
+        if replicated < required_count {
+            return Err(first_replica_error
+                .unwrap_or_else(|| BrokerError::msg("partition quorum unavailable")));
+        }
         if fsync {
             crate::broker_ensure!(
                 flushed >= required_count,

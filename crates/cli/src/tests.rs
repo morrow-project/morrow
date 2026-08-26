@@ -228,6 +228,7 @@ fn parses_all_benchmark_modes_and_common_controls() {
         };
         assert_eq!(options.clients, 2);
         assert_eq!(options.messages, Some(9));
+        assert_eq!(options.payload_size, 128);
         assert_eq!(options.seed, 42);
     }
 }
