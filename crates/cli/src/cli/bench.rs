@@ -9,6 +9,8 @@ use std::{
 };
 use tokio::sync::{Barrier, Mutex};
 
+const MAX_BENCHMARK_SAMPLES: usize = 100_000;
+
 #[derive(Debug, Clone)]
 pub(super) struct PubSubOptions {
     pub subject: String,
@@ -44,6 +46,7 @@ pub(super) struct BenchmarkResult {
     delivery_messages_per_second: f64,
     publish_latency_us: Percentiles,
     end_to_end_latency_us: Percentiles,
+    sample_cap: usize,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -139,9 +142,11 @@ pub(super) async fn run_pubsub(
                 }
                 stats.received += 1;
                 let now_ns = start.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
-                stats
-                    .latencies_us
-                    .push(now_ns.saturating_sub(sent_ns) / 1_000);
+                if stats.latencies_us.len() < MAX_BENCHMARK_SAMPLES {
+                    stats
+                        .latencies_us
+                        .push(now_ns.saturating_sub(sent_ns) / 1_000);
+                }
                 if ack {
                     if let Some(ack_subject) = &message.ack_subject {
                         client.ack(ack_subject).await?;
@@ -210,12 +215,15 @@ pub(super) async fn run_pubsub(
                     client.publish(&subject, &payload).await?;
                 }
                 published.fetch_add(1, Ordering::AcqRel);
-                publish_latencies.lock().await.push(
-                    publish_start
-                        .elapsed()
-                        .as_micros()
-                        .min(u128::from(u64::MAX)) as u64,
-                );
+                let mut publish_latencies = publish_latencies.lock().await;
+                if publish_latencies.len() < MAX_BENCHMARK_SAMPLES {
+                    publish_latencies.push(
+                        publish_start
+                            .elapsed()
+                            .as_micros()
+                            .min(u128::from(u64::MAX)) as u64,
+                    );
+                }
             }
             publishers_remaining.fetch_sub(1, Ordering::AcqRel);
             Ok::<_, CliError>(())
@@ -243,6 +251,7 @@ pub(super) async fn run_pubsub(
         .into_iter()
         .flat_map(|stats| stats.latencies_us)
         .collect::<Vec<_>>();
+    end_to_end.truncate(MAX_BENCHMARK_SAMPLES);
     let mut publish_latencies = Arc::try_unwrap(publish_latencies)
         .map_err(|_| CliError::msg("benchmark latency collection is still in use"))?
         .into_inner();
@@ -295,6 +304,7 @@ pub(super) async fn run_pubsub(
         delivery_messages_per_second: messages_received as f64 * 1_000.0 / elapsed_ms as f64,
         publish_latency_us: percentiles(&mut publish_latencies),
         end_to_end_latency_us: percentiles(&mut end_to_end),
+        sample_cap: MAX_BENCHMARK_SAMPLES,
     })
 }
 

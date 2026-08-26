@@ -149,3 +149,78 @@ async fn benchmark_cluster_durable_publish_latency() {
     );
     harness.shutdown().await;
 }
+
+#[tokio::test]
+#[ignore = "release-mode slow-follower and quorum benchmark"]
+async fn benchmark_cluster_durable_publish_with_slow_follower() {
+    let harness = ClusterHarness::start_three().await;
+    let leader = harness.wait_for_leader().await;
+    let leader_node = harness
+        .nodes
+        .iter()
+        .find(|node| node.node_id == leader)
+        .unwrap();
+    let mut publisher = Client::connect(leader_node.client_addr, harness.max_payload)
+        .await
+        .unwrap();
+    publisher.read_info().await.unwrap();
+    publisher
+        .connect_durable("slow-follower-benchmark", false, 5_000, 16)
+        .await
+        .unwrap();
+
+    let mut healthy = Vec::with_capacity(SAMPLES);
+    for sample in 0..SAMPLES {
+        let before = std::time::Instant::now();
+        publisher
+            .publish_with_qos(
+                "orders/created",
+                None,
+                b"healthy",
+                client::protocol::AckLevel::Durable,
+                &format!("healthy-{sample}"),
+            )
+            .await
+            .unwrap();
+        healthy.push(before.elapsed());
+    }
+
+    let follower_index = harness
+        .nodes
+        .iter()
+        .position(|node| node.node_id != leader)
+        .unwrap();
+    harness.brokers[follower_index].shutdown().await.unwrap();
+    harness.server_tasks[follower_index].abort();
+
+    let started = std::time::Instant::now();
+    let mut degraded = Vec::with_capacity(SAMPLES);
+    for sample in 0..SAMPLES {
+        let before = std::time::Instant::now();
+        publisher
+            .publish_with_qos(
+                "orders/created",
+                None,
+                b"degraded",
+                client::protocol::AckLevel::Durable,
+                &format!("degraded-{sample}"),
+            )
+            .await
+            .unwrap();
+        degraded.push(before.elapsed());
+    }
+    let elapsed = started.elapsed();
+    healthy.sort_unstable();
+    degraded.sort_unstable();
+    let percentile = |samples: &[std::time::Duration], percent: usize| {
+        samples[(samples.len() * percent / 100).min(samples.len() - 1)]
+    };
+    eprintln!(
+        "cluster_slow_follower samples={SAMPLES} healthy_p95_us={} degraded_p95_us={} degraded_p99_us={} degraded_throughput={:.1}/s",
+        percentile(&healthy, 95).as_micros(),
+        percentile(&degraded, 95).as_micros(),
+        percentile(&degraded, 99).as_micros(),
+        SAMPLES as f64 / elapsed.as_secs_f64(),
+    );
+    harness.shutdown().await;
+}
