@@ -3,6 +3,7 @@ use super::*;
 const PARTITION_INGRESS_BATCH_RECORDS: usize = 32;
 const PARTITION_INGRESS_BATCH_BYTES: usize = 1024 * 1024;
 const PARTITION_INGRESS_BATCH_DELAY_MS: u64 = 2;
+const MAX_PARTITION_INGRESS_QUEUES: usize = 4096;
 
 pub(super) struct PartitionIngressItem {
     envelope: crate::partition_log::MessageEnvelope,
@@ -31,6 +32,10 @@ impl RaftRuntime {
             if let Some(sender) = queues.get(&key) {
                 sender.clone()
             } else {
+                crate::broker_ensure!(
+                    queues.len() < MAX_PARTITION_INGRESS_QUEUES,
+                    "partition ingress queue budget exhausted"
+                );
                 let (sender, receiver) = tokio::sync::mpsc::channel(1024);
                 queues.insert(key.clone(), sender.clone());
                 let runtime = self.clone();
