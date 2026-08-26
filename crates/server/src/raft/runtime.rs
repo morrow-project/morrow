@@ -407,6 +407,7 @@ impl RaftRuntime {
             "metadata bootstrap requires at least one data broker"
         );
         let mut assignments = HashMap::new();
+        let mut placement_index = 0usize;
         for stream in &self.configured_streams {
             for partition in 0..stream.partitions {
                 let replica_count = usize::try_from(stream.storage.replicas)
@@ -414,11 +415,9 @@ impl RaftRuntime {
                     .min(replica_order.len())
                     .max(1);
                 let replicas = (0..replica_count)
-                    .map(|offset| {
-                        replica_order[(partition as usize + offset) % replica_order.len()]
-                    })
+                    .map(|offset| replica_order[(placement_index + offset) % replica_order.len()])
                     .collect::<BTreeSet<_>>();
-                let leader_id = initial_partition_leader(&replica_order, partition);
+                let leader_id = replica_order[placement_index % replica_order.len()];
                 let active_count = usize::try_from(stream.storage.min_ack_replicas)
                     .unwrap_or(replica_count)
                     .min(replica_count)
@@ -443,6 +442,7 @@ impl RaftRuntime {
                         leader_epoch: 1,
                     },
                 );
+                placement_index = placement_index.saturating_add(1);
             }
         }
         let response = self
