@@ -2,6 +2,109 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 
 use super::*;
 
+fn duplex_client(io: tokio::io::DuplexStream) -> Client {
+    Client {
+        stream: BufReader::new(Box::new(io)),
+        max_payload: 1024,
+        inbox_prefix: "_MORROW/INBOX/test".to_string(),
+        inbox_counter: 0,
+        durable: true,
+        push_credit_messages: 1,
+        pending_messages: VecDeque::new(),
+        ack_contract_version: Some(protocol::model::ACK_CONTRACT_VERSION),
+    }
+}
+
+#[tokio::test]
+async fn application_headers_are_encoded_and_reserved_headers_are_rejected() {
+    let (client_io, server_io) = tokio::io::duplex(1024);
+    let mut client = duplex_client(client_io);
+    let server = tokio::spawn(async move {
+        let mut server = tokio::io::BufReader::new(server_io);
+        let mut line = String::new();
+        server.read_line(&mut line).await.unwrap();
+        let total = line
+            .split_whitespace()
+            .last()
+            .unwrap()
+            .parse::<usize>()
+            .unwrap();
+        let mut body = vec![0; total + 2];
+        server.read_exact(&mut body).await.unwrap();
+        let encoded = String::from_utf8(body).unwrap();
+        assert!(encoded.contains("Trace-Id: abc\r\n"));
+        assert!(encoded.ends_with("\r\n\r\nhello\r\n"));
+    });
+
+    client
+        .publish_with_headers(
+            "orders/created",
+            None,
+            b"hello",
+            &[("Trace-Id".into(), "abc".into())],
+        )
+        .await
+        .unwrap();
+    server.await.unwrap();
+
+    let error = client
+        .publish_with_headers(
+            "orders/created",
+            None,
+            b"hello",
+            &[("Morrow-QoS".into(), "0".into())],
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("Morrow-*"));
+}
+
+#[tokio::test]
+async fn batch_publish_preserves_application_headers() {
+    let (client_io, server_io) = tokio::io::duplex(2048);
+    let mut client = duplex_client(client_io);
+    let server = tokio::spawn(async move {
+        let mut server = tokio::io::BufReader::new(server_io);
+        for message_id in ["one", "two"] {
+            let mut line = String::new();
+            server.read_line(&mut line).await.unwrap();
+            let total = line
+                .split_whitespace()
+                .last()
+                .unwrap()
+                .parse::<usize>()
+                .unwrap();
+            let mut body = vec![0; total + 2];
+            server.read_exact(&mut body).await.unwrap();
+            assert!(
+                String::from_utf8(body)
+                    .unwrap()
+                    .contains("Benchmark: yes\r\n")
+            );
+            server
+                .get_mut()
+                .write_all(format!("P-ACK {message_id} 1 OK true 1 contract=1\r\n").as_bytes())
+                .await
+                .unwrap();
+        }
+    });
+    let headers = vec![("Benchmark".to_string(), "yes".to_string())];
+    let requests = ["one", "two"].map(|message_id| BatchPublishRequestWithHeaders {
+        subject: "orders/created",
+        payload: b"hello",
+        level: protocol::AckLevel::Durable,
+        msg_id: message_id,
+        key: None,
+        headers: &headers,
+    });
+    let acknowledgements = client
+        .publish_batch_with_qos_key_and_headers(&requests)
+        .await
+        .unwrap();
+    assert_eq!(acknowledgements.len(), 2);
+    server.await.unwrap();
+}
+
 #[tokio::test]
 async fn keyed_qos_publish_encodes_partition_key_and_waits_for_commit_ack() {
     let (client_io, server_io) = tokio::io::duplex(1024);
@@ -78,6 +181,30 @@ async fn ping_roundtrip_buffers_delivery_that_arrives_before_pong() {
     client.ping_roundtrip().await.unwrap();
     let message = client.next_message().await.unwrap();
     assert_eq!(message.subject, "orders/created");
+    assert_eq!(message.payload, b"hello");
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn acknowledgement_buffers_delivery_that_arrives_before_confirmation() {
+    let (client_io, server_io) = tokio::io::duplex(1024);
+    let mut client = duplex_client(client_io);
+    let server = tokio::spawn(async move {
+        let mut server = tokio::io::BufReader::new(server_io);
+        let mut ack = String::new();
+        server.read_line(&mut ack).await.unwrap();
+        assert_eq!(ack, "ACK consumer 1 2\r\n");
+        server
+            .get_mut()
+            .write_all(
+                b"DELIVER service/echo sid1 _MORROW/ACK/consumer/3/4 5\r\nhello\r\nD-OK ACK consumer 1 2\r\n",
+            )
+            .await
+            .unwrap();
+    });
+
+    client.ack("_MORROW/ACK/consumer/1/2").await.unwrap();
+    let message = client.next_message().await.unwrap();
     assert_eq!(message.payload, b"hello");
     server.await.unwrap();
 }

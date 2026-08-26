@@ -342,267 +342,6 @@ impl Client {
         }
     }
 
-    pub async fn publish(&mut self, subject: &str, payload: &[u8]) -> Result<()> {
-        self.publish_with_reply(subject, None, payload).await
-    }
-
-    pub async fn publish_with_reply(
-        &mut self,
-        subject: &str,
-        reply_to: Option<&str>,
-        payload: &[u8],
-    ) -> Result<()> {
-        if payload.len() > self.max_payload {
-            return Err(ClientError::msg(format!(
-                "payload size {} exceeds max payload {}",
-                payload.len(),
-                self.max_payload
-            )));
-        }
-        match reply_to {
-            Some(reply_to) => {
-                self.write_line(&format!("PUB {subject} {reply_to} {}", payload.len()))
-                    .await?;
-            }
-            None => {
-                self.write_line(&format!("PUB {subject} {}", payload.len()))
-                    .await?;
-            }
-        }
-        self.stream
-            .get_mut()
-            .write_all(payload)
-            .await
-            .map_err(|err| ClientError::with_source("writing PUB payload", err))?;
-        self.stream
-            .get_mut()
-            .write_all(b"\r\n")
-            .await
-            .map_err(|err| ClientError::with_source("writing PUB payload terminator", err))
-    }
-
-    pub async fn publish_with_qos(
-        &mut self,
-        subject: &str,
-        reply_to: Option<&str>,
-        payload: &[u8],
-        level: protocol::AckLevel,
-        msg_id: &str,
-    ) -> Result<ProducerAck> {
-        self.publish_with_qos_and_key(subject, reply_to, payload, level, msg_id, None)
-            .await
-    }
-
-    pub async fn publish_with_qos_and_key(
-        &mut self,
-        subject: &str,
-        reply_to: Option<&str>,
-        payload: &[u8],
-        level: protocol::AckLevel,
-        msg_id: &str,
-        key: Option<&str>,
-    ) -> Result<ProducerAck> {
-        self.publish_with_qos_and_key_and_producer(
-            subject, reply_to, payload, level, msg_id, key, None,
-        )
-        .await
-    }
-
-    pub async fn publish_batch_with_qos_and_key(
-        &mut self,
-        requests: &[BatchPublishRequest<'_>],
-    ) -> Result<Vec<ProducerAck>> {
-        if requests.is_empty() {
-            return Ok(Vec::new());
-        }
-        let mut message_ids = HashSet::with_capacity(requests.len());
-        for request in requests {
-            validate_producer_msg_id(request.msg_id)?;
-            if !message_ids.insert(request.msg_id) {
-                return Err(ClientError::msg("batch publish message IDs must be unique"));
-            }
-            if request
-                .key
-                .is_some_and(|key| key.is_empty() || key.contains(['\r', '\n']))
-            {
-                return Err(ClientError::msg(
-                    "publish key must be non-empty and single-line",
-                ));
-            }
-            let mut headers = format!(
-                "MORROW/1.0\r\nMorrow-QoS: {}\r\nMorrow-Msg-Id: {}\r\n\r\n",
-                request.level as u8, request.msg_id
-            );
-            if let Some(key) = request.key {
-                headers.truncate(headers.len() - 2);
-                headers.push_str(&format!("Morrow-Key: {key}\r\n\r\n"));
-            }
-            let total_len = headers.len().saturating_add(request.payload.len());
-            if total_len > self.max_payload {
-                return Err(ClientError::msg("HPUB payload exceeds max payload"));
-            }
-            self.write_line(&format!(
-                "HPUB {} {} {}",
-                request.subject,
-                headers.len(),
-                total_len
-            ))
-            .await?;
-            self.stream
-                .get_mut()
-                .write_all(headers.as_bytes())
-                .await
-                .map_err(|err| ClientError::with_source("writing batch HPUB headers", err))?;
-            self.stream
-                .get_mut()
-                .write_all(request.payload)
-                .await
-                .map_err(|err| ClientError::with_source("writing batch HPUB payload", err))?;
-            self.stream
-                .get_mut()
-                .write_all(b"\r\n")
-                .await
-                .map_err(|err| ClientError::with_source("writing batch HPUB terminator", err))?;
-        }
-        let mut acknowledgements = HashMap::with_capacity(requests.len());
-        while acknowledgements.len() < requests.len() {
-            match self.next_frame().await? {
-                Some(ServerFrame::ProducerAck(ack)) => {
-                    acknowledgements.insert(ack.msg_id.clone(), ack);
-                }
-                Some(ServerFrame::Err(error)) => return Err(ClientError::msg(error)),
-                Some(ServerFrame::Message(_)) => {
-                    return Err(ClientError::msg("unexpected message during batch publish"));
-                }
-                Some(frame) => {
-                    return Err(ClientError::msg(format!(
-                        "unexpected frame in batch publish: {frame:?}"
-                    )));
-                }
-                None => return Err(ClientError::msg("connection closed before batch P-ACKs")),
-            }
-        }
-        requests
-            .iter()
-            .map(|request| {
-                acknowledgements
-                    .remove(request.msg_id)
-                    .ok_or_else(|| ClientError::msg("missing batch P-ACK"))
-            })
-            .collect()
-    }
-
-    pub async fn publish_with_producer_sequence(
-        &mut self,
-        subject: &str,
-        reply_to: Option<&str>,
-        payload: &[u8],
-        level: protocol::AckLevel,
-        msg_id: &str,
-        key: Option<&str>,
-        producer: &protocol::ProducerSequence,
-    ) -> Result<ProducerAck> {
-        self.publish_with_qos_and_key_and_producer(
-            subject,
-            reply_to,
-            payload,
-            level,
-            msg_id,
-            key,
-            Some(producer),
-        )
-        .await
-    }
-
-    async fn publish_with_qos_and_key_and_producer(
-        &mut self,
-        subject: &str,
-        reply_to: Option<&str>,
-        payload: &[u8],
-        level: protocol::AckLevel,
-        msg_id: &str,
-        key: Option<&str>,
-        producer: Option<&protocol::ProducerSequence>,
-    ) -> Result<ProducerAck> {
-        validate_producer_msg_id(msg_id)?;
-        if key.is_some_and(|key| key.is_empty() || key.contains(['\r', '\n'])) {
-            return Err(ClientError::msg(
-                "publish key must be non-empty and single-line",
-            ));
-        }
-        if payload.len() > self.max_payload {
-            return Err(ClientError::msg(format!(
-                "payload size {} exceeds max payload {}",
-                payload.len(),
-                self.max_payload
-            )));
-        }
-        let mut headers = format!(
-            "MORROW/1.0\r\nMorrow-QoS: {}\r\nMorrow-Msg-Id: {msg_id}\r\n\r\n",
-            level as u8
-        );
-        if let Some(producer) = producer {
-            headers.truncate(headers.len() - 2);
-            headers.push_str(&format!(
-                "Morrow-Producer-Id: {}\r\nMorrow-Producer-Epoch: {}\r\nMorrow-Producer-Sequence: {}\r\n\r\n",
-                producer.producer_id, producer.epoch, producer.sequence
-            ));
-        }
-        if let Some(key) = key {
-            headers.truncate(headers.len() - 2);
-            headers.push_str(&format!("Morrow-Key: {key}\r\n\r\n"));
-        }
-        let total_len = headers.len() + payload.len();
-        if total_len > self.max_payload {
-            return Err(ClientError::msg(format!(
-                "HPUB total length {total_len} exceeds max payload {}",
-                self.max_payload
-            )));
-        }
-        match reply_to {
-            Some(reply_to) => {
-                self.write_line(&format!(
-                    "HPUB {subject} {reply_to} {} {total_len}",
-                    headers.len()
-                ))
-                .await?;
-            }
-            None => {
-                self.write_line(&format!("HPUB {subject} {} {total_len}", headers.len()))
-                    .await?;
-            }
-        }
-        self.stream
-            .get_mut()
-            .write_all(headers.as_bytes())
-            .await
-            .map_err(|err| ClientError::with_source("writing HPUB headers", err))?;
-        self.stream
-            .get_mut()
-            .write_all(payload)
-            .await
-            .map_err(|err| ClientError::with_source("writing HPUB payload", err))?;
-        self.stream
-            .get_mut()
-            .write_all(b"\r\n")
-            .await
-            .map_err(|err| ClientError::with_source("writing HPUB payload terminator", err))?;
-
-        loop {
-            match self.next_frame().await? {
-                Some(ServerFrame::ProducerAck(ack)) if ack.msg_id == msg_id => return Ok(ack),
-                Some(ServerFrame::ProducerAck(_)) => {}
-                Some(ServerFrame::Err(err)) => return Err(ClientError::msg(err)),
-                Some(frame) => {
-                    return Err(ClientError::msg(format!(
-                        "expected P-ACK after HPUB, got {frame:?}"
-                    )));
-                }
-                None => return Err(ClientError::msg("connection closed before P-ACK")),
-            }
-        }
-    }
-
     pub async fn ack(&mut self, ack_subject: &str) -> Result<()> {
         let ack = protocol::parse_ack_subject(ack_subject)
             .ok_or_else(|| ClientError::msg("invalid Morrow ACK subject"))?;
@@ -616,13 +355,44 @@ impl Client {
         payload: &[u8],
         timeout: Duration,
     ) -> Result<Message> {
+        self.request_with_headers(subject, payload, &[], timeout)
+            .await
+    }
+
+    pub async fn request_with_headers(
+        &mut self,
+        subject: &str,
+        payload: &[u8],
+        headers: &[(String, String)],
+        timeout: Duration,
+    ) -> Result<Message> {
+        self.request_with_key_and_headers(subject, payload, None, headers, timeout)
+            .await
+    }
+
+    pub async fn request_with_key_and_headers(
+        &mut self,
+        subject: &str,
+        payload: &[u8],
+        key: Option<&str>,
+        headers: &[(String, String)],
+        timeout: Duration,
+    ) -> Result<Message> {
         self.inbox_counter = self.inbox_counter.saturating_add(1);
         let inbox = format!("{}.{}", self.inbox_prefix, self.inbox_counter);
         let sid = format!("inbox{}", self.inbox_counter);
         self.subscribe(&inbox, &sid).await?;
         self.ping_roundtrip().await?;
-        self.publish_with_reply(subject, Some(&inbox), payload)
-            .await?;
+        if let Some(key) = key {
+            self.publish_with_key_and_headers(subject, Some(&inbox), payload, key, headers)
+                .await?;
+        } else if headers.is_empty() {
+            self.publish_with_reply(subject, Some(&inbox), payload)
+                .await?;
+        } else {
+            self.publish_with_headers(subject, Some(&inbox), payload, headers)
+                .await?;
+        }
 
         let response = match tokio::time::timeout(timeout, async {
             loop {
@@ -649,11 +419,25 @@ impl Client {
     }
 
     pub async fn respond(&mut self, message: &Message, payload: &[u8]) -> Result<()> {
+        self.respond_with_headers(message, payload, &[]).await
+    }
+
+    pub async fn respond_with_headers(
+        &mut self,
+        message: &Message,
+        payload: &[u8],
+        headers: &[(String, String)],
+    ) -> Result<()> {
         let reply_to = message
             .reply_to
             .as_deref()
             .ok_or_else(|| ClientError::msg("message does not contain a reply subject"))?;
-        self.publish(reply_to, payload).await
+        if headers.is_empty() {
+            self.publish(reply_to, payload).await
+        } else {
+            self.publish_with_headers(reply_to, None, payload, headers)
+                .await
+        }
     }
 
     pub async fn ping(&mut self) -> Result<()> {
@@ -701,7 +485,7 @@ impl Client {
         self.read_frame().await
     }
 
-    async fn read_frame(&mut self) -> Result<Option<ServerFrame>> {
+    pub(crate) async fn read_frame(&mut self) -> Result<Option<ServerFrame>> {
         let mut line = Vec::new();
         let read = self
             .stream
@@ -729,17 +513,4 @@ impl Client {
             .await
             .map_err(|err| ClientError::with_source("writing protocol line terminator", err))
     }
-}
-
-fn validate_producer_msg_id(msg_id: &str) -> Result<()> {
-    if msg_id.is_empty()
-        || msg_id.len() > 128
-        || msg_id.chars().any(|ch| ch == '\r' || ch == '\n')
-        || msg_id.chars().any(char::is_whitespace)
-    {
-        return Err(ClientError::msg(
-            "msg_id must be non-empty, at most 128 bytes, and contain no whitespace",
-        ));
-    }
-    Ok(())
 }

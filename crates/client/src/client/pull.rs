@@ -160,7 +160,7 @@ impl Client {
         ))
         .await?;
         loop {
-            match self.next_frame().await? {
+            match self.read_frame().await? {
                 Some(ServerFrame::DeliveryControlOk {
                     operation: actual,
                     name,
@@ -174,6 +174,9 @@ impl Client {
                     return Ok(());
                 }
                 Some(ServerFrame::Ok) => {}
+                Some(ServerFrame::Message(message)) => {
+                    self.pending_messages.push_back(message);
+                }
                 Some(ServerFrame::Err(err)) => return Err(ClientError::msg(err)),
                 Some(frame) => {
                     return Err(ClientError::msg(format!(
