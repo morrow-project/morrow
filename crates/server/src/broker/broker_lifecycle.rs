@@ -2021,7 +2021,12 @@ impl Morrow {
         if self.route_mesh.is_some() {
             return Ok(Some(stream));
         }
-        if let Some(cluster) = self.cluster_runtime().await {
+        let proxy_to_metadata_leader = self
+            .config
+            .cluster
+            .as_ref()
+            .is_none_or(|cluster| cluster.role == crate::config::ClusterRole::Combined);
+        if proxy_to_metadata_leader && let Some(cluster) = self.cluster_runtime().await {
             if !cluster.is_leader().await {
                 if let Some(leader) = cluster.leader_client_addr().await {
                     proxy_stream_to_leader(stream, leader).await?;
