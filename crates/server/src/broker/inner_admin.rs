@@ -617,13 +617,17 @@ impl Morrow {
 
     pub(super) async fn streams_response(&self) -> StreamsResponse {
         let partition_logs = &self.partition_logs;
+        let expansions = self.partition_expansions.lock().await;
         let streams = self
             .config
             .streams
             .definitions()
             .iter()
             .map(|definition| {
-                let partitions = (0..definition.partitions)
+                let partition_count = expansions
+                    .get(definition.name.as_str())
+                    .map_or(definition.partitions, |expansion| expansion.current().0);
+                let partitions = (0..partition_count)
                     .map(|partition| {
                         partition_logs.retention_status(
                             definition.name.as_str(),
@@ -631,6 +635,15 @@ impl Morrow {
                         )
                     })
                     .collect::<Result<Vec<_>>>()?;
+                let partition_expansion =
+                    expansions.get(definition.name.as_str()).map(|expansion| {
+                        let (current_partitions, current_epoch) = expansion.current();
+                        crate::broker::state::PartitionExpansionResponse {
+                            current_partitions,
+                            current_epoch,
+                            pending: expansion.pending().cloned(),
+                        }
+                    });
                 Ok(StreamResponse {
                     retained_messages: partitions
                         .iter()
@@ -642,6 +655,7 @@ impl Morrow {
                         .sum(),
                     definition: definition.clone(),
                     partition_status: partitions,
+                    partition_expansion,
                 })
             })
             .collect::<Result<Vec<_>>>()

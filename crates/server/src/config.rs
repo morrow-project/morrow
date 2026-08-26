@@ -120,6 +120,7 @@ pub struct AuthPermissions {
 #[derive(Debug, Clone)]
 pub struct ClusterConfig {
     pub enabled: bool,
+    pub role: ClusterRole,
     pub node_id: u64,
     pub auth_token: String,
     pub raft_listen: SocketAddr,
@@ -133,10 +134,30 @@ pub struct ClusterConfig {
     pub raft_dir: PathBuf,
     pub bootstrap: bool,
     pub nodes: Vec<ClusterNodeConfig>,
+    pub controller_voters: Vec<u64>,
     pub election_timeout_min_ms: u64,
     pub election_timeout_max_ms: u64,
     pub heartbeat_interval_ms: u64,
     pub snapshot_threshold: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClusterRole {
+    Combined,
+    Controller,
+    Broker,
+}
+
+impl ClusterRole {
+    /// Controller-only nodes do not expose the broker data-plane listener.
+    pub fn serves_client_traffic(self) -> bool {
+        !matches!(self, Self::Controller)
+    }
+
+    /// Broker-only nodes are data-plane members and do not vote in metadata Raft.
+    pub fn participates_in_metadata_quorum(self) -> bool {
+        !matches!(self, Self::Broker)
+    }
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClusterNodeConfig {
@@ -437,6 +458,18 @@ impl Config {
         }
         if let Some(cluster) = &self.cluster {
             cluster.validate()?;
+            if cluster.role == ClusterRole::Controller {
+                crate::broker_ensure!(
+                    self.websocket.is_none(),
+                    "controller nodes must not configure a WebSocket listener"
+                );
+                crate::broker_ensure!(
+                    cluster.route_listen.is_none()
+                        && cluster.route_advertise.is_none()
+                        && cluster.routes.is_empty(),
+                    "controller nodes must not configure a broker route listener or routes"
+                );
+            }
             if create_dirs {
                 std::fs::create_dir_all(&cluster.raft_dir).with_context(|| {
                     format!("creating Raft directory {}", cluster.raft_dir.display())
@@ -468,6 +501,12 @@ impl Config {
             "authentication_enabled": self.auth.enabled,
             "wal_dir": self.wal_dir,
             "cluster_enabled": self.cluster.is_some(),
+            "cluster_role": self.cluster.as_ref().map(|cluster| match cluster.role {
+                ClusterRole::Combined => "combined",
+                ClusterRole::Controller => "controller",
+                ClusterRole::Broker => "broker",
+            }),
+            "controller_voters": self.cluster.as_ref().map(|cluster| &cluster.controller_voters),
             "quotas": {
                 "max_connections": self.quotas.max_connections,
                 "max_outbound_bytes_per_connection": self.quotas.max_outbound_bytes_per_connection

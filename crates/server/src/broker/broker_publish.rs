@@ -76,32 +76,6 @@ impl Morrow {
         .map_err(|err| BrokerError::with_source("partition read worker failed", err))?
     }
 
-    async fn flush_partition(&self, record: &PublishRecord) -> Result<()> {
-        let stream = record
-            .stream
-            .clone()
-            .ok_or_else(|| BrokerError::msg("durable record has no stream"))?;
-        let partition = crate::stream::PartitionId(
-            record
-                .partition
-                .ok_or_else(|| BrokerError::msg("durable record has no partition"))?,
-        );
-        let partition_logs = self.partition_logs.clone();
-        let permit = self
-            .storage_permits
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(|_| BrokerError::msg("storage worker pool closed"))?;
-        tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            partition_logs.flush_partition(&stream, partition)
-        })
-        .instrument(tracing::info_span!("morrow.partition.flush"))
-        .await
-        .map_err(|err| BrokerError::with_source("partition flush worker failed", err))?
-    }
-
     pub(super) async fn publish(
         &self,
         publisher_id: u64,
@@ -128,6 +102,15 @@ impl Morrow {
         self.metrics
             .published_bytes_total
             .fetch_add(payload.len() as u64, Ordering::Relaxed);
+        let payload_bytes = payload.len() as u64;
+        crate::broker_ensure!(
+            self.work_scheduler.lock().await.try_reserve(
+                crate::work_scheduler::WorkClass::Foreground,
+                1,
+                payload_bytes
+            ),
+            "foreground publish work budget exhausted"
+        );
         let result = self
             .publish_with_depth(
                 publisher_id,
@@ -141,6 +124,11 @@ impl Morrow {
             )
             .instrument(span)
             .await;
+        self.work_scheduler.lock().await.release(
+            crate::work_scheduler::WorkClass::Foreground,
+            1,
+            payload_bytes,
+        );
         if result.is_err() {
             self.metrics
                 .rejected_operations_total
@@ -325,6 +313,13 @@ impl Morrow {
             return Ok(());
         }
         let stream = stream.unwrap();
+        let (partition_count, partitioning_epoch) = self
+            .partitioning_for_stream(
+                stream.name.as_str(),
+                stream.partitions,
+                stream.partitioning.epoch,
+            )
+            .await;
 
         let disk_bytes = 128u64
             .saturating_add(namespace.len() as u64)
@@ -379,7 +374,13 @@ impl Morrow {
         }
 
         if let Some(cluster) = self.cluster_runtime().await {
-            let partition = select_partition(&stream, &subject_name, key.as_deref(), publisher_id);
+            let partition = select_partition_with_count(
+                &stream,
+                &subject_name,
+                key.as_deref(),
+                publisher_id,
+                partition_count,
+            );
             let stored_headers = headers
                 .iter()
                 .map(|(name, value)| MessageHeader {
@@ -400,7 +401,7 @@ impl Morrow {
                 reply_to,
                 schema_id,
                 payload,
-                partitioning_epoch: stream.partitioning.epoch,
+                partitioning_epoch,
                 leader_epoch: 0,
                 legacy_seq: seq,
             };
@@ -421,16 +422,27 @@ impl Morrow {
                 Err(error) => return Err(error),
             };
             disk_reservation.commit();
-            cluster.enforce_retention(self.hooks.clock.now_ms())?;
+            self.acquire_retention_work().await;
+            let retention_result = cluster.enforce_retention(self.hooks.clock.now_ms());
+            self.release_retention_work().await;
+            retention_result?;
             self.apply_cluster_partition(envelope.clone()).await?;
             let _storage_operation = self.storage_gate.read().await;
             let tenants = self.config.tenant_quotas.keys().cloned().collect();
-            let released = self.inner.lock().await.enforce_stream_retention(
-                &self.partition_logs,
-                &self.config.streams,
-                self.hooks.clock.now_ms(),
-                &tenants,
-            )?;
+            let changes = self
+                .partition_logs
+                .retention_changes(self.config.streams.definitions(), self.hooks.clock.now_ms());
+            for change in &changes {
+                self.partition_logs.advance_retention(change)?;
+            }
+            self.acquire_retention_work().await;
+            let released_result = self
+                .inner
+                .lock()
+                .await
+                .apply_retention_changes(&changes, &tenants);
+            self.release_retention_work().await;
+            let released = released_result?;
             for (tenant, bytes) in released {
                 self.tenant_quotas.release(
                     &tenant,
@@ -480,7 +492,20 @@ impl Morrow {
                 value: value.clone(),
             })
             .collect::<Vec<_>>();
-        let partition = select_partition(&stream, &subject_name, key.as_deref(), publisher_id);
+        let partition = select_partition_with_count(
+            &stream,
+            &subject_name,
+            key.as_deref(),
+            publisher_id,
+            partition_count,
+        );
+        let shard = crate::state_shards::shard_for(
+            crate::state_shards::StateShardKey::Partition {
+                stream: stream.name.as_str(),
+                partition: partition.0,
+            },
+            self.state_shard_gates.len(),
+        );
         let pending_envelope = MessageEnvelope {
             namespace,
             stream: stream.name.clone(),
@@ -493,7 +518,7 @@ impl Morrow {
             reply_to,
             schema_id,
             payload,
-            partitioning_epoch: stream.partitioning.epoch,
+            partitioning_epoch,
             leader_epoch: 0,
             legacy_seq: seq,
         };
@@ -522,33 +547,57 @@ impl Morrow {
                 }
             };
             disk_reservation.commit();
+            let reference = PartitionAppendRecord::from(&envelope);
+            self.wal.append_partition_append_async(reference).await?;
+            let shard_wait_started = Instant::now();
+            let _state_shard_guard = self.state_shard_gates[shard].lock().await;
+            self.metrics
+                .state_shard_wait_us
+                .observe(shard_wait_started.elapsed());
+            let shard_hold_started = Instant::now();
             self.metrics
                 .partition_writes_total
                 .fetch_add(1, Ordering::Relaxed);
-            let reference = PartitionAppendRecord::from(&envelope);
-            let mut inner = self.inner.lock().await;
-            inner.wal.append_partition_append(&reference)?;
-            let record = PublishRecord::from(envelope);
-            if let (Some(stream), Some(partition), Some(offset)) =
-                (record.stream.clone(), record.partition, record.offset)
-            {
+            let record = {
+                let mut inner = self.inner.lock().await;
+                let record = PublishRecord::from(envelope);
+                if let (Some(stream), Some(partition), Some(offset)) =
+                    (record.stream.clone(), record.partition, record.offset)
+                {
+                    inner
+                        .partition_sequences
+                        .insert((stream, partition, offset), record.seq);
+                }
                 inner
-                    .partition_sequences
-                    .insert((stream, partition, offset), record.seq);
-            }
-            inner
-                .messages
-                .insert(record.seq, record.clone().into_resident_metadata());
-            inner.observe_published_record(&record);
-            inner.mark_subject_ready(&record.subject);
+                    .messages
+                    .insert(record.seq, record.clone().into_resident_metadata());
+                inner.observe_published_record(&record);
+                inner.mark_subject_ready(&record.subject);
+                record
+            };
+            drop(_state_shard_guard);
+            self.metrics
+                .state_shard_hold_us
+                .observe(shard_hold_started.elapsed());
             let tenants = self.config.tenant_quotas.keys().cloned().collect();
-            let released = inner.enforce_stream_retention(
-                &self.partition_logs,
-                &self.config.streams,
-                self.hooks.clock.now_ms(),
-                &tenants,
-            )?;
-            inner.apply_record_compaction(record.seq, &self.config.streams);
+            let changes = self
+                .partition_logs
+                .retention_changes(self.config.streams.definitions(), self.hooks.clock.now_ms());
+            for change in &changes {
+                self.partition_logs.advance_retention(change)?;
+            }
+            self.acquire_retention_work().await;
+            let released_result = self
+                .inner
+                .lock()
+                .await
+                .apply_retention_changes(&changes, &tenants);
+            self.release_retention_work().await;
+            let released = released_result?;
+            self.inner
+                .lock()
+                .await
+                .apply_record_compaction(record.seq, &self.config.streams);
             (record, released)
         };
         for (tenant, bytes) in released {
@@ -585,13 +634,36 @@ impl Morrow {
         if ack.is_none_or(|ack| ack.level == protocol::AckLevel::HighDurability) {
             match self.hooks.durable_publish_flush_mode {
                 DurablePublishFlushMode::SleepThenFlush => {
-                    tokio::time::sleep(self.config.fsync_interval()).await;
-                    self.flush_partition(&record).await?;
+                    self.wal
+                        .flush_partitions_grouped(
+                            self.partition_logs.clone(),
+                            record
+                                .stream
+                                .clone()
+                                .ok_or_else(|| BrokerError::msg("durable record has no stream"))?,
+                            crate::stream::PartitionId(record.partition.ok_or_else(|| {
+                                BrokerError::msg("durable record has no partition")
+                            })?),
+                            self.config.fsync_interval(),
+                        )
+                        .await?;
                     self.wal.flush_grouped(self.config.fsync_interval()).await?;
                 }
                 #[cfg(test)]
                 DurablePublishFlushMode::FlushImmediately => {
-                    self.flush_partition(&record).await?;
+                    self.wal
+                        .flush_partitions_grouped(
+                            self.partition_logs.clone(),
+                            record
+                                .stream
+                                .clone()
+                                .ok_or_else(|| BrokerError::msg("durable record has no stream"))?,
+                            crate::stream::PartitionId(record.partition.ok_or_else(|| {
+                                BrokerError::msg("durable record has no partition")
+                            })?),
+                            Duration::ZERO,
+                        )
+                        .await?;
                     self.wal.flush_grouped(Duration::ZERO).await?;
                 }
             }

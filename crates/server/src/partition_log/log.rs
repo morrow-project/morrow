@@ -28,16 +28,18 @@ struct SegmentRange {
     path: PathBuf,
     first_offset: u64,
     last_offset: u64,
-    reader: File,
+    /// Sealed segment readers are opened on demand and released after each
+    /// lookup so descriptor usage does not grow with retained history.
+    reader: Option<File>,
     sparse_index: Vec<(u64, u64)>,
 }
 
 #[derive(Debug)]
-pub(super) struct PartitionLog {
+pub(crate) struct PartitionLog {
     dir: PathBuf,
     stream: StreamId,
     partition: PartitionId,
-    file: File,
+    file: Option<File>,
     segment_id: u64,
     active_bytes: u64,
     segment_bytes: u64,
@@ -112,7 +114,7 @@ impl PartitionLog {
                     path: path.clone(),
                     first_offset: first.offset,
                     last_offset: last.offset,
-                    reader: open_segment_reader(path)?,
+                    reader: None,
                     sparse_index: load_sparse_index(path)?,
                 });
             }
@@ -151,7 +153,7 @@ impl PartitionLog {
                 dir,
                 stream: stream.clone(),
                 partition,
-                file,
+                file: Some(file),
                 segment_id,
                 active_bytes,
                 segment_bytes,
@@ -191,7 +193,9 @@ impl PartitionLog {
         }
         crate::broker_ensure!(
             envelope.offset == self.next_offset,
-            "partition-log append creates an offset gap"
+            "partition-log append creates an offset gap (next={}, requested={})",
+            self.next_offset,
+            envelope.offset
         );
         let batch = match &self.encryption {
             Some(encryption) => encode_encrypted_batch_with_len(&envelope, encryption)?,
@@ -203,7 +207,7 @@ impl PartitionLog {
             self.rotate()?;
         }
         let position = self.active_bytes;
-        self.file.write_all(&batch.bytes)?;
+        self.active_file()?.write_all(&batch.bytes)?;
         self.active_bytes += batch.len;
         self.next_offset += 1;
         let bytes = batch.len;
@@ -225,7 +229,7 @@ impl PartitionLog {
                 path: active_path.clone(),
                 first_offset: envelope.offset,
                 last_offset: envelope.offset,
-                reader: open_segment_reader(&active_path)?,
+                reader: None,
                 sparse_index: load_sparse_index(&active_path)?,
             });
         }
@@ -249,9 +253,21 @@ impl PartitionLog {
     }
 
     pub(super) fn flush(&mut self) -> Result<()> {
-        self.file.flush()?;
-        self.file.sync_data()?;
+        if let Some(file) = self.file.as_mut() {
+            file.flush()?;
+            file.sync_data()?;
+        }
         Ok(())
+    }
+
+    pub(super) fn release_resources(&mut self) -> Result<()> {
+        self.flush()?;
+        self.file = None;
+        Ok(())
+    }
+
+    pub(super) fn has_active_resource(&self) -> bool {
+        self.file.is_some()
     }
 
     pub(super) fn rewrite(
@@ -351,7 +367,7 @@ impl PartitionLog {
                 let range = &mut self.segment_ranges[range_index];
                 range.first_offset = retained[0].offset;
                 range.last_offset = retained.last().unwrap().offset;
-                range.reader = open_segment_reader(&path)?;
+                range.reader = None;
                 range.sparse_index = load_sparse_index(&path)?;
                 if let Some(segment) = self
                     .sealed_subject_segments
@@ -459,7 +475,7 @@ impl PartitionLog {
         self.sealed_subject_segments.push(sealed);
         self.segment_id += 1;
         let path = segment_path(&self.dir, self.segment_id);
-        self.file = create_segment(&path)?;
+        self.file = Some(create_segment(&path)?);
         self.active_bytes = SEGMENT_HEADER_LEN;
         Ok(())
     }
@@ -484,12 +500,13 @@ impl PartitionLog {
             if offset < range.first_offset || offset > range.last_offset {
                 continue;
             }
-            range.reader.seek(SeekFrom::Start(SEGMENT_HEADER_LEN))?;
+            let mut reader = open_segment_reader(&range.path)?;
+            reader.seek(SeekFrom::Start(SEGMENT_HEADER_LEN))?;
             if let Some(position) = indexed_position(&range.sparse_index, offset) {
-                range.reader.seek(SeekFrom::Start(position))?;
+                reader.seek(SeekFrom::Start(position))?;
             }
             while let Some((envelope, _)) =
-                read_batch_with_key(&mut range.reader, self.encryption.as_ref())?
+                read_batch_with_key(&mut reader, self.encryption.as_ref())?
             {
                 if envelope.offset == offset {
                     return Ok(Some(envelope));
@@ -509,6 +526,22 @@ impl PartitionLog {
         next_offset: u64,
     ) -> Result<()> {
         stage_rewrite(&self.dir, records, next_offset, self.encryption.as_ref())
+    }
+
+    fn active_file(&mut self) -> Result<&mut File> {
+        if self.file.is_none() {
+            let path = segment_path(&self.dir, self.segment_id);
+            self.file = Some(
+                OpenOptions::new()
+                    .read(true)
+                    .append(true)
+                    .open(&path)
+                    .with_context(|| {
+                        format!("reopening partition-log segment {}", path.display())
+                    })?,
+            );
+        }
+        Ok(self.file.as_mut().expect("active file opened above"))
     }
 }
 

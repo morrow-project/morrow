@@ -160,6 +160,29 @@ pub struct DurableState {
     pub last_membership: StoredMembership<u64, BasicNode>,
 }
 
+/// The controller-owned portion of durable state disseminated to broker-only
+/// nodes over the broker control stream.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MetadataSnapshot {
+    pub stream_definitions: HashMap<String, crate::stream::StreamDefinition>,
+    pub partition_assignments: HashMap<String, PartitionAssignmentMetadata>,
+    pub security_references: BTreeSet<String>,
+    pub feature_gates: BTreeSet<String>,
+    pub partition_commits: HashMap<String, PartitionCommitMetadata>,
+}
+
+impl MetadataSnapshot {
+    pub fn from_state(state: &DurableState) -> Self {
+        Self {
+            stream_definitions: state.stream_definitions.clone(),
+            partition_assignments: state.partition_assignments.clone(),
+            security_references: state.security_references.clone(),
+            feature_gates: state.feature_gates.clone(),
+            partition_commits: state.partition_commits.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PartitionCommitMetadata {
     #[serde(default)]
@@ -496,6 +519,8 @@ pub use self::{
     runtime::{ClusterNode, RaftRuntime},
 };
 
+#[cfg(test)]
+mod role_tests;
 #[cfg(test)]
 mod storage_tests;
 #[cfg(test)]

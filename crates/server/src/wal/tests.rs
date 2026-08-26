@@ -53,6 +53,41 @@ fn opens_empty_directory_with_v1_segment() {
 }
 
 #[test]
+fn reports_partition_batch_and_flush_metrics() {
+    let dir = TestDir::new();
+    let (mut wal, _) = open_wal(dir.path());
+    let records = [
+        PartitionAppendRecord {
+            seq: 1,
+            stream: "orders".to_string(),
+            partition: 0,
+            offset: 1,
+            subject: "orders/created".to_string(),
+        },
+        PartitionAppendRecord {
+            seq: 2,
+            stream: "orders".to_string(),
+            partition: 0,
+            offset: 2,
+            subject: "orders/updated".to_string(),
+        },
+    ];
+    for record in &records {
+        wal.append_partition_append(record).unwrap();
+    }
+    wal.note_partition_append_batch(2, 128);
+    wal.flush().unwrap();
+
+    let status = wal.status(0, 0);
+    assert_eq!(status.partition_append_batches, 1);
+    assert_eq!(status.partition_append_records, 2);
+    assert_eq!(status.partition_append_bytes, 128);
+    assert_eq!(status.partition_append_batch_max_records, 2);
+    assert_eq!(status.partition_append_batch_max_bytes, 128);
+    assert_eq!(status.flushes, 1);
+}
+
+#[test]
 fn encrypted_wal_replays_after_restart_and_rejects_the_wrong_key() {
     let dir = TestDir::new();
     let provider = Arc::new(crate::encryption::MemoryKeyProvider::default());

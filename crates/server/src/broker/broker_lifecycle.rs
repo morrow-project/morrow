@@ -1,6 +1,87 @@
 use super::delivery_index::scheduled_at_ms;
 use super::*;
 
+pub(crate) fn startup_assigned_partitions(config: &Config) -> Option<BTreeSet<(String, u32)>> {
+    let cluster = config.cluster.as_ref()?;
+    match cluster.role {
+        crate::config::ClusterRole::Combined => None,
+        crate::config::ClusterRole::Controller => Some(BTreeSet::new()),
+        crate::config::ClusterRole::Broker => {
+            let data_nodes = cluster
+                .nodes
+                .iter()
+                .map(|node| node.node_id)
+                .filter(|node_id| !cluster.controller_voters.contains(node_id))
+                .collect::<Vec<_>>();
+            let mut data_nodes = data_nodes;
+            data_nodes.sort_unstable();
+            if data_nodes.is_empty() {
+                return Some(BTreeSet::new());
+            }
+            let local_index = data_nodes.iter().position(|node| *node == cluster.node_id);
+            let Some(local_index) = local_index else {
+                return Some(BTreeSet::new());
+            };
+            let mut assigned = BTreeSet::new();
+            let mut placement_index = 0usize;
+            for stream in config.streams.definitions() {
+                let replicas = usize::try_from(stream.storage.replicas)
+                    .unwrap_or(data_nodes.len())
+                    .min(data_nodes.len())
+                    .max(1);
+                for partition in 0..stream.partitions {
+                    let owns_partition = (0..replicas).any(|offset| {
+                        data_nodes[(placement_index + offset) % data_nodes.len()]
+                            == data_nodes[local_index]
+                    });
+                    if owns_partition {
+                        assigned.insert((stream.name.as_str().to_string(), partition));
+                    }
+                    placement_index = placement_index.saturating_add(1);
+                }
+            }
+            if startup_has_unassigned_partition_data(config, &assigned) {
+                None
+            } else {
+                Some(assigned)
+            }
+        }
+    }
+}
+
+fn startup_has_unassigned_partition_data(
+    config: &Config,
+    assigned: &BTreeSet<(String, u32)>,
+) -> bool {
+    let streams_root = config.wal_dir.join("streams");
+    let Ok(streams) = std::fs::read_dir(streams_root) else {
+        return false;
+    };
+    for stream_entry in streams.flatten() {
+        let Ok(stream_name) = stream_entry.file_name().into_string() else {
+            return true;
+        };
+        let Ok(partitions) = std::fs::read_dir(stream_entry.path()) else {
+            return true;
+        };
+        for partition_entry in partitions.flatten() {
+            let Ok(name) = partition_entry.file_name().into_string() else {
+                return true;
+            };
+            let Some(partition) = name
+                .strip_prefix("partition-")
+                .and_then(|value| value.parse::<u32>().ok())
+            else {
+                continue;
+            };
+            if !assigned.contains(&(stream_name.clone(), partition)) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 impl Morrow {
     pub(super) async fn rebuild_tenant_disk_usage(&self) -> Result<()> {
         let records = self
@@ -213,11 +294,13 @@ impl Morrow {
         if let Some(cluster) = &config.cluster {
             wal.namespace_delivery_ids(cluster.node_id);
         }
-        let (partition_logs, mut envelopes) = PartitionLogSet::open_with_encryption(
+        let assigned_partitions = startup_assigned_partitions(&config);
+        let (partition_logs, mut envelopes) = PartitionLogSet::open_with_encryption_for_partitions(
             &config.wal_dir,
             &config.streams,
             config.wal_segment_bytes,
             encryption,
+            assigned_partitions.as_ref(),
         )?;
         partition_logs.enforce_retention(&mut envelopes, &config.streams, hooks.clock.now_ms())?;
         let mut envelope_seqs = envelopes
@@ -630,6 +713,42 @@ impl Morrow {
             },
         )?;
         let wal = WalRuntime::new(wal);
+        let mut partition_expansions: HashMap<
+            String,
+            crate::partition_expansion::PartitionExpansion,
+        > = config
+            .streams
+            .definitions()
+            .iter()
+            .filter_map(|stream| {
+                crate::partition_expansion::PartitionExpansion::new(
+                    stream.partitions,
+                    stream.partitioning.epoch,
+                )
+                .map(|expansion| (stream.name.as_str().to_string(), expansion))
+            })
+            .collect();
+        let expansion_state_path = config.wal_dir.join("partition-expansions.json");
+        if expansion_state_path.is_file() {
+            let body = std::fs::read(&expansion_state_path).with_context(|| {
+                format!(
+                    "reading partition expansion state {}",
+                    expansion_state_path.display()
+                )
+            })?;
+            let persisted: HashMap<String, crate::partition_expansion::PartitionExpansion> =
+                serde_json::from_slice(&body).map_err(|error| {
+                    BrokerError::msg(format!(
+                        "decoding partition expansion state {}: {error}",
+                        expansion_state_path.display()
+                    ))
+                })?;
+            for (stream, expansion) in persisted {
+                if partition_expansions.contains_key(&stream) {
+                    partition_expansions.insert(stream, expansion);
+                }
+            }
+        }
         Ok(Self {
             inner: Arc::new(Mutex::new(DurableBrokerState {
                 wal: wal.clone(),
@@ -652,6 +771,11 @@ impl Morrow {
             partition_logs: Arc::new(partition_logs),
             storage_permits: Arc::new(tokio::sync::Semaphore::new(MAX_BLOCKING_STORAGE_OPS)),
             storage_gate: Arc::new(tokio::sync::RwLock::new(())),
+            state_shard_gates: Arc::new(
+                (0..STATE_SHARD_COUNT)
+                    .map(|_| tokio::sync::Mutex::new(()))
+                    .collect(),
+            ),
             connections: Arc::new(Mutex::new(ConnectionState {
                 clients: HashMap::new(),
             })),
@@ -685,7 +809,76 @@ impl Morrow {
             shutting_down: Arc::new(AtomicBool::new(false)),
             redelivery_notify: Arc::new(Notify::new()),
             pull_waiters: PullWaiterRegistry::default(),
+            broker_control: BrokerControlRegistry::new(),
             compaction_running: Arc::new(AtomicBool::new(false)),
+            work_scheduler: Arc::new(tokio::sync::Mutex::new(
+                crate::work_scheduler::WorkScheduler::new([
+                    (
+                        crate::work_scheduler::WorkClass::Control,
+                        crate::work_scheduler::WorkBudget {
+                            max_records: u64::MAX,
+                            max_bytes: u64::MAX,
+                            max_concurrency: 64,
+                        },
+                    ),
+                    (
+                        crate::work_scheduler::WorkClass::Foreground,
+                        crate::work_scheduler::WorkBudget {
+                            max_records: u64::MAX,
+                            max_bytes: u64::MAX,
+                            max_concurrency: 256,
+                        },
+                    ),
+                    (
+                        crate::work_scheduler::WorkClass::Observer,
+                        crate::work_scheduler::WorkBudget {
+                            max_records: u64::MAX,
+                            max_bytes: u64::MAX,
+                            max_concurrency: 8,
+                        },
+                    ),
+                    (
+                        crate::work_scheduler::WorkClass::CatchUp,
+                        crate::work_scheduler::WorkBudget {
+                            max_records: u64::MAX,
+                            max_bytes: u64::MAX,
+                            max_concurrency: 4,
+                        },
+                    ),
+                    (
+                        crate::work_scheduler::WorkClass::Snapshot,
+                        crate::work_scheduler::WorkBudget {
+                            max_records: u64::MAX,
+                            max_bytes: u64::MAX,
+                            max_concurrency: 2,
+                        },
+                    ),
+                    (
+                        crate::work_scheduler::WorkClass::Reassignment,
+                        crate::work_scheduler::WorkBudget {
+                            max_records: u64::MAX,
+                            max_bytes: u64::MAX,
+                            max_concurrency: 2,
+                        },
+                    ),
+                    (
+                        crate::work_scheduler::WorkClass::Compaction,
+                        crate::work_scheduler::WorkBudget {
+                            max_records: u64::MAX,
+                            max_bytes: u64::MAX,
+                            max_concurrency: 1,
+                        },
+                    ),
+                    (
+                        crate::work_scheduler::WorkClass::Retention,
+                        crate::work_scheduler::WorkBudget {
+                            max_records: u64::MAX,
+                            max_bytes: u64::MAX,
+                            max_concurrency: 1,
+                        },
+                    ),
+                ]),
+            )),
             route_mesh,
             middleware: hooks.middleware.clone(),
             hooks,
@@ -693,6 +886,7 @@ impl Morrow {
             views: Arc::new(Mutex::new(views)),
             reassignment: Arc::new(Mutex::new(reassignment)),
             cross_region: Arc::new(Mutex::new(cross_region)),
+            partition_expansions: Arc::new(Mutex::new(partition_expansions)),
         })
     }
 
@@ -872,7 +1066,19 @@ impl Morrow {
         move_: crate::reassignment::PlacementMove,
         source_epoch: u64,
     ) -> Result<u64> {
-        self.reassignment.lock().await.begin(move_, source_epoch)
+        let reserved = self.work_scheduler.lock().await.try_reserve(
+            crate::work_scheduler::WorkClass::Reassignment,
+            0,
+            0,
+        );
+        crate::broker_ensure!(reserved, "reassignment work budget is exhausted");
+        let result = self.reassignment.lock().await.begin(move_, source_epoch);
+        self.work_scheduler.lock().await.release(
+            crate::work_scheduler::WorkClass::Reassignment,
+            0,
+            0,
+        );
+        result
     }
 
     pub async fn reassignment_advance(
@@ -880,27 +1086,62 @@ impl Morrow {
         id: u64,
         progress: crate::reassignment::ReassignmentProgress,
     ) -> Result<crate::reassignment::ReassignmentPhase> {
-        self.reassignment.lock().await.advance(id, progress)
+        let reserved = self.work_scheduler.lock().await.try_reserve(
+            crate::work_scheduler::WorkClass::Reassignment,
+            0,
+            0,
+        );
+        crate::broker_ensure!(reserved, "reassignment work budget is exhausted");
+        let result = self.reassignment.lock().await.advance(id, progress);
+        self.work_scheduler.lock().await.release(
+            crate::work_scheduler::WorkClass::Reassignment,
+            0,
+            0,
+        );
+        result
     }
 
     pub async fn reassignment_rollback(&self, id: u64, reason: &str) -> Result<()> {
-        self.reassignment.lock().await.rollback(id, reason)
+        let reserved = self.work_scheduler.lock().await.try_reserve(
+            crate::work_scheduler::WorkClass::Reassignment,
+            0,
+            0,
+        );
+        crate::broker_ensure!(reserved, "reassignment work budget is exhausted");
+        let result = self.reassignment.lock().await.rollback(id, reason);
+        self.work_scheduler.lock().await.release(
+            crate::work_scheduler::WorkClass::Reassignment,
+            0,
+            0,
+        );
+        result
     }
 
     pub async fn serve(self) -> Result<()> {
-        let listener = TcpListener::bind(self.config.listen)
-            .await
-            .with_context(|| format!("binding {}", self.config.listen))?;
+        let serves_client_traffic = self
+            .config
+            .cluster
+            .as_ref()
+            .is_none_or(|cluster| cluster.role.serves_client_traffic());
+        let listener = if serves_client_traffic {
+            Some(
+                TcpListener::bind(self.config.listen)
+                    .await
+                    .with_context(|| format!("binding {}", self.config.listen))?,
+            )
+        } else {
+            None
+        };
         self.serve_inner(listener, true).await
     }
 
     pub async fn serve_listener(self, listener: TcpListener) -> Result<()> {
-        self.serve_inner(listener, false).await
+        self.serve_inner(Some(listener), false).await
     }
 
     pub(super) async fn serve_inner(
         self,
-        listener: TcpListener,
+        listener: Option<TcpListener>,
         handle_shutdown: bool,
     ) -> Result<()> {
         #[cfg(unix)]
@@ -914,18 +1155,28 @@ impl Morrow {
             ),
             None => None,
         };
-        let websocket_listener = match self.config.websocket.as_ref() {
-            Some(config) => Some(
-                TcpListener::bind(config.listen)
-                    .await
-                    .with_context(|| format!("binding WebSocket listener {}", config.listen))?,
-            ),
-            None => None,
+        let serves_client_traffic = self
+            .config
+            .cluster
+            .as_ref()
+            .is_none_or(|cluster| cluster.role.serves_client_traffic());
+        let websocket_listener = if serves_client_traffic {
+            match self.config.websocket.as_ref() {
+                Some(config) => Some(
+                    TcpListener::bind(config.listen)
+                        .await
+                        .with_context(|| format!("binding WebSocket listener {}", config.listen))?,
+                ),
+                None => None,
+            }
+        } else {
+            None
         };
         let route_listener = match self
             .config
             .cluster
             .as_ref()
+            .filter(|cluster| cluster.role.serves_client_traffic())
             .and_then(|cluster| cluster.route_listen)
         {
             Some(listen) => Some(
@@ -956,6 +1207,39 @@ impl Morrow {
                 redeliver.redelivery_loop().await;
             });
         }
+
+        let serves_client_traffic = self
+            .config
+            .cluster
+            .as_ref()
+            .is_none_or(|cluster| cluster.role.serves_client_traffic());
+        if !serves_client_traffic {
+            drop(listener);
+            loop {
+                tokio::select! {
+                    signal = async {
+                        #[cfg(unix)]
+                        {
+                            tokio::select! {
+                                signal = tokio::signal::ctrl_c() => signal,
+                                _ = sigterm.recv() => Ok(()),
+                            }
+                        }
+                        #[cfg(not(unix))]
+                        {
+                            tokio::signal::ctrl_c().await
+                        }
+                    } => {
+                        signal.context("waiting for shutdown signal")?;
+                        self.shutting_down.store(true, Ordering::Release);
+                        self.shutdown().await?;
+                        return Ok(());
+                    }
+                }
+            }
+        }
+
+        let listener = listener.expect("client listener required for client-serving role");
 
         loop {
             if handle_shutdown {
@@ -1049,6 +1333,12 @@ impl Morrow {
 
     pub async fn cluster_leader(&self) -> Option<u64> {
         self.cluster_runtime().await?.current_leader().await
+    }
+
+    pub async fn cluster_partition_assignment_count(&self) -> usize {
+        self.cluster_runtime()
+            .await
+            .map_or(0, |cluster| cluster.partition_assignment_count())
     }
 
     pub(super) async fn health_response(&self) -> HealthResponse {
@@ -1198,8 +1488,25 @@ impl Morrow {
             .iter()
             .map(|stream| stream.partition_status.len())
             .sum::<usize>();
+        let (partition_metadata_cache_entries, partition_metadata_cache_evictions) =
+            self.partition_logs.metadata_cache_stats();
+        let active_partition_resources = self.partition_logs.active_resource_count();
         let audit = self.audit_status();
         let mut metrics = String::new();
+        metrics
+            .push_str("# HELP morrow_controller_voters Configured metadata controller voters.\n");
+        metrics.push_str("# TYPE morrow_controller_voters gauge\n");
+        metrics.push_str(&format!(
+            "morrow_controller_voters {}\n",
+            cluster.controller_voters.len()
+        ));
+        metrics
+            .push_str("# HELP morrow_node_role Current process role (one bounded role label).\n");
+        metrics.push_str("# TYPE morrow_node_role gauge\n");
+        metrics.push_str(&format!(
+            "morrow_node_role{{role=\"{}\"}} 1\n",
+            cluster.node_role
+        ));
         metrics.push_str("# HELP morrow_connections Current client connections.\n");
         metrics.push_str("# TYPE morrow_connections gauge\n");
         metrics.push_str(&format!("morrow_connections {connections}\n"));
@@ -1404,9 +1711,43 @@ impl Morrow {
             "morrow_delivery_latency_us",
             &self.metrics.delivery_latency_us,
         );
+        append_latency_histogram(
+            &mut metrics,
+            "morrow_state_shard_wait_us",
+            &self.metrics.state_shard_wait_us,
+        );
+        append_latency_histogram(
+            &mut metrics,
+            "morrow_state_shard_hold_us",
+            &self.metrics.state_shard_hold_us,
+        );
         metrics.push_str("# HELP morrow_wal_bytes Total WAL bytes.\n");
         metrics.push_str("# TYPE morrow_wal_bytes gauge\n");
         metrics.push_str(&format!("morrow_wal_bytes {}\n", wal.total_wal_bytes));
+        metrics.push_str("# HELP morrow_wal_partition_append_batches_total Partition append batches written to the WAL.\n");
+        metrics.push_str("# TYPE morrow_wal_partition_append_batches_total counter\n");
+        metrics.push_str(&format!(
+            "morrow_wal_partition_append_batches_total {}\n",
+            wal.partition_append_batches
+        ));
+        metrics.push_str("# HELP morrow_wal_partition_append_batch_max_records Largest partition append batch record count.\n");
+        metrics.push_str("# TYPE morrow_wal_partition_append_batch_max_records gauge\n");
+        metrics.push_str(&format!(
+            "morrow_wal_partition_append_batch_max_records {}\n",
+            wal.partition_append_batch_max_records
+        ));
+        metrics.push_str("# HELP morrow_wal_partition_append_batch_max_bytes Largest partition append batch byte estimate.\n");
+        metrics.push_str("# TYPE morrow_wal_partition_append_batch_max_bytes gauge\n");
+        metrics.push_str(&format!(
+            "morrow_wal_partition_append_batch_max_bytes {}\n",
+            wal.partition_append_batch_max_bytes
+        ));
+        metrics.push_str("# HELP morrow_wal_partition_append_batch_wait_us_max Maximum append batch formation wait in microseconds.\n");
+        metrics.push_str("# TYPE morrow_wal_partition_append_batch_wait_us_max gauge\n");
+        metrics.push_str(&format!(
+            "morrow_wal_partition_append_batch_wait_us_max {}\n",
+            wal.partition_append_batch_wait_us
+        ));
         metrics.push_str("# HELP morrow_wal_retained_messages Retained WAL messages.\n");
         metrics.push_str("# TYPE morrow_wal_retained_messages gauge\n");
         metrics.push_str(&format!(
@@ -1429,6 +1770,40 @@ impl Morrow {
         metrics.push_str("# HELP morrow_configured_partitions Configured partition count.\n");
         metrics.push_str("# TYPE morrow_configured_partitions gauge\n");
         metrics.push_str(&format!("morrow_configured_partitions {partition_count}\n"));
+        metrics.push_str("# HELP morrow_assigned_partitions Locally assigned partition count.\n");
+        metrics.push_str("# TYPE morrow_assigned_partitions gauge\n");
+        metrics.push_str(&format!(
+            "morrow_assigned_partitions {}\n",
+            streams.recovery.total_partitions
+        ));
+        metrics.push_str("# HELP morrow_active_partitions Locally active partition resources.\n");
+        metrics.push_str("# TYPE morrow_active_partitions gauge\n");
+        metrics.push_str(&format!(
+            "morrow_active_partitions {active_partition_resources}\n"
+        ));
+        metrics.push_str(
+            "# HELP morrow_partition_metadata_cache_entries Cached decoded partition records.\n",
+        );
+        metrics.push_str("# TYPE morrow_partition_metadata_cache_entries gauge\n");
+        metrics.push_str(&format!(
+            "morrow_partition_metadata_cache_entries {partition_metadata_cache_entries}\n"
+        ));
+        metrics.push_str(
+            "# HELP morrow_partition_metadata_cache_evictions_total Evicted decoded partition records.\n",
+        );
+        metrics.push_str("# TYPE morrow_partition_metadata_cache_evictions_total counter\n");
+        metrics.push_str(&format!(
+            "morrow_partition_metadata_cache_evictions_total {partition_metadata_cache_evictions}\n"
+        ));
+        metrics.push_str("# HELP morrow_recovering_partitions Partitions still recovering.\n");
+        metrics.push_str("# TYPE morrow_recovering_partitions gauge\n");
+        metrics.push_str(&format!(
+            "morrow_recovering_partitions {}\n",
+            streams
+                .recovery
+                .total_partitions
+                .saturating_sub(streams.recovery.completed_partitions)
+        ));
         metrics.push_str("# HELP morrow_recovered_partitions Recovered partition count.\n");
         metrics.push_str("# TYPE morrow_recovered_partitions gauge\n");
         metrics.push_str(&format!(
@@ -1505,9 +1880,128 @@ impl Morrow {
         metrics.push_str(&format!(
             "morrow_partition_active_commit_members {active_commit_members}\n"
         ));
+        let scheduler = self.work_scheduler.lock().await;
+        let control_usage = scheduler.usage(crate::work_scheduler::WorkClass::Control);
+        let foreground_usage = scheduler.usage(crate::work_scheduler::WorkClass::Foreground);
+        let observer_usage = scheduler.usage(crate::work_scheduler::WorkClass::Observer);
+        let catch_up_usage = scheduler.usage(crate::work_scheduler::WorkClass::CatchUp);
+        let snapshot_usage = scheduler.usage(crate::work_scheduler::WorkClass::Snapshot);
+        let reassignment_usage = scheduler.usage(crate::work_scheduler::WorkClass::Reassignment);
+        let compaction_usage = scheduler.usage(crate::work_scheduler::WorkClass::Compaction);
+        let retention_usage = scheduler.usage(crate::work_scheduler::WorkClass::Retention);
+        drop(scheduler);
+        for (name, usage) in [
+            ("control", control_usage),
+            ("observer", observer_usage),
+            ("catch_up", catch_up_usage),
+            ("snapshot", snapshot_usage),
+            ("reassignment", reassignment_usage),
+        ] {
+            metrics.push_str(&format!(
+                "# HELP morrow_work_{name}_rejections_total Work items rejected by the {name} budget.\n# TYPE morrow_work_{name}_rejections_total counter\nmorrow_work_{name}_rejections_total {}\n# HELP morrow_work_{name}_active Active {name} work items.\n# TYPE morrow_work_{name}_active gauge\nmorrow_work_{name}_active {}\n",
+                usage.rejected, usage.concurrency
+            ));
+        }
+        metrics.push_str(
+            "# HELP morrow_work_compaction_rejections_total Compaction jobs rejected by the work budget.\n",
+        );
+        metrics.push_str("# TYPE morrow_work_compaction_rejections_total counter\n");
+        metrics.push_str(&format!(
+            "morrow_work_compaction_rejections_total {}\n",
+            compaction_usage.rejected
+        ));
+        metrics.push_str("# HELP morrow_work_compaction_active Active compaction jobs.\n");
+        metrics.push_str("# TYPE morrow_work_compaction_active gauge\n");
+        metrics.push_str(&format!(
+            "morrow_work_compaction_active {}\n",
+            compaction_usage.concurrency
+        ));
+        metrics.push_str(
+            "# HELP morrow_work_foreground_rejections_total Foreground publish operations rejected by the work budget.\n",
+        );
+        metrics.push_str("# TYPE morrow_work_foreground_rejections_total counter\n");
+        metrics.push_str(&format!(
+            "morrow_work_foreground_rejections_total {}\n",
+            foreground_usage.rejected
+        ));
+        metrics.push_str(
+            "# HELP morrow_work_foreground_active Active foreground publish operations.\n",
+        );
+        metrics.push_str("# TYPE morrow_work_foreground_active gauge\n");
+        metrics.push_str(&format!(
+            "morrow_work_foreground_active {}\n",
+            foreground_usage.concurrency
+        ));
+        metrics.push_str(
+            "# HELP morrow_work_retention_rejections_total Retention jobs rejected by the work budget.\n",
+        );
+        metrics.push_str("# TYPE morrow_work_retention_rejections_total counter\n");
+        metrics.push_str(&format!(
+            "morrow_work_retention_rejections_total {}\n",
+            retention_usage.rejected
+        ));
+        metrics.push_str("# HELP morrow_work_retention_active Active retention jobs.\n");
+        metrics.push_str("# TYPE morrow_work_retention_active gauge\n");
+        metrics.push_str(&format!(
+            "morrow_work_retention_active {}\n",
+            retention_usage.concurrency
+        ));
         metrics.push_str("# HELP morrow_cluster_peers Current configured cluster peers.\n");
         metrics.push_str("# TYPE morrow_cluster_peers gauge\n");
         metrics.push_str(&format!("morrow_cluster_peers {}\n", cluster.peers.len()));
+        let (registered_brokers, control_revision, retained_updates) =
+            self.broker_control.status().await;
+        metrics.push_str("# HELP morrow_registered_brokers Current broker-control sessions.\n");
+        metrics.push_str("# TYPE morrow_registered_brokers gauge\n");
+        metrics.push_str(&format!("morrow_registered_brokers {registered_brokers}\n"));
+        metrics.push_str("# HELP morrow_broker_control_revision Latest metadata revision.\n");
+        metrics.push_str("# TYPE morrow_broker_control_revision gauge\n");
+        metrics.push_str(&format!(
+            "morrow_broker_control_revision {control_revision}\n"
+        ));
+        metrics
+            .push_str("# HELP morrow_broker_control_retained_updates Retained metadata deltas.\n");
+        metrics.push_str("# TYPE morrow_broker_control_retained_updates gauge\n");
+        metrics.push_str(&format!(
+            "morrow_broker_control_retained_updates {retained_updates}\n"
+        ));
+        let [
+            registrations,
+            heartbeats,
+            fenced_sessions,
+            metadata_updates,
+            snapshot_fallbacks,
+        ] = self.broker_control.metrics_snapshot();
+        metrics.push_str(
+            "# HELP morrow_broker_control_registrations_total Broker registration attempts.\n# TYPE morrow_broker_control_registrations_total counter\n",
+        );
+        metrics.push_str(&format!(
+            "morrow_broker_control_registrations_total {registrations}\n"
+        ));
+        metrics.push_str(
+            "# HELP morrow_broker_control_heartbeats_total Broker heartbeat attempts.\n# TYPE morrow_broker_control_heartbeats_total counter\n",
+        );
+        metrics.push_str(&format!(
+            "morrow_broker_control_heartbeats_total {heartbeats}\n"
+        ));
+        metrics.push_str(
+            "# HELP morrow_broker_control_fenced_sessions_total Superseded broker sessions.\n# TYPE morrow_broker_control_fenced_sessions_total counter\n",
+        );
+        metrics.push_str(&format!(
+            "morrow_broker_control_fenced_sessions_total {fenced_sessions}\n"
+        ));
+        metrics.push_str(
+            "# HELP morrow_broker_control_metadata_updates_total Published metadata updates.\n# TYPE morrow_broker_control_metadata_updates_total counter\n",
+        );
+        metrics.push_str(&format!(
+            "morrow_broker_control_metadata_updates_total {metadata_updates}\n"
+        ));
+        metrics.push_str(
+            "# HELP morrow_broker_control_snapshot_fallbacks_total Registrations requiring snapshot fallback.\n# TYPE morrow_broker_control_snapshot_fallbacks_total counter\n",
+        );
+        metrics.push_str(&format!(
+            "morrow_broker_control_snapshot_fallbacks_total {snapshot_fallbacks}\n"
+        ));
         metrics
             .push_str("# HELP morrow_cluster_delta_applications_total Applied cluster deltas.\n");
         metrics.push_str("# TYPE morrow_cluster_delta_applications_total counter\n");
@@ -1690,6 +2184,13 @@ impl Morrow {
             (Some(_), Some(_)) => "follower",
             (Some(_), None) => "unknown",
         };
+        let node_role = cluster_config
+            .map(|cluster| match cluster.role {
+                crate::config::ClusterRole::Combined => "combined",
+                crate::config::ClusterRole::Controller => "controller",
+                crate::config::ClusterRole::Broker => "broker",
+            })
+            .unwrap_or("standalone");
         let cluster_status = if cluster_config.is_none() && cluster.is_none() {
             "standalone"
         } else if leader_id.is_some() {
@@ -1744,6 +2245,22 @@ impl Morrow {
                             leader_id: assignment.leader_id,
                             leader_client_addr,
                             leader_epoch: assignment.leader_epoch,
+                            partitioning_epoch: self
+                                .config
+                                .streams
+                                .definitions()
+                                .iter()
+                                .find(|definition| definition.name.as_str() == stream)
+                                .map(|definition| definition.partitioning.epoch)
+                                .unwrap_or_default(),
+                            partitioning: self
+                                .config
+                                .streams
+                                .definitions()
+                                .iter()
+                                .find(|definition| definition.name.as_str() == stream)
+                                .map(|definition| definition.partitioning.clone())
+                                .unwrap_or_default(),
                             high_watermark,
                         })
                     })
@@ -1759,6 +2276,11 @@ impl Morrow {
             cluster_status,
             node_id,
             role,
+            node_role,
+            controller_voter: cluster_config.is_some_and(|cluster| cluster.is_controller_voter()),
+            controller_voters: cluster_config
+                .map(|cluster| cluster.controller_voters.clone())
+                .unwrap_or_default(),
             leader_id,
             peers,
             partitions,
@@ -1773,6 +2295,26 @@ impl Morrow {
                     .full_reconciliations
                     .load(Ordering::Relaxed),
             },
+        }
+    }
+
+    pub(super) async fn partition_metadata_response(
+        &self,
+        stream_filter: Option<&str>,
+    ) -> PartitionMetadataResponse {
+        const MAX_ENTRIES: usize = 10_000;
+        let mut partitions = self
+            .cluster_response()
+            .await
+            .partitions
+            .into_iter()
+            .filter(|partition| stream_filter.is_none_or(|stream| partition.stream == stream))
+            .take(MAX_ENTRIES)
+            .collect::<Vec<_>>();
+        partitions.sort_by_key(|partition| (partition.stream.clone(), partition.partition));
+        PartitionMetadataResponse {
+            version: 1,
+            partitions,
         }
     }
 
@@ -1872,7 +2414,12 @@ impl Morrow {
         if self.route_mesh.is_some() {
             return Ok(Some(stream));
         }
-        if let Some(cluster) = self.cluster_runtime().await {
+        let proxy_to_metadata_leader = self
+            .config
+            .cluster
+            .as_ref()
+            .is_none_or(|cluster| cluster.role == crate::config::ClusterRole::Combined);
+        if proxy_to_metadata_leader && let Some(cluster) = self.cluster_runtime().await {
             if !cluster.is_leader().await {
                 if let Some(leader) = cluster.leader_client_addr().await {
                     proxy_stream_to_leader(stream, leader).await?;

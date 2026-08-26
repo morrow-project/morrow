@@ -6,6 +6,7 @@ use std::io::{Cursor, Read};
 use std::{collections::HashMap, path::Path};
 
 mod codec;
+mod dynamic;
 mod log;
 mod set;
 mod subject_index;
@@ -119,8 +120,14 @@ pub(crate) struct PartitionRetentionStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct PartitionRecoveryStatus {
+    pub(crate) configured_partitions: usize,
+    pub(crate) assigned_partitions: usize,
     pub(crate) total_partitions: usize,
     pub(crate) completed_partitions: usize,
+    pub(crate) active_partitions: usize,
+    pub(crate) evicted_partitions: u64,
+    pub(crate) recovering_partitions: usize,
+    pub(crate) blocked_partitions: usize,
     pub(crate) records_scanned: usize,
     pub(crate) resident_metadata_bytes: usize,
     pub(crate) elapsed_ms: u64,
@@ -133,6 +140,20 @@ pub fn select_partition(
     key: Option<&[u8]>,
     sticky_value: u64,
 ) -> PartitionId {
+    select_partition_with_count(stream, subject, key, sticky_value, stream.partitions)
+}
+
+pub fn select_partition_with_count(
+    stream: &StreamDefinition,
+    subject: &str,
+    key: Option<&[u8]>,
+    sticky_value: u64,
+    partition_count: u32,
+) -> PartitionId {
+    assert!(
+        partition_count > 0,
+        "partition count must be greater than zero"
+    );
     let value = key
         .map(stable_hash)
         .unwrap_or_else(|| match &stream.partitioning.strategy {
@@ -145,7 +166,7 @@ pub fn select_partition(
                 fallback_hash(stream, subject, sticky_value)
             }
         });
-    PartitionId((value % u64::from(stream.partitions)) as u32)
+    PartitionId((value % u64::from(partition_count)) as u32)
 }
 
 fn fallback_hash(stream: &StreamDefinition, subject: &str, sticky_value: u64) -> u64 {
@@ -161,6 +182,9 @@ fn stable_hash(bytes: &[u8]) -> u64 {
     })
 }
 
+#[cfg(test)]
+#[path = "partition_log/dynamic_tests.rs"]
+mod dynamic_tests;
 #[cfg(test)]
 #[path = "partition_log/tests.rs"]
 mod tests;

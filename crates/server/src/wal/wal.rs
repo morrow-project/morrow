@@ -134,6 +134,32 @@ impl Wal {
         self.append_record(KIND_PARTITION_APPEND, &partition_append_body(record)?)
     }
 
+    pub(crate) fn note_partition_append_batch(&mut self, records: u64, bytes: u64) {
+        self.note_partition_append_batch_timing(records, bytes, 0);
+    }
+
+    pub(crate) fn note_partition_append_batch_timing(
+        &mut self,
+        records: u64,
+        bytes: u64,
+        wait_us: u64,
+    ) {
+        self.metrics.partition_append_batches =
+            self.metrics.partition_append_batches.saturating_add(1);
+        self.metrics.partition_append_records = self
+            .metrics
+            .partition_append_records
+            .saturating_add(records);
+        self.metrics.partition_append_bytes =
+            self.metrics.partition_append_bytes.saturating_add(bytes);
+        self.metrics.partition_append_batch_max_records =
+            self.metrics.partition_append_batch_max_records.max(records);
+        self.metrics.partition_append_batch_max_bytes =
+            self.metrics.partition_append_batch_max_bytes.max(bytes);
+        self.metrics.partition_append_batch_wait_us =
+            self.metrics.partition_append_batch_wait_us.max(wait_us);
+    }
+
     pub fn append_consumer_cursor(&mut self, record: &ConsumerCursorRecord) -> Result<()> {
         self.append_record(KIND_CONSUMER_CURSOR, &consumer_cursor_body(record)?)
     }
@@ -239,6 +265,7 @@ impl Wal {
             .sync_data()
             .with_context(|| format!("fsyncing {}", self.active_path.display()))?;
         self.metrics.last_fsync_duration_ms = millis_since(started);
+        self.metrics.flushes = self.metrics.flushes.saturating_add(1);
         self.last_sync = Instant::now();
         Ok(())
     }
@@ -341,6 +368,13 @@ impl Wal {
             checkpoints: self.metrics.checkpoints,
             truncations: self.metrics.truncations,
             deleted_segments: self.metrics.deleted_segments,
+            partition_append_batches: self.metrics.partition_append_batches,
+            partition_append_records: self.metrics.partition_append_records,
+            partition_append_bytes: self.metrics.partition_append_bytes,
+            partition_append_batch_max_records: self.metrics.partition_append_batch_max_records,
+            partition_append_batch_max_bytes: self.metrics.partition_append_batch_max_bytes,
+            partition_append_batch_wait_us: self.metrics.partition_append_batch_wait_us,
+            flushes: self.metrics.flushes,
         }
     }
 

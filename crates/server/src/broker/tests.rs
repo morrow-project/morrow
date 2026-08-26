@@ -629,6 +629,7 @@ fn deterministic_broker(
 fn fake_cluster_config(dir: &Path, node_count: u64, local_node_id: u64) -> ClusterConfig {
     ClusterConfig {
         enabled: true,
+        role: crate::config::ClusterRole::Combined,
         node_id: local_node_id,
         auth_token: "test-cluster-token".to_string(),
         raft_listen: SocketAddr::from(([127, 0, 0, 1], 20_000 + local_node_id as u16)),
@@ -659,6 +660,7 @@ fn fake_cluster_config(dir: &Path, node_count: u64, local_node_id: u64) -> Clust
                 tls_cert_files: Vec::new(),
             })
             .collect(),
+        controller_voters: (1..=node_count).collect(),
         election_timeout_min_ms: 150,
         election_timeout_max_ms: 300,
         heartbeat_interval_ms: 50,
@@ -704,10 +706,12 @@ mod middleware_tests;
 mod pull_tests;
 mod qos_tests;
 mod quota_tests;
+mod registration_tests;
 mod retention_limit_tests;
 mod route_interest_tests;
 mod semantic_tests;
 mod simulation_tests;
+mod startup_assignment_tests;
 mod startup_tests;
 mod state_sharding_tests;
 mod stream_retention_tests;

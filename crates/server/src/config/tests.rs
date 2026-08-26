@@ -399,8 +399,87 @@ fn parses_cluster_config() {
     assert_eq!(cluster.node_id, 1);
     assert_eq!(cluster.auth_token, "cluster-secret");
     assert_eq!(cluster.nodes.len(), 2);
+    assert_eq!(cluster.controller_voters, vec![1, 2]);
+    assert_eq!(cluster.role, crate::config::ClusterRole::Combined);
     assert_eq!(cluster.routes.len(), 1);
     assert!(cluster.bootstrap);
+}
+
+#[test]
+fn parses_fixed_controller_voters_and_rejects_broker_voter() {
+    let value = serde_json::json!({
+        "wal_dir": "./target/test-wal-broker-role",
+        "cluster": {
+            "enabled": true,
+            "role": "broker",
+            "node_id": 1,
+            "controller_voters": [2],
+            "auth_token": "cluster-secret",
+            "raft_listen": "127.0.0.1:5321",
+            "allow_insecure_internal_transports": true,
+            "raft_dir": "./target/test-wal-broker-role/raft",
+            "bootstrap": false,
+            "nodes": [
+                {"node_id": 1, "raft_addr": "localhost:5321", "client_addr": "localhost:4321"},
+                {"node_id": 2, "raft_addr": "localhost:5322", "client_addr": "localhost:4322"}
+            ],
+            "election_timeout_min_ms": 200,
+            "election_timeout_max_ms": 400,
+            "heartbeat_interval_ms": 50,
+            "snapshot_threshold": 100
+        }
+    });
+    let config = Config::from_json(&value).unwrap();
+    let cluster = config.cluster.unwrap();
+    assert_eq!(cluster.role, crate::config::ClusterRole::Broker);
+    assert_eq!(cluster.controller_voters, vec![2]);
+    assert!(!cluster.is_controller_voter());
+
+    let mut invalid = value;
+    invalid["cluster"]["controller_voters"] = serde_json::json!([1]);
+    let err = Config::from_json(&invalid).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("broker node must not be a controller voter")
+    );
+}
+
+#[test]
+fn cluster_roles_define_data_and_metadata_plane_membership() {
+    assert!(crate::config::ClusterRole::Combined.serves_client_traffic());
+    assert!(crate::config::ClusterRole::Combined.participates_in_metadata_quorum());
+    assert!(!crate::config::ClusterRole::Controller.serves_client_traffic());
+    assert!(crate::config::ClusterRole::Controller.participates_in_metadata_quorum());
+    assert!(crate::config::ClusterRole::Broker.serves_client_traffic());
+    assert!(!crate::config::ClusterRole::Broker.participates_in_metadata_quorum());
+}
+
+#[test]
+fn controller_role_rejects_data_plane_listeners() {
+    let mut value = serde_json::json!({
+        "websocket": {
+            "listen": "127.0.0.1:4223",
+            "allowed_origins": []
+        },
+        "cluster": {
+            "enabled": true,
+            "role": "controller",
+            "node_id": 1,
+            "auth_token": "cluster-secret",
+            "raft_listen": "127.0.0.1:5221",
+            "allow_insecure_internal_transports": true,
+            "raft_dir": "./target/test-controller-role/raft",
+            "nodes": [
+                {"node_id": 1, "raft_addr": "localhost:5221", "client_addr": "localhost:4221"}
+            ],
+            "controller_voters": [1]
+        }
+    });
+    assert!(Config::from_json(&value).is_err());
+    value["websocket"] = serde_json::Value::Null;
+    value["cluster"]["route_listen"] = serde_json::json!("127.0.0.1:6223");
+    value["cluster"]["route_advertise"] = serde_json::json!("localhost:6223");
+    assert!(Config::from_json(&value).is_err());
 }
 
 #[test]

@@ -11,16 +11,200 @@ impl Morrow {
             &self.config.streams,
             self.config.wal_segment_bytes,
             self.quotas.clone(),
+            self.work_scheduler.clone(),
         )
         .await?;
-        runtime.spawn_listener(listener.expect("configured Raft listener was not pre-bound"));
+        runtime.spawn_listener(
+            listener.expect("configured Raft listener was not pre-bound"),
+            self.broker_control.clone(),
+            cluster_config.role.participates_in_metadata_quorum(),
+        );
+        if matches!(cluster_config.role, crate::config::ClusterRole::Broker) {
+            self.spawn_broker_registration(runtime.clone(), cluster_config.clone());
+        }
         let runtime = ClusterRuntime::real(runtime);
         self.sync_from_cluster(&runtime).await?;
+        let bootstrap_runtime = runtime.clone();
         *self.cluster.lock().await = Some(runtime);
+        self.spawn_metadata_bootstrap(bootstrap_runtime);
         Ok(())
     }
 
+    fn spawn_metadata_bootstrap(&self, runtime: ClusterRuntime) {
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_millis(25));
+            loop {
+                interval.tick().await;
+                if runtime.is_leader().await && runtime.ensure_metadata_ready().await.is_ok() {
+                    break;
+                }
+            }
+        });
+    }
+
+    fn spawn_broker_registration(
+        &self,
+        runtime: RaftRuntime,
+        cluster_config: crate::config::ClusterConfig,
+    ) {
+        let broker_id = cluster_config.node_id;
+        let controller_ids = cluster_config
+            .controller_voters
+            .iter()
+            .copied()
+            .filter(|id| *id != broker_id)
+            .collect::<Vec<_>>();
+        if controller_ids.is_empty() {
+            return;
+        }
+        let client_addr = self.config.listen.to_string();
+        let replication_addr = cluster_config.route_advertise.clone().or_else(|| {
+            cluster_config
+                .route_listen
+                .map(|address| address.to_string())
+        });
+        let heartbeat_interval_ms = cluster_config.heartbeat_interval_ms;
+        let registration_timeout_ms = heartbeat_interval_ms.saturating_mul(5).max(1_000);
+        tracing::info!(
+            broker_id,
+            controller_ids = ?controller_ids,
+            "starting broker control registration"
+        );
+        tokio::spawn(async move {
+            let incarnation = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos() as u64)
+                .unwrap_or(1)
+                .max(1);
+            let mut last_revision = 0;
+            let mut session_id = None;
+            let mut controller_index = 0usize;
+            let mut interval = tokio::time::interval(Duration::from_millis(heartbeat_interval_ms));
+            loop {
+                tracing::trace!(
+                    broker_id,
+                    controller_id = ?controller_ids.get(controller_index),
+                    registered = session_id.is_some(),
+                    "broker control registration tick"
+                );
+                let controller_id = runtime
+                    .current_leader()
+                    .await
+                    .filter(|leader| controller_ids.contains(leader))
+                    .unwrap_or(controller_ids[controller_index % controller_ids.len()]);
+                if let Some(session) = session_id {
+                    let heartbeat = protocol::broker_control::BrokerHeartbeat {
+                        protocol_version: protocol::broker_control::BROKER_CONTROL_PROTOCOL_VERSION,
+                        broker_id,
+                        incarnation,
+                        session_id: session,
+                        capacity: protocol::broker_control::CapacitySummary::default(),
+                        last_revision,
+                    };
+                    let result = tokio::time::timeout(
+                        Duration::from_millis(registration_timeout_ms),
+                        runtime.heartbeat_with_controller(controller_id, heartbeat),
+                    )
+                    .await;
+                    match result {
+                        Ok(Ok(accepted)) => {
+                            if let Err(error) = apply_metadata_updates(&runtime, &accepted.updates)
+                            {
+                                tracing::warn!(
+                                    broker_id,
+                                    ?error,
+                                    "controller metadata update failed"
+                                );
+                                session_id = None;
+                                continue;
+                            }
+                            last_revision = accepted.controller_revision;
+                        }
+                        Ok(Err(error)) => {
+                            tracing::debug!(
+                                broker_id,
+                                controller_id,
+                                ?error,
+                                "broker heartbeat failed"
+                            );
+                            session_id = None;
+                            controller_index = (controller_index + 1) % controller_ids.len();
+                        }
+                        Err(_) => {
+                            tracing::debug!(
+                                broker_id,
+                                controller_id,
+                                timeout_ms = registration_timeout_ms,
+                                "broker heartbeat timed out"
+                            );
+                            session_id = None;
+                            controller_index = (controller_index + 1) % controller_ids.len();
+                        }
+                    }
+                } else {
+                    let registration = protocol::broker_control::BrokerRegistration {
+                        protocol_version: protocol::broker_control::BROKER_CONTROL_PROTOCOL_VERSION,
+                        broker_id,
+                        incarnation,
+                        client_addr: client_addr.clone(),
+                        replication_addr: replication_addr.clone(),
+                        capacity: protocol::broker_control::CapacitySummary::default(),
+                        feature_gates: Vec::new(),
+                        security_references: Vec::new(),
+                        last_revision,
+                    };
+                    let result = tokio::time::timeout(
+                        Duration::from_millis(registration_timeout_ms),
+                        runtime.register_with_controller(controller_id, registration),
+                    )
+                    .await;
+                    match result {
+                        Ok(Ok(result)) => {
+                            if let Err(error) = apply_metadata_updates(&runtime, &result.updates) {
+                                tracing::warn!(
+                                    broker_id,
+                                    ?error,
+                                    "controller metadata update failed"
+                                );
+                                continue;
+                            }
+                            session_id = Some(result.session_id);
+                            last_revision = result.controller_revision;
+                        }
+                        Ok(Err(error)) => {
+                            tracing::debug!(
+                                broker_id,
+                                controller_id,
+                                ?error,
+                                "broker registration failed"
+                            );
+                            controller_index = (controller_index + 1) % controller_ids.len();
+                        }
+                        Err(_) => {
+                            tracing::debug!(
+                                broker_id,
+                                controller_id,
+                                timeout_ms = registration_timeout_ms,
+                                "broker registration timed out"
+                            );
+                            controller_index = (controller_index + 1) % controller_ids.len();
+                        }
+                    }
+                }
+                interval.tick().await;
+            }
+        });
+    }
+
     pub(super) async fn start_route_mesh(&self, listener: Option<TcpListener>) -> Result<()> {
+        if self
+            .config
+            .cluster
+            .as_ref()
+            .is_some_and(|cluster| !cluster.role.serves_client_traffic())
+        {
+            return Ok(());
+        }
         let Some(route_mesh) = &self.route_mesh else {
             return Ok(());
         };
@@ -47,6 +231,7 @@ impl Morrow {
     pub(super) async fn cluster_log_monitor(self) {
         let mut previous_leader = self.current_leader_for_log().await;
         let mut full_mesh_formed = false;
+        let mut published_metadata = None;
         let mut interval =
             tokio::time::interval(Duration::from_millis(CLUSTER_LOG_SCAN_INTERVAL_MS));
         loop {
@@ -62,6 +247,14 @@ impl Morrow {
                     && let Err(err) = cluster.ensure_metadata_ready().await
                 {
                     error!(error = ?err, "cluster metadata reconciliation failed");
+                } else if cluster.is_leader().await {
+                    if let Ok(payload) = serde_json::to_vec(
+                        &crate::raft::MetadataSnapshot::from_state(&cluster.durable_state()),
+                    ) && published_metadata.as_deref() != Some(payload.as_slice())
+                    {
+                        self.broker_control.publish_update(payload.clone()).await;
+                        published_metadata = Some(payload);
+                    }
                 }
             }
             let leader = self.current_leader_for_log().await;
@@ -170,4 +363,15 @@ impl Morrow {
         }
         Ok(response)
     }
+}
+
+fn apply_metadata_updates(
+    runtime: &RaftRuntime,
+    updates: &[protocol::broker_control::MetadataUpdate],
+) -> Result<()> {
+    for update in updates {
+        crate::broker_ensure!(update.verify(), "controller metadata checksum mismatch");
+        runtime.install_metadata_snapshot(&update.payload)?;
+    }
+    Ok(())
 }

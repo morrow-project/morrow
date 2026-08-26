@@ -142,6 +142,17 @@ impl Morrow {
                 .context("serializing HTTP audit status response")?;
             return write_http_response(&mut stream, "200 OK", "application/json", &body).await;
         }
+        if method == "GET"
+            && matches!(
+                path.as_str(),
+                "/partition-metadata" | "/api/v1/partition-metadata"
+            )
+        {
+            let stream_filter = http_query_parameter(&query, "stream");
+            let body = serde_json::to_vec(&self.partition_metadata_response(stream_filter).await)
+                .context("serializing HTTP partition metadata response")?;
+            return write_http_response(&mut stream, "200 OK", "application/json", &body).await;
+        }
         if method == "POST" && matches!(path.as_str(), "/audit/verify" | "/api/v1/audit/verify") {
             return match self.verify_audit_log() {
                 Ok(()) => {

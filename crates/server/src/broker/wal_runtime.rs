@@ -1,14 +1,20 @@
 use super::*;
 use crate::wal::GroupStateRecord;
-use std::sync::mpsc::{self, SyncSender};
+use std::collections::HashMap;
+use std::sync::mpsc::{self, RecvTimeoutError, SyncSender};
+use std::time::Duration;
 
 const WAL_QUEUE_CAPACITY: usize = 128;
+const MAX_PARTITION_APPEND_BATCH_RECORDS: usize = 256;
+const MAX_PARTITION_APPEND_BATCH_BYTES: usize = 8 * 1024 * 1024;
+const MAX_PARTITION_APPEND_BATCH_DELAY_MS: u64 = 100;
 
 #[derive(Clone)]
 pub(super) struct WalRuntime {
     sender: SyncSender<WalCommand>,
     next_publish_seq: Arc<AtomicU64>,
     flush_coordinator: Arc<FlushCoordinator>,
+    partition_flush_coordinators: Arc<tokio::sync::Mutex<HashMap<String, Arc<FlushCoordinator>>>>,
 }
 
 struct FlushCoordinator {
@@ -22,6 +28,7 @@ struct FlushState {
 
 enum WalCommand {
     PartitionAppend(PartitionAppendRecord, mpsc::Sender<Result<()>>),
+    PartitionAppendBatch(Vec<PartitionAppendRecord>, mpsc::Sender<Result<()>>),
     ConsumerUpsert(ConsumerRecord, mpsc::Sender<Result<()>>),
     ConsumerCursor(ConsumerCursorRecord, mpsc::Sender<Result<()>>),
     ConsumerCursorDelta(ConsumerCursorDeltaRecord, mpsc::Sender<Result<()>>),
@@ -94,6 +101,7 @@ impl WalRuntime {
                     waiters: Vec::new(),
                 }),
             }),
+            partition_flush_coordinators: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -103,6 +111,27 @@ impl WalRuntime {
 
     pub(super) fn append_partition_append(&self, record: &PartitionAppendRecord) -> Result<()> {
         self.request(|response| WalCommand::PartitionAppend(record.clone(), response))
+    }
+
+    pub(super) fn append_partition_append_batch(
+        &self,
+        records: Vec<PartitionAppendRecord>,
+    ) -> Result<()> {
+        crate::broker_ensure!(
+            !records.is_empty() && records.len() <= MAX_PARTITION_APPEND_BATCH_RECORDS,
+            "partition append batch is outside the supported bound"
+        );
+        let encoded_bytes = records
+            .iter()
+            .map(|record| {
+                record.stream.len() + record.subject.len() + std::mem::size_of::<u64>() * 2
+            })
+            .sum::<usize>();
+        crate::broker_ensure!(
+            encoded_bytes <= MAX_PARTITION_APPEND_BATCH_BYTES,
+            "partition append batch bytes exceed the supported bound"
+        );
+        self.request(|response| WalCommand::PartitionAppendBatch(records, response))
     }
 
     /// Async callers use these adapters so bounded queue backpressure and WAL
@@ -336,6 +365,68 @@ impl WalRuntime {
             .map_err(|_| BrokerError::msg("WAL group-commit coordinator stopped"))?
     }
 
+    /// Join concurrent high-durability partition flushes into one physical
+    /// barrier. The whole partition log set is flushed once for the group;
+    /// callers still await the same durability boundary individually.
+    pub(super) async fn flush_partitions_grouped(
+        &self,
+        partition_logs: Arc<crate::partition_log::PartitionLogSet>,
+        stream: String,
+        partition: crate::stream::PartitionId,
+        interval: Duration,
+    ) -> Result<()> {
+        let key = format!("{stream}:{}", partition.0);
+        let coordinator = {
+            let mut coordinators = self.partition_flush_coordinators.lock().await;
+            coordinators
+                .entry(key)
+                .or_insert_with(|| {
+                    Arc::new(FlushCoordinator {
+                        state: tokio::sync::Mutex::new(FlushState {
+                            running: false,
+                            waiters: Vec::new(),
+                        }),
+                    })
+                })
+                .clone()
+        };
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let start_worker = {
+            let mut state = coordinator.state.lock().await;
+            state.waiters.push(sender);
+            if state.running {
+                false
+            } else {
+                state.running = true;
+                true
+            }
+        };
+        if start_worker {
+            let coordinator = coordinator.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(interval).await;
+                let result = tokio::task::spawn_blocking(move || {
+                    partition_logs.flush_partition(&stream, partition)
+                })
+                .await
+                .map_err(|err| BrokerError::with_source("partition flush worker failed", err))
+                .and_then(|result| result);
+                let mut state = coordinator.state.lock().await;
+                state.running = false;
+                for waiter in state.waiters.drain(..) {
+                    let outcome = match &result {
+                        Ok(()) => Ok(()),
+                        Err(error) => Err(BrokerError::msg(error.to_string())),
+                    };
+                    let _ = waiter.send(outcome);
+                }
+            });
+        }
+        receiver
+            .await
+            .map_err(|_| BrokerError::msg("partition group-commit coordinator stopped"))?
+    }
+
     pub(super) async fn checkpoint(
         &self,
         messages: Vec<PublishRecord>,
@@ -391,10 +482,101 @@ impl WalRuntime {
 }
 
 fn wal_worker(mut wal: Wal, receiver: mpsc::Receiver<WalCommand>) {
-    while let Ok(command) = receiver.recv() {
+    let mut pending = None;
+    loop {
+        let command = match pending.take() {
+            Some(command) => command,
+            None => match receiver.recv() {
+                Ok(command) => command,
+                Err(_) => break,
+            },
+        };
         match command {
             WalCommand::PartitionAppend(record, response) => {
-                let _ = response.send(wal.append_partition_append(&record));
+                let batch_started = std::time::Instant::now();
+                let partition = (record.stream.clone(), record.partition);
+                let mut records = vec![record];
+                let mut responses = vec![response];
+                let mut estimated_bytes = records
+                    .iter()
+                    .map(partition_append_estimated_bytes)
+                    .sum::<usize>();
+                let deadline = std::time::Instant::now()
+                    + Duration::from_millis(partition_append_batch_delay_ms());
+                while records.len() < MAX_PARTITION_APPEND_BATCH_RECORDS {
+                    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                    if remaining.is_zero() {
+                        break;
+                    }
+                    match receiver.recv_timeout(remaining) {
+                        Ok(WalCommand::PartitionAppend(record, response))
+                            if (record.stream.clone(), record.partition) == partition =>
+                        {
+                            let record_bytes = partition_append_estimated_bytes(&record);
+                            if estimated_bytes.saturating_add(record_bytes)
+                                > MAX_PARTITION_APPEND_BATCH_BYTES
+                            {
+                                pending = Some(WalCommand::PartitionAppend(record, response));
+                                break;
+                            }
+                            estimated_bytes = estimated_bytes.saturating_add(record_bytes);
+                            records.push(record);
+                            responses.push(response);
+                        }
+                        Ok(command) => {
+                            pending = Some(command);
+                            break;
+                        }
+                        Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => break,
+                    }
+                }
+                let mut outcomes = Vec::with_capacity(records.len());
+                let mut failed: Option<String> = None;
+                for record in &records {
+                    let outcome = match (&failed, wal.append_partition_append(record)) {
+                        (Some(error), _) => Err(BrokerError::msg(error.clone())),
+                        (None, Ok(())) => Ok(()),
+                        (None, Err(error)) => {
+                            let message = error.to_string();
+                            failed = Some(message.clone());
+                            Err(BrokerError::msg(message))
+                        }
+                    };
+                    outcomes.push(outcome);
+                }
+                let successful_records = outcomes.iter().filter(|outcome| outcome.is_ok()).count();
+                let successful_bytes = records
+                    .iter()
+                    .zip(outcomes.iter())
+                    .filter_map(|(record, outcome)| {
+                        outcome
+                            .is_ok()
+                            .then_some(partition_append_estimated_bytes(record) as u64)
+                    })
+                    .sum();
+                wal.note_partition_append_batch_timing(
+                    successful_records as u64,
+                    successful_bytes,
+                    batch_started.elapsed().as_micros() as u64,
+                );
+                for (response, outcome) in responses.into_iter().zip(outcomes) {
+                    let _ = response.send(outcome);
+                }
+            }
+            WalCommand::PartitionAppendBatch(records, response) => {
+                let mut successful_records = 0u64;
+                let mut successful_bytes = 0u64;
+                let result = records.iter().try_for_each(|record| {
+                    let result = wal.append_partition_append(record);
+                    if result.is_ok() {
+                        successful_records = successful_records.saturating_add(1);
+                        successful_bytes = successful_bytes
+                            .saturating_add(partition_append_estimated_bytes(record) as u64);
+                    }
+                    result
+                });
+                wal.note_partition_append_batch(successful_records, successful_bytes);
+                let _ = response.send(result);
             }
             WalCommand::ConsumerUpsert(record, response) => {
                 let _ = response.send(wal.append_consumer_upsert(&record));
@@ -493,6 +675,18 @@ fn wal_worker(mut wal: Wal, receiver: mpsc::Receiver<WalCommand>) {
             }
         }
     }
+}
+
+fn partition_append_batch_delay_ms() -> u64 {
+    std::env::var("MORROW_WAL_PARTITION_APPEND_BATCH_DELAY_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(1)
+        .min(MAX_PARTITION_APPEND_BATCH_DELAY_MS)
+}
+
+fn partition_append_estimated_bytes(record: &PartitionAppendRecord) -> usize {
+    record.stream.len() + record.subject.len() + std::mem::size_of::<u64>() * 2
 }
 
 #[cfg(test)]

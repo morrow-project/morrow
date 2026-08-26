@@ -31,7 +31,13 @@ impl Morrow {
             group.expire(now);
         });
         if let Some(cluster) = self.cluster_runtime().await {
-            cluster.enforce_retention(now)?;
+            crate::broker_ensure!(
+                self.reserve_retention_work().await,
+                "retention work budget exhausted"
+            );
+            let result = cluster.enforce_retention(now);
+            self.release_retention_work().await;
+            result?;
             self.sync_cluster_deltas(&cluster).await?;
         }
         let (expired, dead_letter_writes, released) = {
@@ -39,12 +45,21 @@ impl Morrow {
             let mut inner = self.inner.lock().await;
             inner.activate_due_scheduled(now, MAX_EXPIRED_LEASES_PER_TICK);
             let tenants = self.config.tenant_quotas.keys().cloned().collect();
-            let released = inner.enforce_stream_retention(
-                &self.partition_logs,
-                &self.config.streams,
-                now,
-                &tenants,
-            )?;
+            drop(inner);
+            let changes = self
+                .partition_logs
+                .retention_changes(self.config.streams.definitions(), now);
+            for change in &changes {
+                self.partition_logs.advance_retention(change)?;
+            }
+            crate::broker_ensure!(
+                self.reserve_retention_work().await,
+                "retention work budget exhausted"
+            );
+            let mut inner = self.inner.lock().await;
+            let released = inner.apply_retention_changes(&changes, &tenants);
+            self.release_retention_work().await;
+            let released = released?;
             let before = inner.dead_letters.len();
             let expired = inner.expire_due_leases(now, MAX_EXPIRED_LEASES_PER_TICK)?;
             (

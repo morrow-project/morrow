@@ -108,6 +108,21 @@ impl RaftNetwork<BrokerRaftConfig> for NetworkClient {
 }
 
 impl NetworkClient {
+    pub(super) async fn broker_control(
+        &self,
+        frame: protocol::broker_control::BrokerControlFrame,
+    ) -> Result<protocol::broker_control::BrokerControlFrame> {
+        match self
+            .request(RaftRequest::BrokerControl(frame))
+            .await
+            .map_err(|error| BrokerError::msg(error.to_string()))?
+        {
+            RaftResponse::BrokerControl(frame) => Ok(frame),
+            RaftResponse::Error(message) => Err(BrokerError::msg(message)),
+            _ => Err(BrokerError::msg("unexpected broker control response")),
+        }
+    }
+
     pub(super) async fn request(
         &self,
         request: RaftRequest,

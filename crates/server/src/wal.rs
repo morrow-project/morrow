@@ -226,6 +226,13 @@ pub struct WalMetrics {
     pub checkpoints: u64,
     pub truncations: u64,
     pub deleted_segments: u64,
+    pub partition_append_batches: u64,
+    pub partition_append_records: u64,
+    pub partition_append_bytes: u64,
+    pub partition_append_batch_max_records: u64,
+    pub partition_append_batch_max_bytes: u64,
+    pub partition_append_batch_wait_us: u64,
+    pub flushes: u64,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -246,6 +253,13 @@ pub struct WalStatus {
     pub checkpoints: u64,
     pub truncations: u64,
     pub deleted_segments: u64,
+    pub partition_append_batches: u64,
+    pub partition_append_records: u64,
+    pub partition_append_bytes: u64,
+    pub partition_append_batch_max_records: u64,
+    pub partition_append_batch_max_bytes: u64,
+    pub partition_append_batch_wait_us: u64,
+    pub flushes: u64,
 }
 
 mod cursor;

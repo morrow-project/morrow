@@ -343,11 +343,20 @@ pub(super) struct ClusterResponse {
     pub(super) cluster_status: &'static str,
     pub(super) node_id: Option<u64>,
     pub(super) role: &'static str,
+    pub(super) node_role: &'static str,
+    pub(super) controller_voter: bool,
+    pub(super) controller_voters: Vec<u64>,
     pub(super) leader_id: Option<u64>,
     pub(super) peers: Vec<ClusterPeerResponse>,
     pub(super) partitions: Vec<PartitionLeaderResponse>,
     pub(super) routes: Option<RouteTopologyResponse>,
     pub(super) state_application: ClusterStateApplicationResponse,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub(super) struct PartitionMetadataResponse {
+    pub(super) version: u32,
+    pub(super) partitions: Vec<PartitionLeaderResponse>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -445,6 +454,8 @@ pub(super) struct BrokerMetrics {
     pub(super) dead_letter_replay_outcomes_total: AtomicU64,
     pub(super) publish_latency_us: LatencyHistogram,
     pub(super) delivery_latency_us: LatencyHistogram,
+    pub(super) state_shard_wait_us: LatencyHistogram,
+    pub(super) state_shard_hold_us: LatencyHistogram,
 }
 
 #[derive(Debug)]
@@ -506,6 +517,8 @@ pub(super) struct PartitionLeaderResponse {
     pub(super) leader_id: u64,
     pub(super) leader_client_addr: Option<String>,
     pub(super) leader_epoch: u64,
+    pub(super) partitioning_epoch: u64,
+    pub(super) partitioning: crate::stream::PartitioningPolicy,
     pub(super) high_watermark: Option<u64>,
 }
 
@@ -624,6 +637,14 @@ pub(super) struct StreamResponse {
     pub(super) retained_messages: usize,
     pub(super) retained_bytes: u64,
     pub(super) partition_status: Vec<crate::partition_log::PartitionRetentionStatus>,
+    pub(super) partition_expansion: Option<PartitionExpansionResponse>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub(super) struct PartitionExpansionResponse {
+    pub(super) current_partitions: u32,
+    pub(super) current_epoch: u64,
+    pub(super) pending: Option<crate::partition_expansion::ExpansionPlan>,
 }
 
 #[derive(Debug, serde::Serialize)]

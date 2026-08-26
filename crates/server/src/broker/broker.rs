@@ -48,6 +48,7 @@ pub struct Morrow {
     pub(super) partition_logs: Arc<PartitionLogSet>,
     pub(super) storage_permits: Arc<tokio::sync::Semaphore>,
     pub(super) storage_gate: Arc<tokio::sync::RwLock<()>>,
+    pub(super) state_shard_gates: Arc<Vec<tokio::sync::Mutex<()>>>,
     pub(super) connections: Arc<Mutex<ConnectionState>>,
     pub(super) transient: Arc<Mutex<TransientState>>,
     pub(super) groups: Arc<Mutex<HashMap<String, GroupCoordinator>>>,
@@ -75,7 +76,9 @@ pub struct Morrow {
     pub(super) shutting_down: Arc<AtomicBool>,
     pub(super) redelivery_notify: Arc<Notify>,
     pub(super) pull_waiters: PullWaiterRegistry,
+    pub(super) broker_control: BrokerControlRegistry,
     pub(super) compaction_running: Arc<AtomicBool>,
+    pub(super) work_scheduler: Arc<tokio::sync::Mutex<crate::work_scheduler::WorkScheduler>>,
     pub(super) route_mesh: Option<RouteMesh>,
     pub(super) middleware: MiddlewareRuntime,
     pub(super) hooks: BrokerHooks,
@@ -83,9 +86,145 @@ pub struct Morrow {
     pub(super) views: Arc<Mutex<HashMap<String, ViewRuntime>>>,
     pub(super) reassignment: Arc<Mutex<crate::reassignment::ReassignmentController>>,
     pub(super) cross_region: Arc<Mutex<crate::cross_region::CrossRegionReplicator>>,
+    pub(super) partition_expansions:
+        Arc<Mutex<HashMap<String, crate::partition_expansion::PartitionExpansion>>>,
 }
 
 impl Morrow {
+    fn persist_partition_expansions(
+        &self,
+        expansions: &HashMap<String, crate::partition_expansion::PartitionExpansion>,
+    ) -> Result<()> {
+        let path = self.config.wal_dir.join("partition-expansions.json");
+        let temporary = path.with_extension("json.tmp");
+        let body = serde_json::to_vec_pretty(expansions).map_err(|error| {
+            BrokerError::msg(format!("serializing partition expansions: {error}"))
+        })?;
+        std::fs::write(&temporary, body)
+            .map_err(|error| BrokerError::msg(format!("writing partition expansions: {error}")))?;
+        std::fs::rename(&temporary, &path)
+            .map_err(|error| BrokerError::msg(format!("installing partition expansions: {error}")))
+    }
+
+    pub(super) async fn reserve_retention_work(&self) -> bool {
+        self.work_scheduler.lock().await.try_reserve(
+            crate::work_scheduler::WorkClass::Retention,
+            0,
+            0,
+        )
+    }
+
+    pub(super) async fn acquire_retention_work(&self) {
+        while !self.reserve_retention_work().await {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    pub(super) async fn release_retention_work(&self) {
+        self.work_scheduler
+            .lock()
+            .await
+            .release(crate::work_scheduler::WorkClass::Retention, 0, 0);
+    }
+
+    pub(super) async fn partitioning_for_stream(
+        &self,
+        stream: &str,
+        configured_partitions: u32,
+        configured_epoch: u64,
+    ) -> (u32, u64) {
+        self.partition_expansions
+            .lock()
+            .await
+            .get(stream)
+            .map_or((configured_partitions, configured_epoch), |expansion| {
+                expansion.current()
+            })
+    }
+
+    pub async fn begin_partition_expansion(
+        &self,
+        stream: &str,
+        partitions: u32,
+    ) -> Result<crate::partition_expansion::ExpansionPlan> {
+        let mut expansions = self.partition_expansions.lock().await;
+        let plan = expansions
+            .get_mut(stream)
+            .ok_or_else(|| BrokerError::msg("unknown stream"))?
+            .begin(partitions)
+            .cloned()
+            .ok_or_else(|| {
+                BrokerError::msg("partition expansion is already pending or not larger")
+            })?;
+        self.persist_partition_expansions(&expansions)?;
+        Ok(plan)
+    }
+
+    pub async fn mark_partition_expansion_prepared(
+        &self,
+        stream: &str,
+        prepared_partitions: u32,
+    ) -> Result<()> {
+        let mut expansions = self.partition_expansions.lock().await;
+        crate::broker_ensure!(
+            expansions
+                .get_mut(stream)
+                .ok_or_else(|| BrokerError::msg("unknown stream"))?
+                .mark_prepared(prepared_partitions),
+            "invalid partition expansion preparation progress"
+        );
+        self.persist_partition_expansions(&expansions)?;
+        Ok(())
+    }
+
+    pub async fn activate_partition_expansion(&self, stream: &str) -> Result<(u32, u64)> {
+        let (current_partitions, target_partitions, pending_epoch) = {
+            let expansions = self.partition_expansions.lock().await;
+            let expansion = expansions
+                .get(stream)
+                .ok_or_else(|| BrokerError::msg("unknown stream"))?;
+            let (current_partitions, _) = expansion.current();
+            let pending = expansion
+                .pending()
+                .ok_or_else(|| BrokerError::msg("partition expansion is not pending"))?;
+            (current_partitions, pending.to_partitions, pending.epoch)
+        };
+        for partition in current_partitions..target_partitions {
+            self.partition_logs
+                .activate_partition(stream, crate::stream::PartitionId(partition))?;
+        }
+
+        let mut expansions = self.partition_expansions.lock().await;
+        let expansion = expansions
+            .get_mut(stream)
+            .ok_or_else(|| BrokerError::msg("unknown stream"))?;
+        let pending = expansion
+            .pending()
+            .ok_or_else(|| BrokerError::msg("partition expansion is not pending"))?;
+        crate::broker_ensure!(
+            pending.to_partitions == target_partitions && pending.epoch == pending_epoch,
+            "partition expansion changed while activating"
+        );
+        crate::broker_ensure!(
+            expansion.activate(),
+            "partition expansion is not fully prepared"
+        );
+        let current = expansion.current();
+        self.persist_partition_expansions(&expansions)?;
+        Ok(current)
+    }
+
+    pub async fn partition_expansion_epoch(&self, stream: &str, epoch: u64) -> Result<bool> {
+        let expansions = self.partition_expansions.lock().await;
+        let expansion = expansions
+            .get(stream)
+            .ok_or_else(|| BrokerError::msg("unknown stream"))?;
+        Ok(matches!(
+            expansion.decide(epoch),
+            crate::partition_expansion::EpochDecision::Current
+        ))
+    }
+
     pub fn middleware_runtime(&self) -> MiddlewareRuntime {
         self.middleware.clone()
     }

@@ -1,7 +1,9 @@
 use super::{log::PartitionLog, *};
 use crate::error::ResultExt;
+use crate::partition_cache::PartitionResourceCache;
 use crate::wal::PublishRecord;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
+use std::path::PathBuf;
 use std::sync::{
     Mutex,
     atomic::{AtomicU64, Ordering},
@@ -9,14 +11,26 @@ use std::sync::{
 use std::time::Instant;
 
 const MAX_RECOVERY_WORKERS: usize = 8;
+const MIN_RECOVERY_WORKERS: usize = 1;
+const DEFAULT_METADATA_CACHE_CAPACITY: usize = 4096;
+const MAX_METADATA_CACHE_CAPACITY: usize = 1_000_000;
 
 #[derive(Debug)]
 pub struct PartitionLogSet {
-    logs: HashMap<(String, PartitionId), Mutex<PartitionLog>>,
+    pub(crate) logs: HashMap<(String, PartitionId), Mutex<PartitionLog>>,
     sticky: Mutex<HashMap<String, u64>>,
+    pub(crate) dirty: Mutex<HashSet<(String, PartitionId)>>,
     next_legacy_seq: AtomicU64,
     pub truncations: u64,
     recovery: PartitionRecoveryStatus,
+    pub(crate) metadata_cache:
+        Mutex<PartitionResourceCache<(String, PartitionId, u64), MessageEnvelope>>,
+    pub(crate) dynamic_logs:
+        Mutex<HashMap<(String, PartitionId), std::sync::Arc<Mutex<PartitionLog>>>>,
+    pub(crate) dynamic_partition_count: AtomicU64,
+    pub(crate) root: PathBuf,
+    pub(crate) segment_bytes: u64,
+    pub(crate) encryption: Option<std::sync::Arc<crate::encryption::KeyRing>>,
 }
 
 impl PartitionLogSet {
@@ -34,6 +48,18 @@ impl PartitionLogSet {
         segment_bytes: u64,
         encryption: Option<std::sync::Arc<crate::encryption::KeyRing>>,
     ) -> Result<(Self, Vec<MessageEnvelope>)> {
+        Self::open_with_encryption_for_partitions(wal_dir, catalog, segment_bytes, encryption, None)
+    }
+
+    /// Open only the partitions assigned to this broker. An empty assignment
+    /// is valid and defers all partition-log recovery until placement is known.
+    pub(crate) fn open_with_encryption_for_partitions(
+        wal_dir: &Path,
+        catalog: &StreamCatalog,
+        segment_bytes: u64,
+        encryption: Option<std::sync::Arc<crate::encryption::KeyRing>>,
+        assigned: Option<&BTreeSet<(String, u32)>>,
+    ) -> Result<(Self, Vec<MessageEnvelope>)> {
         let root = wal_dir.join("streams");
         std::fs::create_dir_all(&root)
             .with_context(|| format!("creating stream data directory {}", root.display()))?;
@@ -43,12 +69,27 @@ impl PartitionLogSet {
             .iter()
             .flat_map(|stream| {
                 (0..stream.partitions)
+                    .filter(|partition| {
+                        assigned.is_none_or(|assigned| {
+                            assigned.contains(&(stream.name.as_str().to_string(), *partition))
+                        })
+                    })
                     .map(|partition| (stream.name.clone(), PartitionId(partition)))
             })
             .collect::<Vec<_>>();
+        let configured_partitions = catalog
+            .definitions()
+            .iter()
+            .map(|stream| stream.partitions as usize)
+            .sum();
+        let configured_workers = std::env::var("MORROW_PARTITION_RECOVERY_WORKERS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(MAX_RECOVERY_WORKERS)
+            .clamp(MIN_RECOVERY_WORKERS, MAX_RECOVERY_WORKERS);
         let workers = std::thread::available_parallelism()
             .map_or(1, usize::from)
-            .min(MAX_RECOVERY_WORKERS)
+            .min(configured_workers)
             .min(work.len().max(1));
         let chunk_size = work.len().max(1).div_ceil(workers);
         let recovered = std::thread::scope(|scope| -> Result<Vec<_>> {
@@ -92,6 +133,11 @@ impl PartitionLogSet {
         }
         envelopes.sort_by_key(|envelope| envelope.legacy_seq);
         let resident_metadata_bytes = envelopes.iter().map(resident_envelope_bytes).sum();
+        let metadata_cache_capacity = std::env::var("MORROW_PARTITION_METADATA_CACHE_CAPACITY")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(DEFAULT_METADATA_CACHE_CAPACITY)
+            .clamp(1, MAX_METADATA_CACHE_CAPACITY);
         let next_legacy_seq = envelopes
             .iter()
             .map(|envelope| envelope.legacy_seq)
@@ -102,16 +148,32 @@ impl PartitionLogSet {
             Self {
                 logs,
                 sticky: Mutex::new(HashMap::new()),
+                dirty: Mutex::new(HashSet::new()),
                 next_legacy_seq: AtomicU64::new(next_legacy_seq),
                 truncations,
                 recovery: PartitionRecoveryStatus {
+                    configured_partitions,
+                    assigned_partitions: work.len(),
                     total_partitions: work.len(),
                     completed_partitions: work.len(),
+                    active_partitions: work.len(),
+                    evicted_partitions: 0,
+                    recovering_partitions: 0,
+                    blocked_partitions: 0,
                     records_scanned: envelopes.len(),
                     resident_metadata_bytes,
                     elapsed_ms: started.elapsed().as_millis() as u64,
                     workers,
                 },
+                metadata_cache: Mutex::new(
+                    PartitionResourceCache::new(metadata_cache_capacity)
+                        .expect("metadata cache capacity is clamped above zero"),
+                ),
+                dynamic_logs: Mutex::new(HashMap::new()),
+                dynamic_partition_count: AtomicU64::new(0),
+                root,
+                segment_bytes,
+                encryption,
             },
             envelopes,
         ))
@@ -154,39 +216,72 @@ impl PartitionLogSet {
     pub(crate) fn append_envelope(&self, envelope: MessageEnvelope) -> Result<MessageEnvelope> {
         self.next_legacy_seq
             .fetch_max(envelope.legacy_seq.saturating_add(1), Ordering::Relaxed);
-        self.logs
-            .get(&(envelope.stream.as_str().to_string(), envelope.partition))
-            .expect("catalog partitions are opened together")
+        let key = (envelope.stream.as_str().to_string(), envelope.partition);
+        let appended = if let Some(log) = self.logs.get(&key) {
+            log.lock()
+                .expect("partition log lock poisoned")
+                .append(envelope)?
+        } else {
+            self.append_dynamic(envelope)?
+        };
+        self.cache_envelope(&appended);
+        self.dirty
             .lock()
-            .expect("partition log lock poisoned")
-            .append(envelope)
+            .expect("dirty partition lock poisoned")
+            .insert((appended.stream.as_str().to_string(), appended.partition));
+        Ok(appended)
     }
 
     pub fn flush(&self) -> Result<()> {
-        for log in self.logs.values() {
-            log.lock().expect("partition log lock poisoned").flush()?;
+        let dirty = std::mem::take(&mut *self.dirty.lock().expect("dirty partition lock poisoned"));
+        for key in dirty {
+            if let Some(log) = self.logs.get(&key) {
+                log.lock()
+                    .expect("partition log lock poisoned")
+                    .release_resources()?;
+            } else if self
+                .dynamic_logs
+                .lock()
+                .expect("dynamic partition lock poisoned")
+                .contains_key(&key)
+            {
+                self.flush_dynamic_partition(&key.0, key.1)?;
+            }
         }
         Ok(())
     }
 
     pub fn flush_partition(&self, stream: &str, partition: PartitionId) -> Result<()> {
-        self.logs
-            .get(&(stream.to_string(), partition))
-            .ok_or_else(|| crate::error::BrokerError::msg("unknown stream partition"))?
+        self.dirty
             .lock()
-            .expect("partition log lock poisoned")
-            .flush()
+            .expect("dirty partition lock poisoned")
+            .remove(&(stream.to_string(), partition));
+        if let Some(log) = self.logs.get(&(stream.to_string(), partition)) {
+            log.lock()
+                .expect("partition log lock poisoned")
+                .release_resources()
+        } else {
+            self.flush_dynamic_partition(stream, partition)
+        }
     }
 
     pub fn append_committed(&self, envelope: MessageEnvelope) -> Result<MessageEnvelope> {
         self.next_legacy_seq
             .fetch_max(envelope.legacy_seq.saturating_add(1), Ordering::Relaxed);
-        self.logs
-            .get(&(envelope.stream.as_str().to_string(), envelope.partition))
-            .ok_or_else(|| crate::error::BrokerError::msg("unknown stream partition"))?
+        let key = (envelope.stream.as_str().to_string(), envelope.partition);
+        let appended = if let Some(log) = self.logs.get(&key) {
+            log.lock()
+                .expect("partition log lock poisoned")
+                .append_committed(envelope)?
+        } else {
+            self.append_dynamic_committed(envelope)?
+        };
+        self.cache_envelope(&appended);
+        self.dirty
             .lock()
-            .expect("partition log lock poisoned")
-            .append_committed(envelope)
+            .expect("dirty partition lock poisoned")
+            .insert((appended.stream.as_str().to_string(), appended.partition));
+        Ok(appended)
     }
 
     pub(crate) fn rewrite_partition(
@@ -195,12 +290,16 @@ impl PartitionLogSet {
         partition: PartitionId,
         records: &[MessageEnvelope],
     ) -> Result<()> {
-        self.logs
+        let result = self
+            .logs
             .get(&(stream.to_string(), partition))
             .ok_or_else(|| crate::error::BrokerError::msg("unknown stream partition"))?
             .lock()
             .expect("partition log lock poisoned")
-            .rewrite(records, None)
+            .rewrite(records, None);
+        self.mark_dirty(stream, partition);
+        self.clear_metadata_cache();
+        result
     }
 
     pub(crate) fn enforce_retention(
@@ -239,7 +338,9 @@ impl PartitionLogSet {
                 })
                 .collect::<Result<Vec<_>>>()?;
             log.rewrite(&retained, Some(change.earliest_offset))?;
+            self.mark_dirty(&change.stream, change.partition);
         }
+        self.clear_metadata_cache();
         Ok(changes)
     }
 
@@ -252,10 +353,12 @@ impl PartitionLogSet {
         for stream in streams {
             for partition in 0..stream.partitions {
                 let partition = PartitionId(partition);
-                let log = self
+                let Some(log) = self
                     .logs
                     .get(&(stream.name.as_str().to_string(), partition))
-                    .expect("catalog partitions are opened together");
+                else {
+                    continue;
+                };
                 if let Some(earliest_offset) = log
                     .lock()
                     .expect("partition log lock poisoned")
@@ -277,21 +380,29 @@ impl PartitionLogSet {
         change: &RetentionChange,
         records: &[MessageEnvelope],
     ) -> Result<()> {
-        self.logs
+        let result = self
+            .logs
             .get(&(change.stream.clone(), change.partition))
             .ok_or_else(|| crate::error::BrokerError::msg("unknown stream partition"))?
             .lock()
             .expect("partition log lock poisoned")
-            .rewrite(records, Some(change.earliest_offset))
+            .rewrite(records, Some(change.earliest_offset));
+        self.mark_dirty(&change.stream, change.partition);
+        self.clear_metadata_cache();
+        result
     }
 
     pub(crate) fn advance_retention(&self, change: &RetentionChange) -> Result<()> {
-        self.logs
+        let result = self
+            .logs
             .get(&(change.stream.clone(), change.partition))
             .ok_or_else(|| crate::error::BrokerError::msg("unknown stream partition"))?
             .lock()
             .expect("partition log lock poisoned")
-            .advance_retention_floor(change.earliest_offset)
+            .advance_retention_floor(change.earliest_offset);
+        self.mark_dirty(&change.stream, change.partition);
+        self.clear_metadata_cache();
+        result
     }
 
     pub(crate) fn compact_visible_offsets(
@@ -327,17 +438,34 @@ impl PartitionLogSet {
         stream: &str,
         partition: PartitionId,
     ) -> Result<PartitionRetentionStatus> {
-        Ok(self
-            .logs
-            .get(&(stream.to_string(), partition))
-            .ok_or_else(|| crate::error::BrokerError::msg("unknown stream partition"))?
+        let key = (stream.to_string(), partition);
+        if let Some(log) = self.logs.get(&key) {
+            return Ok(log
+                .lock()
+                .expect("partition log lock poisoned")
+                .retention_status(partition));
+        }
+        self.dynamic_logs
             .lock()
-            .expect("partition log lock poisoned")
-            .retention_status(partition))
+            .expect("dynamic partition log lock poisoned")
+            .get(&key)
+            .ok_or_else(|| crate::error::BrokerError::msg("unknown stream partition"))
+            .map(|log| {
+                log.lock()
+                    .expect("partition log lock poisoned")
+                    .retention_status(partition)
+            })
     }
 
     pub(crate) fn recovery_status(&self) -> PartitionRecoveryStatus {
-        self.recovery.clone()
+        let mut status = self.recovery.clone();
+        status.active_partitions = self.active_resource_count();
+        status.evicted_partitions = self
+            .metadata_cache
+            .lock()
+            .expect("metadata cache lock poisoned")
+            .evictions();
+        status
     }
 
     pub(crate) fn is_before_retention_floor(
@@ -392,12 +520,31 @@ impl PartitionLogSet {
         partition: PartitionId,
         offset: u64,
     ) -> Result<Option<MessageEnvelope>> {
-        self.logs
-            .get(&(stream.to_string(), partition))
-            .ok_or_else(|| crate::error::BrokerError::msg("unknown stream partition"))?
+        let key = (stream.to_string(), partition, offset);
+        if let Some(envelope) = self
+            .metadata_cache
             .lock()
-            .expect("partition log lock poisoned")
-            .read_offset(offset)
+            .expect("metadata cache lock poisoned")
+            .get(&key)
+            .cloned()
+        {
+            return Ok(Some(envelope));
+        }
+        let key = (stream.to_string(), partition);
+        let envelope = if let Some(log) = self.logs.get(&key) {
+            log.lock()
+                .expect("partition log lock poisoned")
+                .read_offset(offset)?
+        } else {
+            self.load_dynamic(stream, partition, offset)?
+        };
+        if let Some(envelope) = &envelope {
+            self.metadata_cache
+                .lock()
+                .expect("metadata cache lock poisoned")
+                .insert((stream.to_string(), partition, offset), envelope.clone());
+        }
+        Ok(envelope)
     }
 
     #[cfg(test)]

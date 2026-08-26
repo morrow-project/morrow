@@ -2,6 +2,7 @@ use super::*;
 use crate::stream::{
     PartitionFallback, PartitioningPolicy, PartitioningStrategy, RetentionPolicy, StoragePolicy,
 };
+use std::collections::BTreeSet;
 use std::{fs::OpenOptions, io::Write, sync::Arc};
 use tempfile::TempDir;
 
@@ -22,6 +23,25 @@ fn definition(partitions: u32) -> StreamDefinition {
 
 fn catalog(partitions: u32) -> StreamCatalog {
     StreamCatalog::new(vec![definition(partitions)]).unwrap()
+}
+
+#[test]
+fn assigned_partition_recovery_opens_only_local_partitions() {
+    let dir = TempDir::new().unwrap();
+    let catalog = catalog(4);
+    let assigned = BTreeSet::from([("orders".to_string(), 1), ("orders".to_string(), 3)]);
+
+    let (logs, replay) = PartitionLogSet::open_with_encryption_for_partitions(
+        dir.path(),
+        &catalog,
+        64 * 1024,
+        None,
+        Some(&assigned),
+    )
+    .unwrap();
+
+    assert!(replay.is_empty());
+    assert_eq!(logs.recovery_status().total_partitions, 2);
 }
 
 fn request<'a>(
@@ -75,6 +95,53 @@ fn encrypted_partition_logs_replay_and_load_payloads_after_restart() {
             .payload,
         b"hello"
     );
+}
+
+#[test]
+fn decoded_metadata_cache_is_populated_by_appends_and_reads() {
+    let dir = TempDir::new().unwrap();
+    let catalog = catalog(1);
+    let logs = PartitionLogSet::open(dir.path(), &catalog, 4096).unwrap().0;
+    let stream = &catalog.definitions()[0];
+    let envelope = logs
+        .append(AppendRequest {
+            partition_hint: Some(PartitionId(0)),
+            ..request(stream, None, &[])
+        })
+        .unwrap();
+    assert_eq!(logs.metadata_cache_stats(), (1, 0));
+    assert_eq!(
+        logs.load_envelope("orders", PartitionId(0), envelope.offset)
+            .unwrap()
+            .unwrap()
+            .payload,
+        b"hello"
+    );
+    assert_eq!(logs.metadata_cache_stats(), (1, 0));
+}
+
+#[test]
+fn partition_resource_is_released_at_flush_and_reopened_for_append() {
+    let dir = TempDir::new().unwrap();
+    let catalog = catalog(1);
+    let logs = PartitionLogSet::open(dir.path(), &catalog, 4096).unwrap().0;
+    let stream = &catalog.definitions()[0];
+    assert_eq!(logs.active_resource_count(), 1);
+    logs.append(AppendRequest {
+        partition_hint: Some(PartitionId(0)),
+        ..request(stream, None, &[])
+    })
+    .unwrap();
+    logs.flush().unwrap();
+    assert_eq!(logs.active_resource_count(), 0);
+    let appended = logs
+        .append(AppendRequest {
+            partition_hint: Some(PartitionId(0)),
+            ..request(stream, None, &[])
+        })
+        .unwrap();
+    assert_eq!(appended.offset, 1);
+    assert_eq!(logs.active_resource_count(), 1);
 }
 
 fn request_for_subject<'a>(stream: &'a StreamDefinition, subject: &'a str) -> AppendRequest<'a> {
