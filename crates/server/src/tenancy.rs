@@ -8,7 +8,7 @@
 use crate::error::{BrokerError, Result};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     fs::{self, File, OpenOptions},
     io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
@@ -124,6 +124,7 @@ struct PolicyState {
     generation: u64,
     roles: BTreeMap<String, Role>,
     bindings: Vec<RoleBinding>,
+    bindings_by_subject_scope: HashMap<(String, ResourceScope), Vec<RoleBinding>>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -153,6 +154,7 @@ impl PolicyStore {
                 && existing.role == binding.role)
         });
         state.bindings.push(binding);
+        rebuild_binding_index(&mut state);
         state.generation = state.generation.saturating_add(1);
         Ok(state.generation)
     }
@@ -164,6 +166,7 @@ impl PolicyStore {
                 && &binding.scope == scope
                 && role.is_none_or(|role| binding.role == role))
         });
+        rebuild_binding_index(&mut state);
         state.generation = state.generation.saturating_add(1);
         state.generation
     }
@@ -176,15 +179,20 @@ impl PolicyStore {
         now_ms: u64,
     ) -> Result<()> {
         let state = self.state.read().expect("policy lock poisoned");
-        let allowed = state.bindings.iter().any(|binding| {
-            binding.subject == subject
-                && binding.scope == *scope
-                && binding.expires_at_ms.is_none_or(|expires| now_ms < expires)
-                && state
-                    .roles
-                    .get(&binding.role)
-                    .is_some_and(|role| role.permissions.contains(&permission))
-        });
+        let allowed = state
+            .bindings_by_subject_scope
+            .get(&(subject.to_string(), scope.clone()))
+            .into_iter()
+            .flatten()
+            .any(|binding| {
+                binding.subject == subject
+                    && binding.scope == *scope
+                    && binding.expires_at_ms.is_none_or(|expires| now_ms < expires)
+                    && state
+                        .roles
+                        .get(&binding.role)
+                        .is_some_and(|role| role.permissions.contains(&permission))
+            });
         crate::broker_ensure!(allowed, "tenant permission denied");
         Ok(())
     }
@@ -241,7 +249,19 @@ impl PolicyStore {
         state.generation = snapshot.generation;
         state.roles = snapshot.roles;
         state.bindings = snapshot.bindings;
+        rebuild_binding_index(&mut state);
         Ok(())
+    }
+}
+
+fn rebuild_binding_index(state: &mut PolicyState) {
+    state.bindings_by_subject_scope.clear();
+    for binding in &state.bindings {
+        state
+            .bindings_by_subject_scope
+            .entry((binding.subject.clone(), binding.scope.clone()))
+            .or_default()
+            .push(binding.clone());
     }
 }
 
