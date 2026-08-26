@@ -2,6 +2,7 @@ use super::*;
 use crate::stream::{
     PartitionFallback, PartitioningPolicy, PartitioningStrategy, RetentionPolicy, StoragePolicy,
 };
+use std::collections::BTreeSet;
 use std::{fs::OpenOptions, io::Write, sync::Arc};
 use tempfile::TempDir;
 
@@ -22,6 +23,25 @@ fn definition(partitions: u32) -> StreamDefinition {
 
 fn catalog(partitions: u32) -> StreamCatalog {
     StreamCatalog::new(vec![definition(partitions)]).unwrap()
+}
+
+#[test]
+fn assigned_partition_recovery_opens_only_local_partitions() {
+    let dir = TempDir::new().unwrap();
+    let catalog = catalog(4);
+    let assigned = BTreeSet::from([("orders".to_string(), 1), ("orders".to_string(), 3)]);
+
+    let (logs, replay) = PartitionLogSet::open_with_encryption_for_partitions(
+        dir.path(),
+        &catalog,
+        64 * 1024,
+        None,
+        Some(&assigned),
+    )
+    .unwrap();
+
+    assert!(replay.is_empty());
+    assert_eq!(logs.recovery_status().total_partitions, 2);
 }
 
 fn request<'a>(

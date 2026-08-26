@@ -5,7 +5,11 @@ labels, topic counts, partition counts, and per-case publish benchmark output.
 It targets an already running deployment so the same fixture can exercise either
 combined nodes or a separated controller/broker topology. Broker-count labels
 must describe the deployment under test; the fixture does not silently change
-cluster membership.
+cluster membership. Set `--controller-voters` once per run; it is recorded as a
+single scalar so comparing broker-count cases cannot accidentally imply that the
+metadata quorum grew. Use `--deployment-profile combined` with
+`--roles-share-process true` for combined nodes, or `--deployment-profile
+separated --roles-share-process false` for dedicated controllers and brokers.
 
 Example:
 
@@ -16,6 +20,8 @@ scripts/run-scale-benchmark.sh \
   --broker-counts 3,5 \
   --topics 1,10 \
   --partitions 1,4 \
+  --deployment-profile separated --controller-voters 3 \
+  --roles-share-process false \
   --clients 5 --duration 60s --payload-size 128
 ```
 
