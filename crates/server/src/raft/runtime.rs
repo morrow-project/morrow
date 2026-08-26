@@ -58,6 +58,7 @@ impl RaftRuntime {
         let raft_nodes = config
             .nodes
             .iter()
+            .filter(|node| config.controller_voters.contains(&node.node_id))
             .map(|node| (node.node_id, BasicNode::new(node.raft_addr.clone())))
             .collect::<BTreeMap<_, _>>();
 

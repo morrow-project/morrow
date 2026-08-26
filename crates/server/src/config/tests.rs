@@ -399,8 +399,49 @@ fn parses_cluster_config() {
     assert_eq!(cluster.node_id, 1);
     assert_eq!(cluster.auth_token, "cluster-secret");
     assert_eq!(cluster.nodes.len(), 2);
+    assert_eq!(cluster.controller_voters, vec![1, 2]);
+    assert_eq!(cluster.role, crate::config::ClusterRole::Combined);
     assert_eq!(cluster.routes.len(), 1);
     assert!(cluster.bootstrap);
+}
+
+#[test]
+fn parses_fixed_controller_voters_and_rejects_broker_voter() {
+    let value = serde_json::json!({
+        "wal_dir": "./target/test-wal-broker-role",
+        "cluster": {
+            "enabled": true,
+            "role": "broker",
+            "node_id": 1,
+            "controller_voters": [2],
+            "auth_token": "cluster-secret",
+            "raft_listen": "127.0.0.1:5321",
+            "allow_insecure_internal_transports": true,
+            "raft_dir": "./target/test-wal-broker-role/raft",
+            "bootstrap": false,
+            "nodes": [
+                {"node_id": 1, "raft_addr": "localhost:5321", "client_addr": "localhost:4321"},
+                {"node_id": 2, "raft_addr": "localhost:5322", "client_addr": "localhost:4322"}
+            ],
+            "election_timeout_min_ms": 200,
+            "election_timeout_max_ms": 400,
+            "heartbeat_interval_ms": 50,
+            "snapshot_threshold": 100
+        }
+    });
+    let config = Config::from_json(&value).unwrap();
+    let cluster = config.cluster.unwrap();
+    assert_eq!(cluster.role, crate::config::ClusterRole::Broker);
+    assert_eq!(cluster.controller_voters, vec![2]);
+    assert!(!cluster.is_controller_voter());
+
+    let mut invalid = value;
+    invalid["cluster"]["controller_voters"] = serde_json::json!([1]);
+    let err = Config::from_json(&invalid).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("broker node must not be a controller voter")
+    );
 }
 
 #[test]

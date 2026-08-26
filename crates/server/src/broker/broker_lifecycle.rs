@@ -1690,6 +1690,13 @@ impl Morrow {
             (Some(_), Some(_)) => "follower",
             (Some(_), None) => "unknown",
         };
+        let node_role = cluster_config
+            .map(|cluster| match cluster.role {
+                crate::config::ClusterRole::Combined => "combined",
+                crate::config::ClusterRole::Controller => "controller",
+                crate::config::ClusterRole::Broker => "broker",
+            })
+            .unwrap_or("standalone");
         let cluster_status = if cluster_config.is_none() && cluster.is_none() {
             "standalone"
         } else if leader_id.is_some() {
@@ -1759,6 +1766,11 @@ impl Morrow {
             cluster_status,
             node_id,
             role,
+            node_role,
+            controller_voter: cluster_config.is_some_and(|cluster| cluster.is_controller_voter()),
+            controller_voters: cluster_config
+                .map(|cluster| cluster.controller_voters.clone())
+                .unwrap_or_default(),
             leader_id,
             peers,
             partitions,
