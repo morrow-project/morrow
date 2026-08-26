@@ -64,6 +64,7 @@ impl Morrow {
                 .map(|address| address.to_string())
         });
         let heartbeat_interval_ms = cluster_config.heartbeat_interval_ms;
+        let registration_timeout_ms = heartbeat_interval_ms.saturating_mul(5).max(1_000);
         tracing::info!(
             broker_id,
             controller_id,
@@ -94,19 +95,30 @@ impl Morrow {
                         capacity: protocol::broker_control::CapacitySummary::default(),
                         last_revision,
                     };
-                    match runtime
-                        .heartbeat_with_controller(controller_id, heartbeat)
-                        .await
-                    {
-                        Ok(accepted) => {
+                    let result = tokio::time::timeout(
+                        Duration::from_millis(registration_timeout_ms),
+                        runtime.heartbeat_with_controller(controller_id, heartbeat),
+                    )
+                    .await;
+                    match result {
+                        Ok(Ok(accepted)) => {
                             last_revision = accepted.controller_revision;
                         }
-                        Err(error) => {
+                        Ok(Err(error)) => {
                             tracing::debug!(
                                 broker_id,
                                 controller_id,
                                 ?error,
                                 "broker heartbeat failed"
+                            );
+                            session_id = None;
+                        }
+                        Err(_) => {
+                            tracing::debug!(
+                                broker_id,
+                                controller_id,
+                                timeout_ms = registration_timeout_ms,
+                                "broker heartbeat timed out"
                             );
                             session_id = None;
                         }
@@ -123,20 +135,30 @@ impl Morrow {
                         security_references: Vec::new(),
                         last_revision,
                     };
-                    match runtime
-                        .register_with_controller(controller_id, registration)
-                        .await
-                    {
-                        Ok(result) => {
+                    let result = tokio::time::timeout(
+                        Duration::from_millis(registration_timeout_ms),
+                        runtime.register_with_controller(controller_id, registration),
+                    )
+                    .await;
+                    match result {
+                        Ok(Ok(result)) => {
                             session_id = Some(result.session_id);
                             last_revision = result.controller_revision;
                         }
-                        Err(error) => {
+                        Ok(Err(error)) => {
                             tracing::debug!(
                                 broker_id,
                                 controller_id,
                                 ?error,
                                 "broker registration failed"
+                            );
+                        }
+                        Err(_) => {
+                            tracing::debug!(
+                                broker_id,
+                                controller_id,
+                                timeout_ms = registration_timeout_ms,
+                                "broker registration timed out"
                             );
                         }
                     }
