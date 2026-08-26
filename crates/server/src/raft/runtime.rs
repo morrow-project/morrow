@@ -107,10 +107,23 @@ impl RaftRuntime {
         })
         .await
         .map_err(|err| BrokerError::with_source("opening Raft state worker", err))??;
-        let mut replica_data = ReplicaDataStore::open(
+        let metadata = state_machine.durable_state();
+        let assigned = (!metadata.partition_assignments.is_empty()).then(|| {
+            metadata
+                .partition_assignments
+                .iter()
+                .filter(|(_, assignment)| assignment.replicas.contains(&config.node_id))
+                .filter_map(|(key, _)| {
+                    let (stream, partition) = key.rsplit_once(':')?;
+                    Some((stream.to_string(), partition.parse().ok()?))
+                })
+                .collect::<std::collections::BTreeSet<_>>()
+        });
+        let mut replica_data = ReplicaDataStore::open_for_partitions(
             &config.raft_dir.join("partition-data"),
             streams,
             segment_bytes,
+            assigned.as_ref(),
         )?;
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

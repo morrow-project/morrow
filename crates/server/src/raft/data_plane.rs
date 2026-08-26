@@ -129,7 +129,22 @@ pub(super) struct ReplicaDataStore {
 
 impl ReplicaDataStore {
     pub(super) fn open(root: &Path, streams: &StreamCatalog, segment_bytes: u64) -> Result<Self> {
-        let (logs, replay) = PartitionLogSet::open(root, streams, segment_bytes)?;
+        Self::open_for_partitions(root, streams, segment_bytes, None)
+    }
+
+    pub(super) fn open_for_partitions(
+        root: &Path,
+        streams: &StreamCatalog,
+        segment_bytes: u64,
+        assigned: Option<&std::collections::BTreeSet<(String, u32)>>,
+    ) -> Result<Self> {
+        let (logs, replay) = PartitionLogSet::open_with_encryption_for_partitions(
+            root,
+            streams,
+            segment_bytes,
+            None,
+            assigned,
+        )?;
         let mut records: HashMap<_, BTreeMap<_, _>> = HashMap::new();
         for envelope in replay {
             records

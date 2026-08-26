@@ -269,10 +269,12 @@ impl PartitionLogSet {
         for stream in streams {
             for partition in 0..stream.partitions {
                 let partition = PartitionId(partition);
-                let log = self
+                let Some(log) = self
                     .logs
                     .get(&(stream.name.as_str().to_string(), partition))
-                    .expect("catalog partitions are opened together");
+                else {
+                    continue;
+                };
                 if let Some(earliest_offset) = log
                     .lock()
                     .expect("partition log lock poisoned")
