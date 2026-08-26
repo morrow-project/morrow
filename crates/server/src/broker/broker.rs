@@ -133,13 +133,25 @@ impl Morrow {
         configured_partitions: u32,
         configured_epoch: u64,
     ) -> (u32, u64) {
-        self.partition_expansions
+        if let Some(expansion) = self
+            .partition_expansions
             .lock()
             .await
             .get(stream)
-            .map_or((configured_partitions, configured_epoch), |expansion| {
-                expansion.current()
+            .map(|expansion| expansion.current())
+        {
+            return expansion;
+        }
+        self.cluster_runtime()
+            .await
+            .and_then(|cluster| {
+                cluster
+                    .durable_state()
+                    .stream_definitions
+                    .get(stream)
+                    .map(|definition| (definition.partitions, definition.partitioning.epoch))
             })
+            .unwrap_or((configured_partitions, configured_epoch))
     }
 
     pub async fn begin_partition_expansion(
@@ -192,6 +204,82 @@ impl Morrow {
         for partition in current_partitions..target_partitions {
             self.partition_logs
                 .activate_partition(stream, crate::stream::PartitionId(partition))?;
+        }
+
+        if let Some(cluster) = self.cluster_runtime().await {
+            let cluster_config = self
+                .config
+                .cluster
+                .as_ref()
+                .ok_or_else(|| BrokerError::msg("cluster configuration is unavailable"))?;
+            let mut data_nodes = cluster_config
+                .nodes
+                .iter()
+                .map(|node| node.node_id)
+                .filter(|node| {
+                    cluster_config.role == crate::config::ClusterRole::Combined
+                        || !cluster_config.controller_voters.contains(node)
+                })
+                .collect::<Vec<_>>();
+            data_nodes.sort_unstable();
+            let current_definition = self
+                .config
+                .streams
+                .definitions()
+                .iter()
+                .find(|definition| definition.name.as_str() == stream)
+                .cloned()
+                .ok_or_else(|| BrokerError::msg("unknown stream"))?;
+            let mut definition = current_definition;
+            definition.partitions = target_partitions;
+            definition.partitioning.epoch = pending_epoch;
+            let replica_count = usize::try_from(definition.storage.replicas)
+                .unwrap_or(data_nodes.len())
+                .min(data_nodes.len())
+                .max(1);
+            let mut assignments = HashMap::new();
+            for partition in current_partitions..target_partitions {
+                let selected = crate::raft::runtime::initial_partition_replicas(
+                    stream,
+                    partition,
+                    &data_nodes,
+                    replica_count,
+                );
+                let replicas = selected.iter().copied().collect::<BTreeSet<_>>();
+                let active_count = usize::try_from(definition.storage.min_ack_replicas)
+                    .unwrap_or(replica_count)
+                    .min(replica_count)
+                    .max(1);
+                let leader_id = selected[0];
+                let active_commit_set = std::iter::once(leader_id)
+                    .chain(
+                        replicas
+                            .iter()
+                            .copied()
+                            .filter(move |node| *node != leader_id),
+                    )
+                    .take(active_count)
+                    .collect();
+                assignments.insert(
+                    crate::raft::partition_key(stream, partition),
+                    crate::raft::PartitionAssignmentMetadata {
+                        replicas,
+                        active_commit_set,
+                        replica_set_generation: 1,
+                        phase: crate::raft::PartitionReconfigurationPhase::Stable,
+                        leader_id,
+                        leader_epoch: 1,
+                    },
+                );
+            }
+            self.cluster_write(
+                &cluster,
+                crate::raft::BrokerCommand::StreamPartitionsUpdate {
+                    stream: definition,
+                    assignments,
+                },
+            )
+            .await?;
         }
 
         let mut expansions = self.partition_expansions.lock().await;
