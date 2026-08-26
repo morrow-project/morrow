@@ -37,3 +37,8 @@ together. This keeps sparse traffic bounded while allowing busy partitions to
 amortize one storage barrier across many records. The append and acknowledgement
 ordering remains per record, so an accepted record cannot be lost if a client
 disconnects while a flush epoch is open.
+
+The `/wal` administrative status also reports `partition_append_batches`,
+`partition_append_records`, `partition_append_bytes`, and `flushes`. These
+counters make it possible to verify that a workload is sharing append and
+durability work rather than merely measuring concurrent single-record writes.
