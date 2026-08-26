@@ -454,6 +454,64 @@ pub fn plan_moves(
     moves
 }
 
+/// Plan leader transfers without changing replica membership. Transfers are
+/// deterministic and only occur when a replica has strictly fewer leaders,
+/// preventing controller reconciliation from oscillating on equal scores.
+pub fn plan_leader_transfers(
+    placements: &[PartitionPlacement],
+    brokers: &[BrokerCapacity],
+) -> Vec<PlacementMove> {
+    let by_node = brokers
+        .iter()
+        .map(|broker| (broker.node_id, broker))
+        .collect::<BTreeMap<_, _>>();
+    let mut leaders = brokers
+        .iter()
+        .map(|broker| (broker.node_id, broker.leader_count))
+        .collect::<HashMap<_, _>>();
+    let mut ordered = placements.to_vec();
+    ordered.sort_by_key(|placement| (placement.stream.clone(), placement.partition.0));
+    let mut transfers = Vec::new();
+    for placement in ordered {
+        let Some(source) = by_node.get(&placement.leader) else {
+            continue;
+        };
+        let Some(destination) = placement
+            .replicas
+            .iter()
+            .filter(|node| **node != placement.leader)
+            .filter_map(|node| by_node.get(node))
+            .filter(|broker| broker.eligible())
+            .min_by_key(|broker| {
+                (
+                    leaders.get(&broker.node_id).copied().unwrap_or_default(),
+                    broker.throughput_bytes_per_second,
+                    broker.node_id,
+                )
+            })
+        else {
+            continue;
+        };
+        let source_load = leaders.get(&source.node_id).copied().unwrap_or_default();
+        let destination_load = leaders
+            .get(&destination.node_id)
+            .copied()
+            .unwrap_or_default();
+        if destination_load >= source_load {
+            continue;
+        }
+        transfers.push(PlacementMove {
+            stream: placement.stream,
+            partition: placement.partition,
+            from: source.node_id,
+            to: destination.node_id,
+        });
+        leaders.insert(source.node_id, source_load.saturating_sub(1));
+        leaders.insert(destination.node_id, destination_load.saturating_add(1));
+    }
+    transfers
+}
+
 fn load_score(broker: &BrokerCapacity, values: &[u64; 4]) -> (u128, u32, u32, u64, u64) {
     let disk = if broker.disk_capacity_bytes == 0 {
         u128::MAX

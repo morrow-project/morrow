@@ -174,6 +174,30 @@ fn planner_prefers_lower_load_and_respects_region_constraints() {
 }
 
 #[test]
+fn leader_planner_transfers_to_a_less_loaded_replica_deterministically() {
+    let placements = [PartitionPlacement {
+        stream: "orders".into(),
+        partition: PartitionId(0),
+        replicas: [1, 2].into_iter().collect(),
+        leader: 1,
+        constraints: PlacementConstraints::default(),
+    }];
+    let transfers = plan_leader_transfers(
+        &placements,
+        &[broker(1, "west", "a", 90), broker(2, "west", "b", 10)],
+    );
+    assert_eq!(
+        transfers,
+        vec![PlacementMove {
+            stream: "orders".into(),
+            partition: PartitionId(0),
+            from: 1,
+            to: 2,
+        }]
+    );
+}
+
+#[test]
 fn move_throttle_bounds_concurrency_and_bandwidth_until_window_reset() {
     let mut throttle = MoveThrottle::new(2, 100);
     assert!(throttle.try_start(60));
