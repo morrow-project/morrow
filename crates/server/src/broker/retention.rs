@@ -2,26 +2,22 @@ use super::*;
 use crate::partition_log::RetentionChange;
 
 impl DurableBrokerState {
-    pub(super) fn enforce_stream_retention(
+    pub(super) fn apply_retention_changes(
         &mut self,
-        partition_logs: &PartitionLogSet,
-        catalog: &crate::stream::StreamCatalog,
-        now_ms: u64,
+        changes: &[RetentionChange],
         tenants: &std::collections::BTreeSet<String>,
     ) -> Result<HashMap<String, u64>> {
         let mut released = HashMap::new();
-        let changes = partition_logs.retention_changes(catalog.definitions(), now_ms);
-        for change in &changes {
-            for (tenant, bytes) in self.apply_retention_change(partition_logs, change, tenants)? {
+        for change in changes {
+            for (tenant, bytes) in self.apply_retention_change_metadata(change, tenants)? {
                 *released.entry(tenant).or_default() += bytes;
             }
         }
         Ok(released)
     }
 
-    fn apply_retention_change(
+    fn apply_retention_change_metadata(
         &mut self,
-        partition_logs: &PartitionLogSet,
         change: &RetentionChange,
         tenants: &std::collections::BTreeSet<String>,
     ) -> Result<HashMap<String, u64>> {
@@ -50,11 +46,6 @@ impl DurableBrokerState {
             *released.entry(tenant).or_default() +=
                 crate::quota::persistent_publish_record_bytes(record);
         }
-        // The partition log owns physical retention. Keep the broker state
-        // update bounded to the records that actually leave the window; the
-        // log can discard obsolete sealed segments without cloning the whole
-        // retained history through the broker state lock.
-        partition_logs.advance_retention(change)?;
         self.messages.retain(|seq, _| !removed.contains(seq));
         self.remove_compaction_sequences(&removed);
         self.partition_sequences

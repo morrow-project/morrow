@@ -432,16 +432,21 @@ impl Morrow {
             self.apply_cluster_partition(envelope.clone()).await?;
             let _storage_operation = self.storage_gate.read().await;
             let tenants = self.config.tenant_quotas.keys().cloned().collect();
+            let changes = self
+                .partition_logs
+                .retention_changes(self.config.streams.definitions(), self.hooks.clock.now_ms());
+            for change in &changes {
+                self.partition_logs.advance_retention(change)?;
+            }
             crate::broker_ensure!(
                 self.reserve_retention_work().await,
                 "retention work budget exhausted"
             );
-            let released_result = self.inner.lock().await.enforce_stream_retention(
-                &self.partition_logs,
-                &self.config.streams,
-                self.hooks.clock.now_ms(),
-                &tenants,
-            );
+            let released_result = self
+                .inner
+                .lock()
+                .await
+                .apply_retention_changes(&changes, &tenants);
             self.release_retention_work().await;
             let released = released_result?;
             for (tenant, bytes) in released {
@@ -581,16 +586,21 @@ impl Morrow {
                 .state_shard_hold_us
                 .observe(shard_hold_started.elapsed());
             let tenants = self.config.tenant_quotas.keys().cloned().collect();
+            let changes = self
+                .partition_logs
+                .retention_changes(self.config.streams.definitions(), self.hooks.clock.now_ms());
+            for change in &changes {
+                self.partition_logs.advance_retention(change)?;
+            }
             crate::broker_ensure!(
                 self.reserve_retention_work().await,
                 "retention work budget exhausted"
             );
-            let released_result = self.inner.lock().await.enforce_stream_retention(
-                &self.partition_logs,
-                &self.config.streams,
-                self.hooks.clock.now_ms(),
-                &tenants,
-            );
+            let released_result = self
+                .inner
+                .lock()
+                .await
+                .apply_retention_changes(&changes, &tenants);
             self.release_retention_work().await;
             let released = released_result?;
             self.inner
