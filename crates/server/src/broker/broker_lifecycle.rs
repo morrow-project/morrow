@@ -677,6 +677,8 @@ impl Morrow {
             cluster_delta_gate: Arc::new(Mutex::new(())),
             cluster_application_metrics: Arc::new(ClusterApplicationMetrics::default()),
             metrics: Arc::new(BrokerMetrics::default()),
+            metrics_snapshot: Arc::new(tokio::sync::RwLock::new(None)),
+            metrics_refreshing: Arc::new(AtomicBool::new(false)),
             storage_failure: Arc::new(AtomicBool::new(false)),
             audit_failure: Arc::new(AtomicBool::new(false)),
             shutting_down: Arc::new(AtomicBool::new(false)),
@@ -1088,6 +1090,33 @@ impl Morrow {
     }
 
     pub(super) async fn metrics_response(&self) -> String {
+        const SNAPSHOT_TTL: std::time::Duration = std::time::Duration::from_secs(1);
+        if let Some((refreshed_at, body)) = self.metrics_snapshot.read().await.clone() {
+            if refreshed_at.elapsed() < SNAPSHOT_TTL {
+                return body.to_string();
+            }
+            if self
+                .metrics_refreshing
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                let broker = self.clone();
+                tokio::spawn(async move {
+                    let body = broker.collect_metrics_response().await;
+                    *broker.metrics_snapshot.write().await =
+                        Some((std::time::Instant::now(), Arc::from(body)));
+                    broker.metrics_refreshing.store(false, Ordering::Release);
+                });
+            }
+            return body.to_string();
+        }
+        let body = self.collect_metrics_response().await;
+        *self.metrics_snapshot.write().await =
+            Some((std::time::Instant::now(), Arc::from(body.clone())));
+        body
+    }
+
+    async fn collect_metrics_response(&self) -> String {
         let connections = self.connections.lock().await.clients.len();
         let transient_subscriptions = self.transient.lock().await.subscriptions.len();
         let groups = self.groups.lock().await;
