@@ -313,6 +313,13 @@ impl Morrow {
             return Ok(());
         }
         let stream = stream.unwrap();
+        let (partition_count, partitioning_epoch) = self
+            .partitioning_for_stream(
+                stream.name.as_str(),
+                stream.partitions,
+                stream.partitioning.epoch,
+            )
+            .await;
 
         let disk_bytes = 128u64
             .saturating_add(namespace.len() as u64)
@@ -367,7 +374,13 @@ impl Morrow {
         }
 
         if let Some(cluster) = self.cluster_runtime().await {
-            let partition = select_partition(&stream, &subject_name, key.as_deref(), publisher_id);
+            let partition = select_partition_with_count(
+                &stream,
+                &subject_name,
+                key.as_deref(),
+                publisher_id,
+                partition_count,
+            );
             let stored_headers = headers
                 .iter()
                 .map(|(name, value)| MessageHeader {
@@ -388,7 +401,7 @@ impl Morrow {
                 reply_to,
                 schema_id,
                 payload,
-                partitioning_epoch: stream.partitioning.epoch,
+                partitioning_epoch,
                 leader_epoch: 0,
                 legacy_seq: seq,
             };
@@ -480,7 +493,13 @@ impl Morrow {
                 value: value.clone(),
             })
             .collect::<Vec<_>>();
-        let partition = select_partition(&stream, &subject_name, key.as_deref(), publisher_id);
+        let partition = select_partition_with_count(
+            &stream,
+            &subject_name,
+            key.as_deref(),
+            publisher_id,
+            partition_count,
+        );
         let shard = crate::state_shards::shard_for(
             crate::state_shards::StateShardKey::Partition {
                 stream: stream.name.as_str(),
@@ -500,7 +519,7 @@ impl Morrow {
             reply_to,
             schema_id,
             payload,
-            partitioning_epoch: stream.partitioning.epoch,
+            partitioning_epoch,
             leader_epoch: 0,
             legacy_seq: seq,
         };

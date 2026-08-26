@@ -31,7 +31,7 @@ use crate::{
     middleware::{MiddlewareDecision, MiddlewareMessage, MiddlewareRuntime, MiddlewareStage},
     partition_log::{
         AppendRequest, DEFAULT_NAMESPACE, MessageEnvelope, MessageHeader, PartitionLogSet,
-        select_partition,
+        select_partition_with_count,
     },
     raft::{
         BrokerCommand, BrokerResponse, CommittedDelta, DeltaBatch, DurableState, RaftRuntime,

@@ -134,6 +134,20 @@ pub fn select_partition(
     key: Option<&[u8]>,
     sticky_value: u64,
 ) -> PartitionId {
+    select_partition_with_count(stream, subject, key, sticky_value, stream.partitions)
+}
+
+pub fn select_partition_with_count(
+    stream: &StreamDefinition,
+    subject: &str,
+    key: Option<&[u8]>,
+    sticky_value: u64,
+    partition_count: u32,
+) -> PartitionId {
+    assert!(
+        partition_count > 0,
+        "partition count must be greater than zero"
+    );
     let value = key
         .map(stable_hash)
         .unwrap_or_else(|| match &stream.partitioning.strategy {
@@ -146,7 +160,7 @@ pub fn select_partition(
                 fallback_hash(stream, subject, sticky_value)
             }
         });
-    PartitionId((value % u64::from(stream.partitions)) as u32)
+    PartitionId((value % u64::from(partition_count)) as u32)
 }
 
 fn fallback_hash(stream: &StreamDefinition, subject: &str, sticky_value: u64) -> u64 {
