@@ -58,6 +58,30 @@ impl RaftRuntime {
         }
     }
 
+    pub(crate) async fn heartbeat_with_controller(
+        &self,
+        controller_id: u64,
+        heartbeat: protocol::broker_control::BrokerHeartbeat,
+    ) -> Result<()> {
+        match self
+            .data_client(controller_id)
+            .await?
+            .broker_control(protocol::broker_control::BrokerControlFrame::Heartbeat(
+                heartbeat,
+            ))
+            .await?
+        {
+            protocol::broker_control::BrokerControlFrame::HeartbeatAccepted => Ok(()),
+            protocol::broker_control::BrokerControlFrame::Error(error) => {
+                Err(BrokerError::msg(format!(
+                    "broker heartbeat rejected ({}): {}",
+                    error.code, error.message
+                )))
+            }
+            _ => Err(BrokerError::msg("unexpected heartbeat response")),
+        }
+    }
+
     pub(crate) async fn open(
         config: &ClusterConfig,
         tls_enabled: bool,

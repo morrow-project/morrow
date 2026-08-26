@@ -18,10 +18,85 @@ impl Morrow {
             self.broker_control.clone(),
             cluster_config.role.participates_in_metadata_quorum(),
         );
+        if matches!(cluster_config.role, crate::config::ClusterRole::Broker) {
+            self.spawn_broker_registration(runtime.clone(), cluster_config.clone());
+        }
         let runtime = ClusterRuntime::real(runtime);
         self.sync_from_cluster(&runtime).await?;
         *self.cluster.lock().await = Some(runtime);
         Ok(())
+    }
+
+    fn spawn_broker_registration(
+        &self,
+        runtime: RaftRuntime,
+        cluster_config: crate::config::ClusterConfig,
+    ) {
+        let broker_id = cluster_config.node_id;
+        let controller_id = cluster_config
+            .controller_voters
+            .iter()
+            .copied()
+            .find(|id| *id != broker_id)
+            .or_else(|| cluster_config.controller_voters.first().copied());
+        let Some(controller_id) = controller_id else {
+            return;
+        };
+        let client_addr = self.config.listen.to_string();
+        let replication_addr = cluster_config.route_advertise.clone().or_else(|| {
+            cluster_config
+                .route_listen
+                .map(|address| address.to_string())
+        });
+        let heartbeat_interval_ms = cluster_config.heartbeat_interval_ms;
+        tokio::spawn(async move {
+            let incarnation = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos() as u64)
+                .unwrap_or(1)
+                .max(1);
+            let mut last_revision = 0;
+            let mut session_id = None;
+            let mut interval = tokio::time::interval(Duration::from_millis(heartbeat_interval_ms));
+            loop {
+                if let Some(session) = session_id {
+                    let heartbeat = protocol::broker_control::BrokerHeartbeat {
+                        protocol_version: protocol::broker_control::BROKER_CONTROL_PROTOCOL_VERSION,
+                        broker_id,
+                        incarnation,
+                        session_id: session,
+                        capacity: protocol::broker_control::CapacitySummary::default(),
+                    };
+                    if runtime
+                        .heartbeat_with_controller(controller_id, heartbeat)
+                        .await
+                        .is_err()
+                    {
+                        session_id = None;
+                    }
+                } else {
+                    let registration = protocol::broker_control::BrokerRegistration {
+                        protocol_version: protocol::broker_control::BROKER_CONTROL_PROTOCOL_VERSION,
+                        broker_id,
+                        incarnation,
+                        client_addr: client_addr.clone(),
+                        replication_addr: replication_addr.clone(),
+                        capacity: protocol::broker_control::CapacitySummary::default(),
+                        feature_gates: Vec::new(),
+                        security_references: Vec::new(),
+                        last_revision,
+                    };
+                    if let Ok(result) = runtime
+                        .register_with_controller(controller_id, registration)
+                        .await
+                    {
+                        session_id = Some(result.session_id);
+                        last_revision = result.controller_revision;
+                    }
+                }
+                interval.tick().await;
+            }
+        });
     }
 
     pub(super) async fn start_route_mesh(&self, listener: Option<TcpListener>) -> Result<()> {
