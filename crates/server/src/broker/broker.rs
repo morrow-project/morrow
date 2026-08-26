@@ -48,6 +48,7 @@ pub struct Morrow {
     pub(super) partition_logs: Arc<PartitionLogSet>,
     pub(super) storage_permits: Arc<tokio::sync::Semaphore>,
     pub(super) storage_gate: Arc<tokio::sync::RwLock<()>>,
+    pub(super) state_shard_gates: Arc<Vec<tokio::sync::Mutex<()>>>,
     pub(super) connections: Arc<Mutex<ConnectionState>>,
     pub(super) transient: Arc<Mutex<TransientState>>,
     pub(super) groups: Arc<Mutex<HashMap<String, GroupCoordinator>>>,

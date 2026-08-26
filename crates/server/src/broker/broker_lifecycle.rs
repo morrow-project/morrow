@@ -652,6 +652,11 @@ impl Morrow {
             partition_logs: Arc::new(partition_logs),
             storage_permits: Arc::new(tokio::sync::Semaphore::new(MAX_BLOCKING_STORAGE_OPS)),
             storage_gate: Arc::new(tokio::sync::RwLock::new(())),
+            state_shard_gates: Arc::new(
+                (0..STATE_SHARD_COUNT)
+                    .map(|_| tokio::sync::Mutex::new(()))
+                    .collect(),
+            ),
             connections: Arc::new(Mutex::new(ConnectionState {
                 clients: HashMap::new(),
             })),
