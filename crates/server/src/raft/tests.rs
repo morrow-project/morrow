@@ -547,3 +547,12 @@ fn policy_replacements_are_monotonic_and_consensus_managed() {
         BrokerResponse::Noop
     );
 }
+
+#[test]
+fn initial_partition_leaders_round_robin_across_data_brokers() {
+    let eligible = [3, 7, 11];
+    let leaders = (0..7)
+        .map(|partition| super::runtime::initial_partition_leader(&eligible, partition))
+        .collect::<Vec<_>>();
+    assert_eq!(leaders, vec![3, 7, 11, 3, 7, 11, 3]);
+}
