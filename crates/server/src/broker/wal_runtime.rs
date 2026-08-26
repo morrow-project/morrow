@@ -110,9 +110,20 @@ impl WalRuntime {
         &self,
         records: Vec<PartitionAppendRecord>,
     ) -> Result<()> {
+        const MAX_PARTITION_APPEND_BATCH_BYTES: usize = 8 * 1024 * 1024;
         crate::broker_ensure!(
             !records.is_empty() && records.len() <= 256,
             "partition append batch is outside the supported bound"
+        );
+        let encoded_bytes = records
+            .iter()
+            .map(|record| {
+                record.stream.len() + record.subject.len() + std::mem::size_of::<u64>() * 2
+            })
+            .sum::<usize>();
+        crate::broker_ensure!(
+            encoded_bytes <= MAX_PARTITION_APPEND_BATCH_BYTES,
+            "partition append batch bytes exceed the supported bound"
         );
         self.request(|response| WalCommand::PartitionAppendBatch(records, response))
     }
