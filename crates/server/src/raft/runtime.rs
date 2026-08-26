@@ -5,6 +5,7 @@ pub struct RaftRuntime {
     pub(super) raft: BrokerRaft,
     pub(super) state_machine: StateMachineStore,
     pub(super) nodes: HashMap<u64, ClusterNode>,
+    pub(super) data_node_ids: BTreeSet<u64>,
     pub(super) auth_token: String,
     pub(super) node_id: u64,
     pub(super) tls_enabled: bool,
@@ -105,6 +106,15 @@ impl RaftRuntime {
                 )
             })
             .collect::<HashMap<_, _>>();
+        let data_node_ids = nodes
+            .keys()
+            .copied()
+            .filter(|node_id| {
+                !matches!(config.role, crate::config::ClusterRole::Controller)
+                    && (matches!(config.role, crate::config::ClusterRole::Combined)
+                        || !config.controller_voters.contains(node_id))
+            })
+            .collect();
         let raft_nodes = config
             .nodes
             .iter()
@@ -233,6 +243,7 @@ impl RaftRuntime {
             raft,
             state_machine,
             nodes,
+            data_node_ids,
             auth_token: config.auth_token.clone(),
             node_id: config.node_id,
             tls_enabled,
@@ -387,7 +398,11 @@ impl RaftRuntime {
         if !metadata.stream_definitions.is_empty() {
             return self.validate_metadata_configuration(&metadata);
         }
-        let replica_order = self.nodes.keys().copied().collect::<Vec<_>>();
+        let replica_order = self.data_node_ids.iter().copied().collect::<Vec<_>>();
+        crate::broker_ensure!(
+            !replica_order.is_empty(),
+            "metadata bootstrap requires at least one data broker"
+        );
         let mut assignments = HashMap::new();
         for stream in &self.configured_streams {
             for partition in 0..stream.partitions {
