@@ -370,6 +370,22 @@ fn duration_results_exclude_setup_and_drain_time() {
 }
 
 #[test]
+fn steady_state_requires_a_full_active_window_and_samples() {
+    assert!(!bench::stats::steady_state_eligible(
+        Duration::from_millis(999),
+        1
+    ));
+    assert!(!bench::stats::steady_state_eligible(
+        Duration::from_secs(1),
+        0
+    ));
+    assert!(bench::stats::steady_state_eligible(
+        Duration::from_secs(1),
+        1
+    ));
+}
+
+#[test]
 fn benchmark_random_selection_is_seeded_and_bounded() {
     let first = (0..100)
         .map(|sequence| bench::stats::deterministic_index(sequence, 7, 42))
