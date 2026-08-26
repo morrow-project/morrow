@@ -102,6 +102,16 @@ impl Morrow {
                     .await;
                     match result {
                         Ok(Ok(accepted)) => {
+                            if let Err(error) = apply_metadata_updates(&runtime, &accepted.updates)
+                            {
+                                tracing::warn!(
+                                    broker_id,
+                                    ?error,
+                                    "controller metadata update failed"
+                                );
+                                session_id = None;
+                                continue;
+                            }
                             last_revision = accepted.controller_revision;
                         }
                         Ok(Err(error)) => {
@@ -142,6 +152,14 @@ impl Morrow {
                     .await;
                     match result {
                         Ok(Ok(result)) => {
+                            if let Err(error) = apply_metadata_updates(&runtime, &result.updates) {
+                                tracing::warn!(
+                                    broker_id,
+                                    ?error,
+                                    "controller metadata update failed"
+                                );
+                                continue;
+                            }
                             session_id = Some(result.session_id);
                             last_revision = result.controller_revision;
                         }
@@ -203,6 +221,7 @@ impl Morrow {
     pub(super) async fn cluster_log_monitor(self) {
         let mut previous_leader = self.current_leader_for_log().await;
         let mut full_mesh_formed = false;
+        let mut published_metadata = None;
         let mut interval =
             tokio::time::interval(Duration::from_millis(CLUSTER_LOG_SCAN_INTERVAL_MS));
         loop {
@@ -218,6 +237,14 @@ impl Morrow {
                     && let Err(err) = cluster.ensure_metadata_ready().await
                 {
                     error!(error = ?err, "cluster metadata reconciliation failed");
+                } else if cluster.is_leader().await {
+                    if let Ok(payload) = serde_json::to_vec(
+                        &crate::raft::MetadataSnapshot::from_state(&cluster.durable_state()),
+                    ) && published_metadata.as_deref() != Some(payload.as_slice())
+                    {
+                        self.broker_control.publish_update(payload.clone()).await;
+                        published_metadata = Some(payload);
+                    }
                 }
             }
             let leader = self.current_leader_for_log().await;
@@ -326,4 +353,15 @@ impl Morrow {
         }
         Ok(response)
     }
+}
+
+fn apply_metadata_updates(
+    runtime: &RaftRuntime,
+    updates: &[protocol::broker_control::MetadataUpdate],
+) -> Result<()> {
+    for update in updates {
+        crate::broker_ensure!(update.verify(), "controller metadata checksum mismatch");
+        runtime.install_metadata_snapshot(&update.payload)?;
+    }
+    Ok(())
 }

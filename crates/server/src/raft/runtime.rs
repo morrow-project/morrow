@@ -365,6 +365,13 @@ impl RaftRuntime {
         state
     }
 
+    pub(crate) fn install_metadata_snapshot(&self, payload: &[u8]) -> Result<()> {
+        let metadata: crate::raft::MetadataSnapshot = serde_json::from_slice(payload)
+            .map_err(|err| BrokerError::with_source("decoding controller metadata", err))?;
+        self.state_machine.install_metadata(metadata);
+        Ok(())
+    }
+
     pub(crate) fn deltas_after(&self, after: Option<u64>) -> DeltaBatch {
         self.state_machine.deltas_after(after)
     }

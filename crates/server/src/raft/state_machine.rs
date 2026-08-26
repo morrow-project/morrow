@@ -21,6 +21,7 @@ pub struct StateMachineStore {
     inner: Arc<Mutex<StateMachineData>>,
     deltas: Arc<Mutex<VecDeque<CommittedDelta>>>,
     applied_index: Arc<AtomicU64>,
+    metadata_override: Arc<Mutex<Option<MetadataSnapshot>>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -107,11 +108,24 @@ impl StateMachineStore {
             inner: Arc::new(Mutex::new(data)),
             deltas: Arc::new(Mutex::new(VecDeque::new())),
             applied_index: Arc::new(AtomicU64::new(applied_index)),
+            metadata_override: Arc::new(Mutex::new(None)),
         })
     }
 
     pub fn durable_state(&self) -> DurableState {
-        self.inner.lock().unwrap().state.clone()
+        let mut state = self.inner.lock().unwrap().state.clone();
+        if let Some(metadata) = self.metadata_override.lock().unwrap().as_ref() {
+            state.stream_definitions = metadata.stream_definitions.clone();
+            state.partition_assignments = metadata.partition_assignments.clone();
+            state.security_references = metadata.security_references.clone();
+            state.feature_gates = metadata.feature_gates.clone();
+            state.partition_commits = metadata.partition_commits.clone();
+        }
+        state
+    }
+
+    pub(crate) fn install_metadata(&self, metadata: MetadataSnapshot) {
+        *self.metadata_override.lock().unwrap() = Some(metadata);
     }
 
     pub(crate) fn deltas_after(&self, after: Option<u64>) -> DeltaBatch {
