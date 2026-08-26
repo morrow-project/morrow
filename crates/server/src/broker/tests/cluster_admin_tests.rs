@@ -284,6 +284,7 @@ async fn http_metrics_endpoint_is_authenticated_and_bounded() {
     assert!(response.contains("morrow_connectors_connected 0\n"));
     assert!(!response.contains("subject="));
     assert!(!response.contains("client_id="));
+    assert!(scenario.broker().metrics_snapshot.read().await.is_some());
 }
 
 #[tokio::test]

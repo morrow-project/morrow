@@ -67,6 +67,8 @@ pub struct Morrow {
     pub(super) cluster_delta_gate: Arc<Mutex<()>>,
     pub(super) cluster_application_metrics: Arc<ClusterApplicationMetrics>,
     pub(super) metrics: Arc<BrokerMetrics>,
+    pub(super) metrics_snapshot: Arc<tokio::sync::RwLock<Option<(std::time::Instant, Arc<str>)>>>,
+    pub(super) metrics_refreshing: Arc<AtomicBool>,
     pub(super) storage_failure: Arc<AtomicBool>,
     pub(super) audit_failure: Arc<AtomicBool>,
     pub(super) shutting_down: Arc<AtomicBool>,
