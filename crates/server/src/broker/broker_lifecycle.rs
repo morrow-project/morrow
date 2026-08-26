@@ -927,7 +927,6 @@ impl Morrow {
             .config
             .cluster
             .as_ref()
-            .filter(|cluster| cluster.role.serves_client_traffic())
             .and_then(|cluster| cluster.route_listen)
         {
             Some(listen) => Some(
@@ -957,37 +956,6 @@ impl Morrow {
             tokio::spawn(async move {
                 redeliver.redelivery_loop().await;
             });
-        }
-
-        let serves_client_traffic = self
-            .config
-            .cluster
-            .as_ref()
-            .is_none_or(|cluster| cluster.role.serves_client_traffic());
-        if !serves_client_traffic {
-            drop(listener);
-            loop {
-                tokio::select! {
-                    signal = async {
-                        #[cfg(unix)]
-                        {
-                            tokio::select! {
-                                signal = tokio::signal::ctrl_c() => signal,
-                                _ = sigterm.recv() => Ok(()),
-                            }
-                        }
-                        #[cfg(not(unix))]
-                        {
-                            tokio::signal::ctrl_c().await
-                        }
-                    } => {
-                        signal.context("waiting for shutdown signal")?;
-                        self.shutting_down.store(true, Ordering::Release);
-                        self.shutdown().await?;
-                        return Ok(());
-                    }
-                }
-            }
         }
 
         loop {

@@ -17,11 +17,11 @@ may be a voter or a non-voting data-plane member. A broker role must not be a
 voter, while a controller role must be a voter. Adding data-plane members does
 not implicitly change the voter set.
 
-The current release keeps the authenticated internal control and replication
-listeners for compatibility. Controller-only processes do not accept client
-connections or start the route mesh; broker-only processes serve the data
-plane but remain outside the metadata voter set. A fully independent
-controller-to-broker registration transport remains a follow-up concern.
+The current release uses the existing authenticated internal listeners and
+partition replication path for compatibility. Role-specific listener and
+lifecycle isolation is validated at configuration boundaries and will be
+completed by the following topology issues before separated production
+processes are enabled by default.
 
 ## Compatibility and migration
 

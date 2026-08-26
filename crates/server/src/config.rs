@@ -147,18 +147,6 @@ pub enum ClusterRole {
     Controller,
     Broker,
 }
-
-impl ClusterRole {
-    /// Controller-only nodes do not expose the broker data-plane listener.
-    pub fn serves_client_traffic(self) -> bool {
-        !matches!(self, Self::Controller)
-    }
-
-    /// Broker-only nodes are data-plane members and do not vote in metadata Raft.
-    pub fn participates_in_metadata_quorum(self) -> bool {
-        !matches!(self, Self::Broker)
-    }
-}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClusterNodeConfig {
     pub node_id: u64,
