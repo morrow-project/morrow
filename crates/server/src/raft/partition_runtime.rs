@@ -105,7 +105,7 @@ impl RaftRuntime {
                 for record in committed_records {
                     let record_checksum =
                         crate::partition_log::committed_envelope_checksum(&record)?;
-                    let record_bytes = record.payload.len();
+                    let record_bytes = data_append_envelope_bytes(&record);
                     if !append_batch.is_empty()
                         && (append_batch.len() == max_batch_records
                             || append_batch_bytes.saturating_add(record_bytes) > max_batch_bytes)

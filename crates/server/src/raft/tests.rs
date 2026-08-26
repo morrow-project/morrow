@@ -221,6 +221,30 @@ async fn binary_partition_frames_preserve_byte_strings_and_reject_unknown_versio
 }
 
 #[test]
+fn partition_batch_size_accounts_for_envelope_metadata() {
+    let envelope = MessageEnvelope {
+        namespace: "tenant-with-a-long-name".into(),
+        stream: StreamId::new("orders").unwrap(),
+        partition: PartitionId(0),
+        offset: 0,
+        subject: "orders.created.with.additional.routing.metadata".into(),
+        key: Some(vec![1; 64]),
+        headers: vec![crate::partition_log::MessageHeader {
+            name: "trace-id".into(),
+            value: "trace-value".into(),
+        }],
+        timestamp_ms: 0,
+        reply_to: Some("reply.orders".into()),
+        schema_id: None,
+        payload: vec![2; 8],
+        partitioning_epoch: 1,
+        leader_epoch: 1,
+        legacy_seq: 0,
+    };
+    assert!(data_append_envelope_bytes(&envelope) > envelope.payload.len());
+}
+
+#[test]
 fn metadata_bootstrap_and_partition_commit_contain_no_message_data() {
     let mut state = DurableState::new(nodes());
     assert_eq!(

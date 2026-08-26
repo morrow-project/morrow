@@ -25,6 +25,23 @@ pub(super) fn data_append_batch_limits() -> (usize, usize) {
     (records, bytes)
 }
 
+pub(super) fn data_append_envelope_bytes(envelope: &MessageEnvelope) -> usize {
+    std::mem::size_of::<MessageEnvelope>()
+        .saturating_add(envelope.namespace.len())
+        .saturating_add(envelope.stream.as_str().len())
+        .saturating_add(envelope.subject.len())
+        .saturating_add(envelope.key.as_ref().map_or(0, Vec::len))
+        .saturating_add(
+            envelope
+                .headers
+                .iter()
+                .map(|header| header.name.len().saturating_add(header.value.len()))
+                .sum::<usize>(),
+        )
+        .saturating_add(envelope.reply_to.as_ref().map_or(0, String::len))
+        .saturating_add(envelope.payload.len())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct PartitionCommitRecord {
     pub(super) stream: String,
@@ -344,12 +361,12 @@ impl ReplicaDataStore {
             !requests.is_empty() && requests.len() <= max_records,
             "partition append batch size is outside the supported bound"
         );
-        let payload_bytes = requests
+        let envelope_bytes = requests
             .iter()
-            .map(|request| request.envelope.payload.len())
+            .map(|request| data_append_envelope_bytes(&request.envelope))
             .sum::<usize>();
         crate::broker_ensure!(
-            payload_bytes <= max_bytes,
+            envelope_bytes <= max_bytes,
             "partition append batch bytes exceed the supported bound"
         );
         let mut responses = Vec::with_capacity(requests.len());
