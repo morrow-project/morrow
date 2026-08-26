@@ -22,8 +22,13 @@ scripts/run-scale-benchmark.sh \
   --partitions 1,4 \
   --deployment-profile separated --controller-voters 3 \
   --roles-share-process false \
-  --clients 5 --duration 60s --payload-size 128
+  --clients 5 --duration 60s --payload-size 128 --throughput 0
 ```
+
+`--throughput` applies an aggregate publish rate limit (`0` means unlimited),
+and `--fire-throughput` can set a separate limit for fire-and-forget cases.
+Each case keeps its resource snapshots beside a fresh `results/` directory so
+the wrapper can be rerun without colliding with the nested matrix output.
 
 Each case is written below the output directory as JSON/CSV benchmark artifacts,
 with a machine-readable `manifest.json` at the root. The manifest captures the

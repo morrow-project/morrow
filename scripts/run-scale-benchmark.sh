@@ -7,6 +7,8 @@ usage() {
   echo "  --roles-share-process true|false         (default follows profile)"
   echo "  --metrics-url URL                        (optional endpoint captured per case)"
   echo "  --server-pid PID                         (optional per-case resource snapshots)"
+  echo "  --throughput N                           (default: 0, unlimited)"
+  echo "  --fire-throughput N                      (default: --throughput)"
   echo "  --modes LIST                             (default: fire-and-forget,sync,async,batch)"
   echo "  --ack-levels LIST                        (default: accepted,durable,high-durability)"
 }
@@ -58,7 +60,10 @@ capture_resources() {
       ;;
     Darwin)
       ps_line=$(ps -p "$server_pid" -o rss=,pcpu=,nlwp= 2>/dev/null || true)
+      resource_ifs=$IFS
+      IFS=' '
       set -- $ps_line
+      IFS=$resource_ifs
       rss_kib=${1:-}; cpu_percent=${2:-}; threads=${3:-}
       fd_count=$(lsof -p "$server_pid" 2>/dev/null | tail -n +2 | wc -l | tr -d ' ')
       ;;
@@ -68,6 +73,7 @@ capture_resources() {
 }
 server=; client_config=; broker_counts=1,3,5; topics=1,10,100; partitions=1,4,16
 clients=5; duration=10s; payload_size=128
+throughput=0; fire_throughput=
 deployment_profile=combined; controller_voters=3; roles_share_process=true
 metrics_url=
 server_pid=
@@ -86,6 +92,8 @@ while test "$#" -gt 0; do
     --roles-share-process) test "$#" -ge 2 || die "$1 requires a value"; roles_share_process=$2; shift 2 ;;
     --metrics-url) test "$#" -ge 2 || die "$1 requires a value"; metrics_url=$2; shift 2 ;;
     --server-pid) test "$#" -ge 2 || die "$1 requires a value"; server_pid=$2; shift 2 ;;
+    --throughput) test "$#" -ge 2 || die "$1 requires a value"; throughput=$2; shift 2 ;;
+    --fire-throughput) test "$#" -ge 2 || die "$1 requires a value"; fire_throughput=$2; shift 2 ;;
     --modes) test "$#" -ge 2 || die "$1 requires a value"; modes=$2; shift 2 ;;
     --ack-levels) test "$#" -ge 2 || die "$1 requires a value"; ack_levels=$2; shift 2 ;;
     --clients) test "$#" -ge 2 || die "$1 requires a value"; clients=$2; shift 2 ;;
@@ -97,6 +105,9 @@ while test "$#" -gt 0; do
     *) die "unknown option $1" ;;
   esac
 done
+case "$throughput" in ''|*[!0-9]*) die "--throughput must be a non-negative integer" ;; esac
+if test -z "$fire_throughput"; then fire_throughput=$throughput; fi
+case "$fire_throughput" in ''|*[!0-9]*) die "--fire-throughput must be a non-negative integer" ;; esac
 test -n "$server" || die "--server is required"
 test -f "$client_config" || die "--client-config must name a file"
 if test -n "$server_pid"; then
@@ -140,8 +151,8 @@ test "$metadata_cache_capacity" -le 1000000 || metadata_cache_capacity=1000000
 hostname_value=$(hostname 2>/dev/null || true)
 os_name=$(uname -s 2>/dev/null || true)
 os_release=$(uname -r 2>/dev/null || true)
-printf '{"commit":"%s","server":"%s","clients":%s,"duration":"%s","payload_size":%s,"broker_counts":[%s],"topics":[%s],"partitions":[%s],"modes":"%s","ack_levels":"%s","deployment_profile":"%s","controller_voter_count":%s,"roles_share_process":%s,"batch_records":%s,"batch_bytes":%s,"metadata_cache_capacity":%s,"started_at":"%s","hostname":"%s","os":"%s","kernel":"%s","cpu_cores":%s,"memory_bytes":%s,"cpu_model":"%s","cpu_hz":%s,"uname":"%s"}\n' \
-  "$(git rev-parse HEAD)" "$server" "$clients" "$duration" "$payload_size" "$broker_counts" "$topics" "$partitions" \
+printf '{"commit":"%s","server":"%s","clients":%s,"duration":"%s","payload_size":%s,"throughput":%s,"fire_throughput":%s,"broker_counts":[%s],"topics":[%s],"partitions":[%s],"modes":"%s","ack_levels":"%s","deployment_profile":"%s","controller_voter_count":%s,"roles_share_process":%s,"batch_records":%s,"batch_bytes":%s,"metadata_cache_capacity":%s,"started_at":"%s","hostname":"%s","os":"%s","kernel":"%s","cpu_cores":%s,"memory_bytes":%s,"cpu_model":"%s","cpu_hz":%s,"uname":"%s"}\n' \
+  "$(git rev-parse HEAD)" "$server" "$clients" "$duration" "$payload_size" "$throughput" "$fire_throughput" "$broker_counts" "$topics" "$partitions" \
   "$modes" "$ack_levels" "$deployment_profile" "$controller_voters" "$roles_share_process" "$batch_records" "$batch_bytes" "$metadata_cache_capacity" "$started_at" "$(json_escape "$hostname_value")" "$(json_escape "$os_name")" "$(json_escape "$os_release")" \
   "${cpu_cores:-null}" "${memory_bytes:-null}" "$(json_escape "$(cpu_model)")" "${cpu_hz:-null}" "$(json_escape "$(uname -a)")" >"$output_dir/manifest.json"
 old_ifs=$IFS
@@ -152,7 +163,7 @@ for broker_count in $broker_counts; do
       case_dir="$output_dir/brokers-$broker_count/topics-$topic_count/partitions-$partition_count"
       mkdir -p "$case_dir"
       capture_resources "$case_dir/resources-before.json"
-      scripts/run-publish-benchmark-matrix.sh --topology external --client-config "$client_config" --server "$server" --clients "$clients" --duration "$duration" --payload-size "$payload_size" --subjects "$topic_count" --partitions "$partition_count" --modes "$modes" --ack-levels "$ack_levels" --output-dir "$case_dir" --quiet
+      scripts/run-publish-benchmark-matrix.sh --topology external --client-config "$client_config" --server "$server" --clients "$clients" --duration "$duration" --payload-size "$payload_size" --throughput "$throughput" --fire-throughput "$fire_throughput" --subjects "$topic_count" --partitions "$partition_count" --modes "$modes" --ack-levels "$ack_levels" --output-dir "$case_dir/results" --quiet --no-build
       capture_resources "$case_dir/resources-after.json"
       if test -n "$metrics_url"; then
         curl -sSfL "$metrics_url" >"$case_dir/metrics.prom" || die "failed to capture metrics from $metrics_url"
