@@ -122,6 +122,7 @@ impl FakeClusterRuntime {
         &self,
         mut envelope: MessageEnvelope,
         fsync: bool,
+        _cluster_durable: bool,
     ) -> Result<MessageEnvelope> {
         let (command, leader_epoch) = {
             let mut inner = self.inner.lock().unwrap();

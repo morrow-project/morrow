@@ -298,6 +298,7 @@ impl RaftRuntime {
         &self,
         mut envelope: crate::partition_log::MessageEnvelope,
         fsync: bool,
+        cluster_durable: bool,
     ) -> Result<crate::partition_log::MessageEnvelope> {
         crate::broker_ensure!(
             self.raft.current_leader().await == Some(self.node_id),
@@ -342,7 +343,16 @@ impl RaftRuntime {
             },
             envelope: envelope.clone(),
         };
-        let quorum = self.nodes.len() / 2 + 1;
+        let required_nodes = if cluster_durable {
+            assignment.replicas.clone()
+        } else {
+            assignment.active_members().clone()
+        };
+        crate::broker_ensure!(
+            required_nodes.contains(&self.node_id),
+            "partition leader is outside the required commit set"
+        );
+        let required_count = required_nodes.len();
         let mut replicated = 1usize;
         let mut flushed = usize::from(fsync);
         let mut joins = tokio::task::JoinSet::new();
@@ -355,7 +365,8 @@ impl RaftRuntime {
             let request = request.clone();
             let partition_data = self.partition_data.clone();
             let metadata = metadata.clone();
-            joins.spawn(async move {
+            let required = required_nodes.contains(node_id);
+            let task = async move {
                 let progress = send_data_progress_on_client(
                     &client,
                     DataProgressRequest {
@@ -393,7 +404,16 @@ impl RaftRuntime {
                     .await?;
                 }
                 send_data_append_on_client(&client, request).await
-            });
+            };
+            if required {
+                joins.spawn(task);
+            } else {
+                tokio::spawn(async move {
+                    if let Err(err) = task.await {
+                        tracing::warn!(error = ?err, "observer partition replication failed");
+                    }
+                });
+            }
         }
         while let Some(response) = joins.join_next().await {
             if let Ok(Ok(response)) = response {
@@ -405,9 +425,12 @@ impl RaftRuntime {
                 }
             }
         }
-        crate::broker_ensure!(replicated >= quorum, "partition quorum unavailable");
+        crate::broker_ensure!(replicated >= required_count, "partition quorum unavailable");
         if fsync {
-            crate::broker_ensure!(flushed >= quorum, "partition fsync quorum unavailable");
+            crate::broker_ensure!(
+                flushed >= required_count,
+                "partition fsync quorum unavailable"
+            );
         }
         self.partition_data.lock().unwrap().append(&request)?;
         if metadata.feature_gates.contains("partition-local-commit-v1") {
