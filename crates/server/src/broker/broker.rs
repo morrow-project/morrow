@@ -91,6 +91,21 @@ pub struct Morrow {
 }
 
 impl Morrow {
+    fn persist_partition_expansions(
+        &self,
+        expansions: &HashMap<String, crate::partition_expansion::PartitionExpansion>,
+    ) -> Result<()> {
+        let path = self.config.wal_dir.join("partition-expansions.json");
+        let temporary = path.with_extension("json.tmp");
+        let body = serde_json::to_vec_pretty(expansions).map_err(|error| {
+            BrokerError::msg(format!("serializing partition expansions: {error}"))
+        })?;
+        std::fs::write(&temporary, body)
+            .map_err(|error| BrokerError::msg(format!("writing partition expansions: {error}")))?;
+        std::fs::rename(&temporary, &path)
+            .map_err(|error| BrokerError::msg(format!("installing partition expansions: {error}")))
+    }
+
     pub(super) async fn reserve_retention_work(&self) -> bool {
         self.work_scheduler.lock().await.try_reserve(
             crate::work_scheduler::WorkClass::Retention,
@@ -112,12 +127,16 @@ impl Morrow {
         partitions: u32,
     ) -> Result<crate::partition_expansion::ExpansionPlan> {
         let mut expansions = self.partition_expansions.lock().await;
-        expansions
+        let plan = expansions
             .get_mut(stream)
             .ok_or_else(|| BrokerError::msg("unknown stream"))?
             .begin(partitions)
             .cloned()
-            .ok_or_else(|| BrokerError::msg("partition expansion is already pending or not larger"))
+            .ok_or_else(|| {
+                BrokerError::msg("partition expansion is already pending or not larger")
+            })?;
+        self.persist_partition_expansions(&expansions)?;
+        Ok(plan)
     }
 
     pub async fn mark_partition_expansion_prepared(
@@ -133,6 +152,7 @@ impl Morrow {
                 .mark_prepared(prepared_partitions),
             "invalid partition expansion preparation progress"
         );
+        self.persist_partition_expansions(&expansions)?;
         Ok(())
     }
 
@@ -145,7 +165,9 @@ impl Morrow {
             expansion.activate(),
             "partition expansion is not fully prepared"
         );
-        Ok(expansion.current())
+        let current = expansion.current();
+        self.persist_partition_expansions(&expansions)?;
+        Ok(current)
     }
 
     pub async fn partition_expansion_epoch(&self, stream: &str, epoch: u64) -> Result<bool> {

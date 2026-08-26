@@ -630,7 +630,10 @@ impl Morrow {
             },
         )?;
         let wal = WalRuntime::new(wal);
-        let partition_expansions = config
+        let mut partition_expansions: HashMap<
+            String,
+            crate::partition_expansion::PartitionExpansion,
+        > = config
             .streams
             .definitions()
             .iter()
@@ -642,6 +645,27 @@ impl Morrow {
                 .map(|expansion| (stream.name.as_str().to_string(), expansion))
             })
             .collect();
+        let expansion_state_path = config.wal_dir.join("partition-expansions.json");
+        if expansion_state_path.is_file() {
+            let body = std::fs::read(&expansion_state_path).with_context(|| {
+                format!(
+                    "reading partition expansion state {}",
+                    expansion_state_path.display()
+                )
+            })?;
+            let persisted: HashMap<String, crate::partition_expansion::PartitionExpansion> =
+                serde_json::from_slice(&body).map_err(|error| {
+                    BrokerError::msg(format!(
+                        "decoding partition expansion state {}: {error}",
+                        expansion_state_path.display()
+                    ))
+                })?;
+            for (stream, expansion) in persisted {
+                if partition_expansions.contains_key(&stream) {
+                    partition_expansions.insert(stream, expansion);
+                }
+            }
+        }
         Ok(Self {
             inner: Arc::new(Mutex::new(DurableBrokerState {
                 wal: wal.clone(),

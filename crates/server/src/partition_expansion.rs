@@ -1,6 +1,6 @@
 //! Epoch-fenced online partition expansion state machine.
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ExpansionPlan {
     pub from_partitions: u32,
     pub to_partitions: u32,
@@ -14,7 +14,7 @@ pub enum EpochDecision {
     RefreshRequired { current_epoch: u64 },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PartitionExpansion {
     current_partitions: u32,
     current_epoch: u64,
