@@ -2,6 +2,7 @@ use super::delivery_index::scheduled_at_ms;
 use super::*;
 
 const MAX_DURABLE_DELIVERIES_PER_TURN: usize = 64;
+const MAX_DURABLE_DELIVERY_BYTES_PER_TURN: usize = 1024 * 1024;
 
 impl DurableBrokerState {
     pub(super) fn prepare_durable_deliveries(
@@ -14,13 +15,18 @@ impl DurableBrokerState {
         let mut deliveries = Vec::new();
         let consumer_ids = std::mem::take(&mut self.ready_consumers);
         let mut processed = 0;
+        let mut processed_bytes = 0usize;
         for consumer_id in consumer_ids {
-            if processed >= MAX_DURABLE_DELIVERIES_PER_TURN {
+            if processed >= MAX_DURABLE_DELIVERIES_PER_TURN
+                || processed_bytes >= MAX_DURABLE_DELIVERY_BYTES_PER_TURN
+            {
                 self.ready_consumers.insert(consumer_id);
                 continue;
             }
             loop {
-                if processed >= MAX_DURABLE_DELIVERIES_PER_TURN {
+                if processed >= MAX_DURABLE_DELIVERIES_PER_TURN
+                    || processed_bytes >= MAX_DURABLE_DELIVERY_BYTES_PER_TURN
+                {
                     self.ready_consumers.insert(consumer_id.clone());
                     break;
                 }
@@ -159,6 +165,7 @@ impl DurableBrokerState {
                     );
                 }
                 processed += 1;
+                processed_bytes = processed_bytes.saturating_add(delivery_message.payload.len());
             }
         }
         Ok(deliveries)
