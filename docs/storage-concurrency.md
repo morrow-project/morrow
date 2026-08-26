@@ -28,3 +28,12 @@ producer acknowledgements are sent only after the partition append and control
 WAL record complete. `HIGH_DURABILITY` additionally waits for the selected
 partition and control WAL fsyncs. Cluster durability continues to use the
 replication boundary selected by the producer acknowledgement level.
+# Grouped durability barriers
+
+High-durability publishes append their record first, then join a bounded WAL
+flush epoch. The first waiter opens an epoch whose maximum delay is
+`fsync_interval_ms`; concurrent waiters share the same flush and are released
+together. This keeps sparse traffic bounded while allowing busy partitions to
+amortize one storage barrier across many records. The append and acknowledgement
+ordering remains per record, so an accepted record cannot be lost if a client
+disconnects while a flush epoch is open.

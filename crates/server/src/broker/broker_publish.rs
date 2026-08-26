@@ -585,7 +585,6 @@ impl Morrow {
         if ack.is_none_or(|ack| ack.level == protocol::AckLevel::HighDurability) {
             match self.hooks.durable_publish_flush_mode {
                 DurablePublishFlushMode::SleepThenFlush => {
-                    tokio::time::sleep(self.config.fsync_interval()).await;
                     self.flush_partition(&record).await?;
                     self.wal.flush_grouped(self.config.fsync_interval()).await?;
                 }
