@@ -6,6 +6,7 @@ usage() {
   echo "  --controller-voters N                    (default: 3)"
   echo "  --roles-share-process true|false         (default follows profile)"
   echo "  --metrics-url URL                        (optional endpoint captured per case)"
+  echo "  --expected-brokers N                     (optional registered-broker count check)"
   echo "  --server-pid PID                         (optional per-case resource snapshots)"
   echo "  --throughput N                           (default: 0, unlimited)"
   echo "  --fire-throughput N                      (default: --throughput)"
@@ -44,6 +45,10 @@ validate_topology_metrics() {
   actual_voters=$(awk '/^morrow_controller_voters / { print $2; exit }' "$metrics_file")
   test "$actual_voters" = "$controller_voters" || die "topology metrics report $actual_voters controller voters; expected $controller_voters"
   grep -Fq "morrow_node_role{role=\"$expected_role\"} 1" "$metrics_file" || die "topology metrics do not identify the endpoint as role $expected_role"
+  if test -n "$expected_brokers"; then
+    actual_brokers=$(awk '/^morrow_registered_brokers / { print $2; exit }' "$metrics_file")
+    test "$actual_brokers" = "$expected_brokers" || die "topology metrics report $actual_brokers registered brokers; expected $expected_brokers"
+  fi
 }
 capture_resources() {
   output_file=$1
@@ -76,6 +81,7 @@ clients=5; duration=10s; payload_size=128
 throughput=0; fire_throughput=
 deployment_profile=combined; controller_voters=3; roles_share_process=true
 metrics_url=
+expected_brokers=
 server_pid=
 modes=fire-and-forget,sync,async,batch
 ack_levels=accepted,durable,high-durability
@@ -91,6 +97,7 @@ while test "$#" -gt 0; do
     --controller-voters) test "$#" -ge 2 || die "$1 requires a value"; controller_voters=$2; shift 2 ;;
     --roles-share-process) test "$#" -ge 2 || die "$1 requires a value"; roles_share_process=$2; shift 2 ;;
     --metrics-url) test "$#" -ge 2 || die "$1 requires a value"; metrics_url=$2; shift 2 ;;
+    --expected-brokers) test "$#" -ge 2 || die "$1 requires a value"; expected_brokers=$2; shift 2 ;;
     --server-pid) test "$#" -ge 2 || die "$1 requires a value"; server_pid=$2; shift 2 ;;
     --throughput) test "$#" -ge 2 || die "$1 requires a value"; throughput=$2; shift 2 ;;
     --fire-throughput) test "$#" -ge 2 || die "$1 requires a value"; fire_throughput=$2; shift 2 ;;
@@ -118,6 +125,9 @@ fi
 case "$deployment_profile" in combined|separated) ;; *) die "--deployment-profile must be combined or separated" ;; esac
 case "$roles_share_process" in true|false) ;; *) die "--roles-share-process must be true or false" ;; esac
 case "$controller_voters" in ''|*[!0-9]*|0) die "--controller-voters must be a positive integer" ;; esac
+if test -n "$expected_brokers"; then
+  case "$expected_brokers" in ''|*[!0-9]*|0) die "--expected-brokers must be a positive integer" ;; esac
+fi
 if test "$deployment_profile" = separated && test "$roles_share_process" = true; then
   die "separated deployments must set --roles-share-process false"
 fi

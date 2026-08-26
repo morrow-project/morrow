@@ -106,6 +106,10 @@ pub struct BenchmarkOptions {
     pub max_bytes: usize,
     pub json: bool,
     pub csv: Option<PathBuf>,
+    pub stream: Option<String>,
+    pub partition_metadata: Option<PathBuf>,
+    pub partition_metadata_url: Option<String>,
+    pub partition_metadata_token: Option<String>,
 }
 #[derive(Debug, Clone)]
 pub struct Args {

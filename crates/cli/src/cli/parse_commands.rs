@@ -115,6 +115,10 @@ fn parse_benchmark(mode: BenchmarkMode, mut args: impl Iterator<Item = String>) 
     let mut max_bytes = DEFAULT_MAX_PAYLOAD;
     let mut json = false;
     let mut csv = None;
+    let mut stream = None;
+    let mut partition_metadata = None;
+    let mut partition_metadata_url = None;
+    let mut partition_metadata_token = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--messages" => messages = Some(parse_usize(&mut args, "--messages")?),
@@ -189,6 +193,20 @@ fn parse_benchmark(mode: BenchmarkMode, mut args: impl Iterator<Item = String>) 
             "--max-bytes" => max_bytes = parse_usize(&mut args, "--max-bytes")?,
             "--json" => json = true,
             "--csv" => csv = Some(PathBuf::from(next_value(&mut args, "--csv")?)),
+            "--stream" => stream = Some(next_value(&mut args, "--stream")?),
+            "--partition-metadata" => {
+                partition_metadata = Some(PathBuf::from(next_value(
+                    &mut args,
+                    "--partition-metadata",
+                )?))
+            }
+            "--partition-metadata-url" => {
+                partition_metadata_url = Some(next_value(&mut args, "--partition-metadata-url")?)
+            }
+            "--partition-metadata-token" => {
+                partition_metadata_token =
+                    Some(next_value(&mut args, "--partition-metadata-token")?)
+            }
             _ => {
                 return Err(CliError::msg(format!(
                     "unknown bench {} option {arg}",
@@ -252,6 +270,43 @@ fn parse_benchmark(mode: BenchmarkMode, mut args: impl Iterator<Item = String>) 
         concurrency = 1;
     }
     let publishing = matches!(mode, BenchmarkMode::Pub | BenchmarkMode::PubSub);
+    if (stream.is_some()
+        || partition_metadata.is_some()
+        || partition_metadata_url.is_some()
+        || partition_metadata_token.is_some())
+        && !publishing
+    {
+        return Err(CliError::msg(
+            "--stream and --partition-metadata apply only to publish workloads",
+        ));
+    }
+    if (partition_metadata.is_some() || partition_metadata_url.is_some()) && stream.is_none() {
+        return Err(CliError::msg(
+            "--stream is required when --partition-metadata is set",
+        ));
+    }
+    if stream.is_some() && partition_metadata.is_none() && partition_metadata_url.is_none() {
+        return Err(CliError::msg(
+            "--partition-metadata is required when --stream is set",
+        ));
+    }
+    if partition_metadata.is_some() && partition_metadata_url.is_some() {
+        return Err(CliError::msg(
+            "--partition-metadata and --partition-metadata-url are mutually exclusive",
+        ));
+    }
+    if partition_metadata_token.is_some() && partition_metadata_url.is_none() {
+        return Err(CliError::msg(
+            "--partition-metadata-token requires --partition-metadata-url",
+        ));
+    }
+    if (partition_metadata.is_some() || partition_metadata_url.is_some())
+        && matches!(publish_mode, PublishMode::Async | PublishMode::Batch)
+    {
+        return Err(CliError::msg(
+            "direct partition routing currently supports fire-and-forget and sync modes",
+        ));
+    }
     if mode == BenchmarkMode::PubSub
         && ack
         && ack_level.is_none()
@@ -385,6 +440,10 @@ fn parse_benchmark(mode: BenchmarkMode, mut args: impl Iterator<Item = String>) 
             max_bytes,
             json,
             csv,
+            stream,
+            partition_metadata,
+            partition_metadata_url,
+            partition_metadata_token,
         },
     })
 }

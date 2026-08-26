@@ -103,12 +103,15 @@ impl Morrow {
             .published_bytes_total
             .fetch_add(payload.len() as u64, Ordering::Relaxed);
         let payload_bytes = payload.len() as u64;
+        let _foreground_reservation = crate::work_scheduler::WorkReservation::try_acquire(
+            self.work_scheduler.clone(),
+            crate::work_scheduler::WorkClass::Foreground,
+            1,
+            payload_bytes,
+        )
+        .await;
         crate::broker_ensure!(
-            self.work_scheduler.lock().await.try_reserve(
-                crate::work_scheduler::WorkClass::Foreground,
-                1,
-                payload_bytes
-            ),
+            _foreground_reservation.is_some(),
             "foreground publish work budget exhausted"
         );
         let result = self
@@ -124,11 +127,6 @@ impl Morrow {
             )
             .instrument(span)
             .await;
-        self.work_scheduler.lock().await.release(
-            crate::work_scheduler::WorkClass::Foreground,
-            1,
-            payload_bytes,
-        );
         if result.is_err() {
             self.metrics
                 .rejected_operations_total
@@ -144,7 +142,7 @@ impl Morrow {
         publisher_id: u64,
         subject_name: String,
         reply_to: Option<String>,
-        headers: Vec<(String, String)>,
+        mut headers: Vec<(String, String)>,
         key: Option<Vec<u8>>,
         payload: Vec<u8>,
         producer_ack: Option<protocol::ProducerAckRequest>,
@@ -162,6 +160,16 @@ impl Morrow {
             payload.len() <= self.config.max_payload,
             "payload exceeds max payload"
         );
+        let requested_partitioning_epoch = headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("Morrow-Partitioning-Epoch"))
+            .map(|(_, value)| {
+                value
+                    .parse::<u64>()
+                    .map_err(|_| BrokerError::msg("Morrow-Partitioning-Epoch must be an integer"))
+            })
+            .transpose()?;
+        headers.retain(|(name, _)| !name.eq_ignore_ascii_case("Morrow-Partitioning-Epoch"));
         let original_subject = subject_name.clone();
         self.authorize_publish(publisher_id, &subject_name).await?;
         let producer_sequence = producer_ack.as_ref().and_then(|ack| ack.producer.clone());
@@ -298,11 +306,11 @@ impl Morrow {
 
         let stream = self.config.streams.resolve_primary(&subject_name).cloned();
         let accepted_ack = ack.is_some_and(|ack| ack.level == protocol::AckLevel::Accepted);
-        if accepted_ack {
-            self.send_producer_ack(publisher_id, ack.unwrap(), stream.is_some(), None)
-                .await?;
-        }
         if stream.is_none() {
+            if accepted_ack {
+                self.send_producer_ack(publisher_id, ack.unwrap(), false, None)
+                    .await?;
+            }
             if ack.is_some() && !accepted_ack {
                 crate::broker_bail!("NO_DURABLE_BINDING for subject {subject_name}");
             }
@@ -320,6 +328,16 @@ impl Morrow {
                 stream.partitioning.epoch,
             )
             .await;
+        if let Some(requested_epoch) = requested_partitioning_epoch {
+            crate::broker_ensure!(
+                requested_epoch == partitioning_epoch,
+                "stale partitioning epoch {requested_epoch}; current epoch is {partitioning_epoch}"
+            );
+        }
+        if accepted_ack {
+            self.send_producer_ack(publisher_id, ack.unwrap(), true, None)
+                .await?;
+        }
 
         let disk_bytes = 128u64
             .saturating_add(namespace.len() as u64)

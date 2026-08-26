@@ -15,6 +15,9 @@ pub(super) fn usage() -> CliError {
              [--max-in-flight n] [--batch-size n] [--subjects n]\n\
              [--subject-order sequential|random] [--key-cardinality n]\n\
              [--warmup 5s] [--seed n] [--queue group] [--ack]\n\
-             [--durable-id id] [--json] [--csv file]",
+             [--durable-id id] [--json] [--csv file]
+             [--stream name --partition-metadata file]
+             [--stream name --partition-metadata-url http://host:port/path
+              --partition-metadata-token token]",
     )
 }

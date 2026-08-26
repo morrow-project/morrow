@@ -772,7 +772,7 @@ impl Morrow {
             storage_permits: Arc::new(tokio::sync::Semaphore::new(MAX_BLOCKING_STORAGE_OPS)),
             storage_gate: Arc::new(tokio::sync::RwLock::new(())),
             state_shard_gates: Arc::new(
-                (0..STATE_SHARD_COUNT)
+                (0..crate::broker::state_shard_count())
                     .map(|_| tokio::sync::Mutex::new(()))
                     .collect(),
             ),
@@ -1066,18 +1066,18 @@ impl Morrow {
         move_: crate::reassignment::PlacementMove,
         source_epoch: u64,
     ) -> Result<u64> {
-        let reserved = self.work_scheduler.lock().await.try_reserve(
+        let _reservation = crate::work_scheduler::WorkReservation::try_acquire(
+            self.work_scheduler.clone(),
             crate::work_scheduler::WorkClass::Reassignment,
             0,
             0,
+        )
+        .await;
+        crate::broker_ensure!(
+            _reservation.is_some(),
+            "reassignment work budget is exhausted"
         );
-        crate::broker_ensure!(reserved, "reassignment work budget is exhausted");
         let result = self.reassignment.lock().await.begin(move_, source_epoch);
-        self.work_scheduler.lock().await.release(
-            crate::work_scheduler::WorkClass::Reassignment,
-            0,
-            0,
-        );
         result
     }
 
@@ -1086,34 +1086,34 @@ impl Morrow {
         id: u64,
         progress: crate::reassignment::ReassignmentProgress,
     ) -> Result<crate::reassignment::ReassignmentPhase> {
-        let reserved = self.work_scheduler.lock().await.try_reserve(
+        let _reservation = crate::work_scheduler::WorkReservation::try_acquire(
+            self.work_scheduler.clone(),
             crate::work_scheduler::WorkClass::Reassignment,
             0,
             0,
+        )
+        .await;
+        crate::broker_ensure!(
+            _reservation.is_some(),
+            "reassignment work budget is exhausted"
         );
-        crate::broker_ensure!(reserved, "reassignment work budget is exhausted");
         let result = self.reassignment.lock().await.advance(id, progress);
-        self.work_scheduler.lock().await.release(
-            crate::work_scheduler::WorkClass::Reassignment,
-            0,
-            0,
-        );
         result
     }
 
     pub async fn reassignment_rollback(&self, id: u64, reason: &str) -> Result<()> {
-        let reserved = self.work_scheduler.lock().await.try_reserve(
+        let _reservation = crate::work_scheduler::WorkReservation::try_acquire(
+            self.work_scheduler.clone(),
             crate::work_scheduler::WorkClass::Reassignment,
             0,
             0,
+        )
+        .await;
+        crate::broker_ensure!(
+            _reservation.is_some(),
+            "reassignment work budget is exhausted"
         );
-        crate::broker_ensure!(reserved, "reassignment work budget is exhausted");
         let result = self.reassignment.lock().await.rollback(id, reason);
-        self.work_scheduler.lock().await.release(
-            crate::work_scheduler::WorkClass::Reassignment,
-            0,
-            0,
-        );
         result
     }
 
@@ -1472,6 +1472,11 @@ impl Morrow {
             .map(|usage| usage.memory_bytes)
             .sum::<u64>();
         let cluster = self.cluster_response().await;
+        let partition_ingress = self
+            .cluster_runtime()
+            .await
+            .and_then(|cluster| cluster.partition_ingress_metrics())
+            .unwrap_or_default();
         let streams = self.streams_response().await;
         let retained_messages = streams
             .streams
@@ -1721,6 +1726,13 @@ impl Morrow {
             "morrow_state_shard_hold_us",
             &self.metrics.state_shard_hold_us,
         );
+        metrics
+            .push_str("# HELP morrow_state_shard_count Configured hot-path state shard count.\n");
+        metrics.push_str("# TYPE morrow_state_shard_count gauge\n");
+        metrics.push_str(&format!(
+            "morrow_state_shard_count {}\n",
+            self.state_shard_gates.len()
+        ));
         metrics.push_str("# HELP morrow_wal_bytes Total WAL bytes.\n");
         metrics.push_str("# TYPE morrow_wal_bytes gauge\n");
         metrics.push_str(&format!("morrow_wal_bytes {}\n", wal.total_wal_bytes));
@@ -1747,6 +1759,62 @@ impl Morrow {
         metrics.push_str(&format!(
             "morrow_wal_partition_append_batch_wait_us_max {}\n",
             wal.partition_append_batch_wait_us
+        ));
+        metrics.push_str(
+            "# HELP morrow_partition_ingress_queue_records Current records waiting in partition ingress queues.\n",
+        );
+        metrics.push_str("# TYPE morrow_partition_ingress_queue_records gauge\n");
+        metrics.push_str(&format!(
+            "morrow_partition_ingress_queue_records {}\n",
+            partition_ingress.queue_records
+        ));
+        metrics.push_str(
+            "# HELP morrow_partition_ingress_batches_total Partition ingress batches replicated.\n",
+        );
+        metrics.push_str("# TYPE morrow_partition_ingress_batches_total counter\n");
+        metrics.push_str(&format!(
+            "morrow_partition_ingress_batches_total {}\n",
+            partition_ingress.batches_total
+        ));
+        metrics.push_str(
+            "# HELP morrow_partition_ingress_records_total Records processed by partition ingress batches.\n",
+        );
+        metrics.push_str("# TYPE morrow_partition_ingress_records_total counter\n");
+        metrics.push_str(&format!(
+            "morrow_partition_ingress_records_total {}\n",
+            partition_ingress.records_total
+        ));
+        metrics.push_str(
+            "# HELP morrow_partition_ingress_bytes_total Bytes processed by partition ingress batches.\n",
+        );
+        metrics.push_str("# TYPE morrow_partition_ingress_bytes_total counter\n");
+        metrics.push_str(&format!(
+            "morrow_partition_ingress_bytes_total {}\n",
+            partition_ingress.bytes_total
+        ));
+        metrics.push_str(
+            "# HELP morrow_partition_ingress_batch_max_records Largest partition ingress batch record count.\n",
+        );
+        metrics.push_str("# TYPE morrow_partition_ingress_batch_max_records gauge\n");
+        metrics.push_str(&format!(
+            "morrow_partition_ingress_batch_max_records {}\n",
+            partition_ingress.max_batch_records
+        ));
+        metrics.push_str(
+            "# HELP morrow_partition_ingress_batch_max_bytes Largest partition ingress batch byte estimate.\n",
+        );
+        metrics.push_str("# TYPE morrow_partition_ingress_batch_max_bytes gauge\n");
+        metrics.push_str(&format!(
+            "morrow_partition_ingress_batch_max_bytes {}\n",
+            partition_ingress.max_batch_bytes
+        ));
+        metrics.push_str(
+            "# HELP morrow_partition_ingress_batch_wait_us_max Maximum partition ingress batch formation wait.\n",
+        );
+        metrics.push_str("# TYPE morrow_partition_ingress_batch_wait_us_max gauge\n");
+        metrics.push_str(&format!(
+            "morrow_partition_ingress_batch_wait_us_max {}\n",
+            partition_ingress.batch_wait_us_max
         ));
         metrics.push_str("# HELP morrow_wal_retained_messages Retained WAL messages.\n");
         metrics.push_str("# TYPE morrow_wal_retained_messages gauge\n");

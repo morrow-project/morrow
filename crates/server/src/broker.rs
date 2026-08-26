@@ -54,6 +54,15 @@ const ROUTE_FRAME_READ_TIMEOUT_MS: u64 = 5_000;
 const MAX_ROUTE_FRAME: usize = 2 * 1024 * 1024;
 const MAX_BLOCKING_STORAGE_OPS: usize = 64;
 const STATE_SHARD_COUNT: usize = 64;
+const MAX_STATE_SHARD_COUNT: usize = 4_096;
+
+pub(crate) fn state_shard_count() -> usize {
+    std::env::var("MORROW_STATE_SHARD_COUNT")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(STATE_SHARD_COUNT)
+        .clamp(1, MAX_STATE_SHARD_COUNT)
+}
 
 mod broker;
 mod broker_authorization;

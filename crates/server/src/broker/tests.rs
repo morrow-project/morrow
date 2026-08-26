@@ -715,3 +715,4 @@ mod startup_assignment_tests;
 mod startup_tests;
 mod state_sharding_tests;
 mod stream_retention_tests;
+mod wal_runtime_tests;

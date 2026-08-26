@@ -219,12 +219,17 @@ impl Morrow {
     }
 
     async fn compact_stream_segments(&self) -> Result<()> {
-        let reserved = self.work_scheduler.lock().await.try_reserve(
+        let _reservation = crate::work_scheduler::WorkReservation::try_acquire(
+            self.work_scheduler.clone(),
             crate::work_scheduler::WorkClass::Compaction,
             0,
             0,
+        )
+        .await;
+        crate::broker_ensure!(
+            _reservation.is_some(),
+            "compaction work budget is exhausted"
         );
-        crate::broker_ensure!(reserved, "compaction work budget is exhausted");
         let _storage_operation = self.storage_gate.write().await;
         let visible_offsets = {
             let inner = self.inner.lock().await;
@@ -248,11 +253,6 @@ impl Morrow {
         let permit = match permit {
             Ok(permit) => permit,
             Err(_) => {
-                self.work_scheduler.lock().await.release(
-                    crate::work_scheduler::WorkClass::Compaction,
-                    0,
-                    0,
-                );
                 return Err(BrokerError::msg("storage worker pool closed"));
             }
         };
@@ -268,11 +268,6 @@ impl Morrow {
                 err,
             )),
         };
-        self.work_scheduler.lock().await.release(
-            crate::work_scheduler::WorkClass::Compaction,
-            0,
-            0,
-        );
         result
     }
 

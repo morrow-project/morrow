@@ -21,6 +21,7 @@ pub struct RaftRuntime {
     pub(super) work_scheduler: Arc<tokio::sync::Mutex<crate::work_scheduler::WorkScheduler>>,
     pub(super) partition_ingress_queues:
         Arc<tokio::sync::Mutex<HashMap<String, super::partition_runtime::PartitionIngressQueue>>>,
+    pub(super) partition_ingress_metrics: Arc<super::partition_runtime::PartitionIngressMetrics>,
     pub(super) metadata_bootstrap_gate: Arc<tokio::sync::Mutex<()>>,
 }
 #[derive(Debug, Clone)]
@@ -38,6 +39,12 @@ pub(super) struct RaftTlsRuntime {
     pub(super) handshake_timeout_ms: u64,
 }
 impl RaftRuntime {
+    pub(crate) fn partition_ingress_metrics(
+        &self,
+    ) -> crate::raft::partition_runtime::PartitionIngressMetricsSnapshot {
+        self.partition_ingress_metrics.snapshot()
+    }
+
     pub(crate) async fn register_with_controller(
         &self,
         controller_id: u64,
@@ -266,6 +273,7 @@ impl RaftRuntime {
             data_clients: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             work_scheduler,
             partition_ingress_queues: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            partition_ingress_metrics: Arc::new(Default::default()),
             metadata_bootstrap_gate: Arc::new(tokio::sync::Mutex::new(())),
         })
     }

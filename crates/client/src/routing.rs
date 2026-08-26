@@ -3,6 +3,7 @@
 use serde::Deserialize;
 use std::{
     collections::{HashMap, VecDeque},
+    future::Future,
     net::SocketAddr,
 };
 
@@ -101,15 +102,36 @@ impl RoutedClient {
         payload: &[u8],
         key: Option<&str>,
     ) -> super::error::Result<()> {
-        let address = self.route_address(stream, subject, key);
+        self.publish_to_stream_with_headers(stream, subject, payload, key, &[])
+            .await
+    }
+
+    /// Publish directly to the selected partition leader while preserving
+    /// application headers. The metadata cache and bounded connection pool are
+    /// shared with the headerless convenience method above.
+    pub async fn publish_to_stream_with_headers(
+        &mut self,
+        stream: &str,
+        subject: &str,
+        payload: &[u8],
+        key: Option<&str>,
+        headers: &[(String, String)],
+    ) -> super::error::Result<()> {
+        let (address, epoch) = self.route_target(stream, subject, key);
+        let headers = routed_headers(headers, epoch);
         let mut client = self.take_client(address).await?;
         let result = match key {
             Some(key) => {
                 client
-                    .publish_with_key_and_headers(subject, None, payload, key, &[])
+                    .publish_with_key_and_headers(subject, None, payload, key, &headers)
                     .await
             }
-            None => client.publish(subject, payload).await,
+            None if headers.is_empty() => client.publish(subject, payload).await,
+            None => {
+                client
+                    .publish_with_headers(subject, None, payload, &headers)
+                    .await
+            }
         };
         self.return_client(address, client);
         result
@@ -124,9 +146,34 @@ impl RoutedClient {
         msg_id: &str,
         key: Option<&str>,
     ) -> super::error::Result<ProducerAck> {
-        let address = self.route_address(stream, subject, key);
+        self.publish_to_stream_with_qos_and_headers(
+            stream,
+            subject,
+            payload,
+            level,
+            msg_id,
+            key,
+            &[],
+        )
+        .await
+    }
+
+    /// Acknowledged direct publish with application headers. A stable message
+    /// ID still makes the bounded stale-route retry idempotent.
+    pub async fn publish_to_stream_with_qos_and_headers(
+        &mut self,
+        stream: &str,
+        subject: &str,
+        payload: &[u8],
+        level: protocol::AckLevel,
+        msg_id: &str,
+        key: Option<&str>,
+        headers: &[(String, String)],
+    ) -> super::error::Result<ProducerAck> {
+        let (address, epoch) = self.route_target(stream, subject, key);
+        let headers = routed_headers(headers, epoch);
         let result = self
-            .publish_qos_once(address, subject, payload, level, msg_id, key)
+            .publish_qos_once(address, subject, payload, level, msg_id, key, &headers)
             .await;
         match result {
             Ok(ack) => Ok(ack),
@@ -138,14 +185,82 @@ impl RoutedClient {
                 // not have this retry behavior.
                 self.clients.remove(&address);
                 self.cache.invalidate(stream, u64::MAX);
-                let retry_address = self.route_address(stream, subject, key);
-                self.publish_qos_once(retry_address, subject, payload, level, msg_id, key)
+                let (retry_address, retry_epoch) = self.route_target(stream, subject, key);
+                let retry_headers = routed_headers(&headers, retry_epoch);
+                self.publish_qos_once(
+                    retry_address,
+                    subject,
+                    payload,
+                    level,
+                    msg_id,
+                    key,
+                    &retry_headers,
+                )
                     .await
                     .map_err(|retry_error| {
                         super::error::ClientError::msg(format!(
                             "publish failed after one metadata refresh retry: {first_error}; retry: {retry_error}"
                         ))
                     })
+            }
+        }
+    }
+
+    /// Refresh metadata once after a bounded publish failure, then retry with
+    /// the stable producer identity. The caller owns the metadata transport so
+    /// this remains usable with HTTP, an embedded control client, or a cached
+    /// file; the routing layer only enforces one refresh attempt.
+    pub async fn publish_to_stream_with_qos_and_headers_refresh<F, Fut>(
+        &mut self,
+        stream: &str,
+        subject: &str,
+        payload: &[u8],
+        level: protocol::AckLevel,
+        msg_id: &str,
+        key: Option<&str>,
+        headers: &[(String, String)],
+        refresh: F,
+    ) -> super::error::Result<ProducerAck>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<Vec<u8>, String>>,
+    {
+        let (address, epoch) = self.route_target(stream, subject, key);
+        let headers = routed_headers(headers, epoch);
+        match self
+            .publish_qos_once(address, subject, payload, level, msg_id, key, &headers)
+            .await
+        {
+            Ok(ack) => Ok(ack),
+            Err(first_error) => {
+                self.cache.invalidate(stream, u64::MAX);
+                let metadata = refresh().await.map_err(|refresh_error| {
+                    super::error::ClientError::msg(format!(
+                        "publish failed and metadata refresh failed: {first_error}; refresh: {refresh_error}"
+                    ))
+                })?;
+                self.apply_metadata_json(&metadata).map_err(|error| {
+                    super::error::ClientError::msg(format!(
+                        "publish failed and refreshed metadata was invalid: {first_error}; metadata: {error}"
+                    ))
+                })?;
+                let (retry_address, retry_epoch) = self.route_target(stream, subject, key);
+                let retry_headers = routed_headers(&headers, retry_epoch);
+                self.publish_qos_once(
+                    retry_address,
+                    subject,
+                    payload,
+                    level,
+                    msg_id,
+                    key,
+                    &retry_headers,
+                )
+                .await
+                .map_err(|retry_error| {
+                    super::error::ClientError::msg(format!(
+                        "publish failed after metadata refresh: {first_error}; retry: {retry_error}"
+                    ))
+                })
             }
         }
     }
@@ -158,10 +273,11 @@ impl RoutedClient {
         level: protocol::AckLevel,
         msg_id: &str,
         key: Option<&str>,
+        headers: &[(String, String)],
     ) -> super::error::Result<ProducerAck> {
         let mut client = self.take_client(address).await?;
         let result = client
-            .publish_with_qos_and_key(subject, None, payload, level, msg_id, key)
+            .publish_with_qos_key_and_headers(subject, None, payload, level, msg_id, key, headers)
             .await;
         if result.is_ok() {
             self.return_client(address, client);
@@ -169,13 +285,30 @@ impl RoutedClient {
         result
     }
 
-    fn route_address(&mut self, stream: &str, subject: &str, key: Option<&str>) -> SocketAddr {
+    fn route_target(
+        &mut self,
+        stream: &str,
+        subject: &str,
+        key: Option<&str>,
+    ) -> (SocketAddr, Option<u64>) {
         let sticky = self.sticky;
         self.sticky = self.sticky.wrapping_add(1);
-        self.cache
+        let partitioning_epoch = self
+            .cache
+            .streams
+            .get(stream)
+            .map(|metadata| metadata.partitioning_epoch);
+        let leader = self
+            .cache
             .route(stream, subject, key.map(str::as_bytes), sticky)
-            .and_then(|leader| leader.address.parse().ok())
-            .unwrap_or(self.options.addr)
+            .cloned();
+        (
+            leader
+                .as_ref()
+                .and_then(|leader| leader.address.parse().ok())
+                .unwrap_or(self.options.addr),
+            leader.and(partitioning_epoch),
+        )
     }
 
     async fn take_client(&mut self, address: SocketAddr) -> super::error::Result<Client> {
@@ -192,6 +325,18 @@ impl RoutedClient {
             self.clients.insert(address, client);
         }
     }
+}
+
+fn routed_headers(headers: &[(String, String)], epoch: Option<u64>) -> Vec<(String, String)> {
+    let mut routed = headers
+        .iter()
+        .filter(|(name, _)| !name.eq_ignore_ascii_case("Morrow-Partitioning-Epoch"))
+        .cloned()
+        .collect::<Vec<_>>();
+    if let Some(epoch) = epoch {
+        routed.push(("Morrow-Partitioning-Epoch".to_string(), epoch.to_string()));
+    }
+    routed
 }
 
 impl PartitionLeaderCache {

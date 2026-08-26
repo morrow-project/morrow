@@ -4,6 +4,10 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
+};
 
 #[path = "bench/report.rs"]
 mod report;
@@ -56,6 +60,9 @@ pub(super) struct ResultConfiguration {
     durable_id: Option<String>,
     timeout_ms: u64,
     max_bytes: usize,
+    stream: Option<String>,
+    partition_metadata: Option<String>,
+    partition_metadata_url: Option<String>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -132,11 +139,25 @@ pub(super) async fn run_benchmark(
         || "generated".to_string(),
         |path| path.display().to_string(),
     );
+    let partition_metadata = match (
+        options.partition_metadata.as_ref(),
+        options.partition_metadata_url.as_deref(),
+    ) {
+        (Some(path), None) => Some(Arc::new(fs::read(path).map_err(|error| {
+            CliError::with_source("reading benchmark partition metadata", error)
+        })?)),
+        (None, Some(url)) => Some(Arc::new(
+            fetch_partition_metadata(url, options.partition_metadata_token.as_deref()).await?,
+        )),
+        (None, None) => None,
+        (Some(_), Some(_)) => unreachable!("benchmark parser rejects both metadata sources"),
+    };
     let workload = PreparedWorkload {
         target: target.clone(),
         payload: Arc::new(payload),
         options: options.clone(),
         measure_delivery: mode == BenchmarkMode::PubSub,
+        partition_metadata,
     };
     let mut warmup_operations = 0;
     if options.warmup_ms > 0 {
@@ -161,6 +182,58 @@ pub(super) async fn run_benchmark(
         warmup_operations,
         wall_elapsed,
     )
+}
+
+async fn fetch_partition_metadata(url: &str, token: Option<&str>) -> Result<Vec<u8>> {
+    let authority_and_path = url
+        .strip_prefix("http://")
+        .ok_or_else(|| CliError::msg("--partition-metadata-url must use http://"))?;
+    let (authority, path) = match authority_and_path.split_once('/') {
+        Some((authority, path)) => (authority, format!("/{path}")),
+        None => (authority_and_path, "/partition-metadata".to_string()),
+    };
+    if authority.is_empty() || authority.contains('@') {
+        return Err(CliError::msg(
+            "--partition-metadata-url has an invalid authority",
+        ));
+    }
+    let mut stream = TcpStream::connect(authority).await.map_err(|error| {
+        CliError::with_source("connecting to partition metadata endpoint", error)
+    })?;
+    let mut request = format!("GET {path} HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\n");
+    if let Some(token) = token {
+        if token.bytes().any(|byte| matches!(byte, b'\r' | b'\n')) {
+            return Err(CliError::msg(
+                "--partition-metadata-token contains a newline",
+            ));
+        }
+        request.push_str(&format!("Authorization: Bearer {token}\r\n"));
+    }
+    request.push_str("\r\n");
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .map_err(|error| CliError::with_source("requesting partition metadata", error))?;
+    let mut response = Vec::new();
+    stream
+        .take(4 * 1024 * 1024)
+        .read_to_end(&mut response)
+        .await
+        .map_err(|error| CliError::with_source("reading partition metadata response", error))?;
+    let separator = response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .ok_or_else(|| CliError::msg("partition metadata response had no HTTP headers"))?;
+    let status = response[..separator]
+        .split(|byte| *byte == b'\n')
+        .next()
+        .unwrap_or_default();
+    if !(status.starts_with(b"HTTP/1.1 200 ") || status.starts_with(b"HTTP/1.0 200 ")) {
+        return Err(CliError::msg(
+            "partition metadata endpoint returned a non-success status",
+        ));
+    }
+    Ok(response[separator + 4..].to_vec())
 }
 
 fn build_result(
@@ -299,6 +372,12 @@ fn build_result(
             durable_id: options.durable_id,
             timeout_ms: options.timeout_ms,
             max_bytes: options.max_bytes,
+            stream: options.stream,
+            partition_metadata: options
+                .partition_metadata
+                .as_ref()
+                .map(|path| path.display().to_string()),
+            partition_metadata_url: options.partition_metadata_url,
         },
         aggregate,
         roles,

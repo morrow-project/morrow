@@ -74,6 +74,9 @@ impl PartitionLogSet {
             return Ok(());
         }
         let limit = max_dynamic_partitions() as u64;
+        if self.dynamic_partition_count.load(Ordering::Acquire) >= limit {
+            self.evict_idle_dynamic_partition()?;
+        }
         let reserved = self
             .dynamic_partition_count
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
@@ -107,6 +110,36 @@ impl PartitionLogSet {
             .lock()
             .expect("dynamic partition lock poisoned")
             .insert(key, std::sync::Arc::new(Mutex::new(log)));
+        Ok(())
+    }
+
+    /// Drop one idle dynamic partition object when the bounded descriptor
+    /// budget is full. Durable records remain on disk and are reopened lazily
+    /// on the next activation; dirty or actively used partitions are retained.
+    pub(crate) fn evict_idle_dynamic_partition(&self) -> Result<()> {
+        let dirty = self
+            .dirty
+            .lock()
+            .expect("dirty partition lock poisoned")
+            .clone();
+        let mut logs = self
+            .dynamic_logs
+            .lock()
+            .expect("dynamic partition lock poisoned");
+        let candidate = logs.iter().find_map(|(key, log)| {
+            if dirty.contains(key) {
+                return None;
+            }
+            let log = log.lock().expect("dynamic partition log lock poisoned");
+            if log.has_active_resource() {
+                return None;
+            }
+            Some(key.clone())
+        });
+        if let Some(key) = candidate {
+            logs.remove(&key);
+            self.dynamic_partition_count.fetch_sub(1, Ordering::AcqRel);
+        }
         Ok(())
     }
 

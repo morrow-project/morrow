@@ -24,6 +24,21 @@ async fn partition_expansion_is_epoch_fenced_by_broker_runtime() {
         (8, 2)
     );
     assert!(broker.partition_expansion_epoch("orders", 2).await.unwrap());
+
+    let mut stale = TestClient::connect_durable(&broker, "stale-router", 25).await;
+    stale
+        .publish_hpub(
+            "orders/created",
+            &[("Morrow-Partitioning-Epoch", "1")],
+            b"stale",
+        )
+        .await;
+    assert!(
+        stale
+            .read_frame()
+            .await
+            .contains("stale partitioning epoch")
+    );
 }
 
 #[tokio::test]

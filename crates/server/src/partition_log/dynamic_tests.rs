@@ -2,7 +2,7 @@ use super::*;
 use crate::stream::{
     PartitionFallback, PartitioningPolicy, PartitioningStrategy, RetentionPolicy, StoragePolicy,
 };
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, sync::atomic::Ordering};
 use tempfile::TempDir;
 
 #[test]
@@ -89,4 +89,28 @@ fn recovery_status_distinguishes_configured_and_assigned_partitions() {
 #[test]
 fn dynamic_partition_limit_is_bounded() {
     assert_eq!(super::dynamic::max_dynamic_partitions(), 4_096);
+}
+
+#[test]
+fn idle_dynamic_partition_can_be_evicted_and_reopened() {
+    let dir = TempDir::new().unwrap();
+    let stream = StreamDefinition {
+        name: StreamId::new("orders").unwrap(),
+        subjects: vec!["orders/**".into()],
+        partitions: 1,
+        partitioning: PartitioningPolicy::default(),
+        storage: StoragePolicy::default(),
+        retention: RetentionPolicy::default(),
+    };
+    let catalog = StreamCatalog::new(vec![stream]).unwrap();
+    let (logs, _) = PartitionLogSet::open(dir.path(), &catalog, 64 * 1024).unwrap();
+    logs.activate_partition("orders", PartitionId(1)).unwrap();
+    logs.activate_partition("orders", PartitionId(2)).unwrap();
+    logs.flush_partition("orders", PartitionId(1)).unwrap();
+    logs.flush_partition("orders", PartitionId(2)).unwrap();
+    assert_eq!(logs.dynamic_partition_count.load(Ordering::Acquire), 2);
+    logs.evict_idle_dynamic_partition().unwrap();
+    assert_eq!(logs.dynamic_partition_count.load(Ordering::Acquire), 1);
+    logs.activate_partition("orders", PartitionId(3)).unwrap();
+    assert_eq!(logs.dynamic_partition_count.load(Ordering::Acquire), 2);
 }
