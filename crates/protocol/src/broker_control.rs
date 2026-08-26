@@ -84,6 +84,7 @@ pub enum BrokerControlFrame {
     Register(BrokerRegistration),
     RegisterAccepted(RegistrationAccepted),
     Heartbeat(BrokerHeartbeat),
+    HeartbeatAccepted,
     MetadataUpdate(MetadataUpdate),
     MetadataSnapshot(MetadataUpdate),
     Error(ControlError),
@@ -113,22 +114,18 @@ impl BrokerControlFrame {
         }
         let frame: Self =
             ciborium::de::from_reader(&encoded[4..]).map_err(ControlCodecError::Decode)?;
-        if let Some(update) = match &frame {
-            Self::MetadataUpdate(update) | Self::MetadataSnapshot(update) => Some(update),
-            Self::RegisterAccepted(accepted) => accepted.updates.first(),
-            _ => None,
-        } {
-            if !update.verify()
-                || match &frame {
-                    Self::RegisterAccepted(accepted) => accepted
-                        .updates
-                        .windows(2)
-                        .any(|w| w[0].revision >= w[1].revision),
-                    _ => false,
-                }
-            {
-                return Err(ControlCodecError::ChecksumMismatch);
+        let updates = match &frame {
+            Self::MetadataUpdate(update) | Self::MetadataSnapshot(update) => {
+                std::slice::from_ref(update)
             }
+            Self::RegisterAccepted(accepted) => accepted.updates.as_slice(),
+            _ => &[],
+        };
+        if updates.iter().any(|update| !update.verify())
+            || matches!(&frame, Self::RegisterAccepted(accepted)
+                if accepted.updates.windows(2).any(|w| w[0].revision >= w[1].revision))
+        {
+            return Err(ControlCodecError::ChecksumMismatch);
         }
         Ok(frame)
     }

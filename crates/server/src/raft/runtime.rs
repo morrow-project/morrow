@@ -32,6 +32,32 @@ pub(super) struct RaftTlsRuntime {
     pub(super) handshake_timeout_ms: u64,
 }
 impl RaftRuntime {
+    pub(crate) async fn register_with_controller(
+        &self,
+        controller_id: u64,
+        registration: protocol::broker_control::BrokerRegistration,
+    ) -> Result<protocol::broker_control::RegistrationAccepted> {
+        let response = self
+            .data_client(controller_id)
+            .await?
+            .broker_control(protocol::broker_control::BrokerControlFrame::Register(
+                registration,
+            ))
+            .await?;
+        match response {
+            protocol::broker_control::BrokerControlFrame::RegisterAccepted(accepted) => {
+                Ok(accepted)
+            }
+            protocol::broker_control::BrokerControlFrame::Error(error) => {
+                Err(BrokerError::msg(format!(
+                    "broker registration rejected ({}): {}",
+                    error.code, error.message
+                )))
+            }
+            _ => Err(BrokerError::msg("unexpected broker registration response")),
+        }
+    }
+
     pub(crate) async fn open(
         config: &ClusterConfig,
         tls_enabled: bool,
@@ -205,7 +231,12 @@ impl RaftRuntime {
         Ok(client)
     }
 
-    pub fn spawn_listener(&self, listener: TcpListener) {
+    pub(crate) fn spawn_listener(
+        &self,
+        listener: TcpListener,
+        broker_control: crate::broker::BrokerControlRegistry,
+        accepts_broker_control: bool,
+    ) {
         let raft = self.raft.clone();
         let state_machine = self.state_machine.clone();
         let auth_token = self.auth_token.clone();
@@ -221,6 +252,8 @@ impl RaftRuntime {
                 partition_data,
                 tls,
                 quotas,
+                broker_control,
+                accepts_broker_control,
             )
             .await
             {

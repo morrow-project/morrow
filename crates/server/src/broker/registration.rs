@@ -8,7 +8,7 @@ use std::collections::VecDeque;
 const DEFAULT_UPDATE_WINDOW: usize = 256;
 
 #[derive(Clone)]
-pub(super) struct BrokerControlRegistry {
+pub(crate) struct BrokerControlRegistry {
     inner: Arc<Mutex<BrokerControlRegistryState>>,
 }
 
@@ -65,7 +65,7 @@ impl std::fmt::Display for RegistrationError {
 impl std::error::Error for RegistrationError {}
 
 impl BrokerControlRegistry {
-    pub(super) fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::with_update_window(DEFAULT_UPDATE_WINDOW)
     }
 
@@ -81,7 +81,7 @@ impl BrokerControlRegistry {
         }
     }
 
-    pub(super) async fn register(
+    pub(crate) async fn register(
         &self,
         registration: BrokerRegistration,
     ) -> std::result::Result<RegistrationResult, RegistrationError> {
@@ -144,7 +144,7 @@ impl BrokerControlRegistry {
         })
     }
 
-    pub(super) async fn heartbeat(
+    pub(crate) async fn heartbeat(
         &self,
         heartbeat: BrokerHeartbeat,
     ) -> std::result::Result<(), RegistrationError> {
