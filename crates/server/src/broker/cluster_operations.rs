@@ -64,6 +64,11 @@ impl Morrow {
                 .map(|address| address.to_string())
         });
         let heartbeat_interval_ms = cluster_config.heartbeat_interval_ms;
+        tracing::info!(
+            broker_id,
+            controller_id,
+            "starting broker control registration"
+        );
         tokio::spawn(async move {
             let incarnation = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -74,6 +79,12 @@ impl Morrow {
             let mut session_id = None;
             let mut interval = tokio::time::interval(Duration::from_millis(heartbeat_interval_ms));
             loop {
+                tracing::trace!(
+                    broker_id,
+                    controller_id,
+                    registered = session_id.is_some(),
+                    "broker control registration tick"
+                );
                 if let Some(session) = session_id {
                     let heartbeat = protocol::broker_control::BrokerHeartbeat {
                         protocol_version: protocol::broker_control::BROKER_CONTROL_PROTOCOL_VERSION,
@@ -90,7 +101,13 @@ impl Morrow {
                         Ok(accepted) => {
                             last_revision = accepted.controller_revision;
                         }
-                        Err(_) => {
+                        Err(error) => {
+                            tracing::debug!(
+                                broker_id,
+                                controller_id,
+                                ?error,
+                                "broker heartbeat failed"
+                            );
                             session_id = None;
                         }
                     }
@@ -106,12 +123,22 @@ impl Morrow {
                         security_references: Vec::new(),
                         last_revision,
                     };
-                    if let Ok(result) = runtime
+                    match runtime
                         .register_with_controller(controller_id, registration)
                         .await
                     {
-                        session_id = Some(result.session_id);
-                        last_revision = result.controller_revision;
+                        Ok(result) => {
+                            session_id = Some(result.session_id);
+                            last_revision = result.controller_revision;
+                        }
+                        Err(error) => {
+                            tracing::debug!(
+                                broker_id,
+                                controller_id,
+                                ?error,
+                                "broker registration failed"
+                            );
+                        }
                     }
                 }
                 interval.tick().await;
