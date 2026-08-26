@@ -229,6 +229,9 @@ pub struct WalMetrics {
     pub partition_append_batches: u64,
     pub partition_append_records: u64,
     pub partition_append_bytes: u64,
+    pub partition_append_batch_max_records: u64,
+    pub partition_append_batch_max_bytes: u64,
+    pub partition_append_batch_wait_us: u64,
     pub flushes: u64,
 }
 
@@ -253,6 +256,9 @@ pub struct WalStatus {
     pub partition_append_batches: u64,
     pub partition_append_records: u64,
     pub partition_append_bytes: u64,
+    pub partition_append_batch_max_records: u64,
+    pub partition_append_batch_max_bytes: u64,
+    pub partition_append_batch_wait_us: u64,
     pub flushes: u64,
 }
 

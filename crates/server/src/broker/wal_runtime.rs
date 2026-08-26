@@ -493,6 +493,7 @@ fn wal_worker(mut wal: Wal, receiver: mpsc::Receiver<WalCommand>) {
         };
         match command {
             WalCommand::PartitionAppend(record, response) => {
+                let batch_started = std::time::Instant::now();
                 let partition = (record.stream.clone(), record.partition);
                 let mut records = vec![record];
                 let mut responses = vec![response];
@@ -553,7 +554,11 @@ fn wal_worker(mut wal: Wal, receiver: mpsc::Receiver<WalCommand>) {
                             .then_some(partition_append_estimated_bytes(record) as u64)
                     })
                     .sum();
-                wal.note_partition_append_batch(successful_records as u64, successful_bytes);
+                wal.note_partition_append_batch_timing(
+                    successful_records as u64,
+                    successful_bytes,
+                    batch_started.elapsed().as_micros() as u64,
+                );
                 for (response, outcome) in responses.into_iter().zip(outcomes) {
                     let _ = response.send(outcome);
                 }

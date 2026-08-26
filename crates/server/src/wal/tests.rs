@@ -82,6 +82,8 @@ fn reports_partition_batch_and_flush_metrics() {
     assert_eq!(status.partition_append_batches, 1);
     assert_eq!(status.partition_append_records, 2);
     assert_eq!(status.partition_append_bytes, 128);
+    assert_eq!(status.partition_append_batch_max_records, 2);
+    assert_eq!(status.partition_append_batch_max_bytes, 128);
     assert_eq!(status.flushes, 1);
 }
 

@@ -39,7 +39,9 @@ ordering remains per record, so an accepted record cannot be lost if a client
 disconnects while a flush epoch is open.
 
 The `/wal` administrative status also reports `partition_append_batches`,
-`partition_append_records`, `partition_append_bytes`, and `flushes`. These
+`partition_append_records`, `partition_append_bytes`,
+`partition_append_batch_max_records`, `partition_append_batch_max_bytes`,
+`partition_append_batch_wait_us`, and `flushes`. These
 counters make it possible to verify that a workload is sharing append and
 durability work rather than merely measuring concurrent single-record writes.
 

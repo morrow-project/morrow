@@ -1682,6 +1682,30 @@ impl Morrow {
         metrics.push_str("# HELP morrow_wal_bytes Total WAL bytes.\n");
         metrics.push_str("# TYPE morrow_wal_bytes gauge\n");
         metrics.push_str(&format!("morrow_wal_bytes {}\n", wal.total_wal_bytes));
+        metrics.push_str("# HELP morrow_wal_partition_append_batches_total Partition append batches written to the WAL.\n");
+        metrics.push_str("# TYPE morrow_wal_partition_append_batches_total counter\n");
+        metrics.push_str(&format!(
+            "morrow_wal_partition_append_batches_total {}\n",
+            wal.partition_append_batches
+        ));
+        metrics.push_str("# HELP morrow_wal_partition_append_batch_max_records Largest partition append batch record count.\n");
+        metrics.push_str("# TYPE morrow_wal_partition_append_batch_max_records gauge\n");
+        metrics.push_str(&format!(
+            "morrow_wal_partition_append_batch_max_records {}\n",
+            wal.partition_append_batch_max_records
+        ));
+        metrics.push_str("# HELP morrow_wal_partition_append_batch_max_bytes Largest partition append batch byte estimate.\n");
+        metrics.push_str("# TYPE morrow_wal_partition_append_batch_max_bytes gauge\n");
+        metrics.push_str(&format!(
+            "morrow_wal_partition_append_batch_max_bytes {}\n",
+            wal.partition_append_batch_max_bytes
+        ));
+        metrics.push_str("# HELP morrow_wal_partition_append_batch_wait_us_max Maximum append batch formation wait in microseconds.\n");
+        metrics.push_str("# TYPE morrow_wal_partition_append_batch_wait_us_max gauge\n");
+        metrics.push_str(&format!(
+            "morrow_wal_partition_append_batch_wait_us_max {}\n",
+            wal.partition_append_batch_wait_us
+        ));
         metrics.push_str("# HELP morrow_wal_retained_messages Retained WAL messages.\n");
         metrics.push_str("# TYPE morrow_wal_retained_messages gauge\n");
         metrics.push_str(&format!(

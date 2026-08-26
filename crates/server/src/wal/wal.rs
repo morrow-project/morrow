@@ -135,6 +135,15 @@ impl Wal {
     }
 
     pub(crate) fn note_partition_append_batch(&mut self, records: u64, bytes: u64) {
+        self.note_partition_append_batch_timing(records, bytes, 0);
+    }
+
+    pub(crate) fn note_partition_append_batch_timing(
+        &mut self,
+        records: u64,
+        bytes: u64,
+        wait_us: u64,
+    ) {
         self.metrics.partition_append_batches =
             self.metrics.partition_append_batches.saturating_add(1);
         self.metrics.partition_append_records = self
@@ -143,6 +152,12 @@ impl Wal {
             .saturating_add(records);
         self.metrics.partition_append_bytes =
             self.metrics.partition_append_bytes.saturating_add(bytes);
+        self.metrics.partition_append_batch_max_records =
+            self.metrics.partition_append_batch_max_records.max(records);
+        self.metrics.partition_append_batch_max_bytes =
+            self.metrics.partition_append_batch_max_bytes.max(bytes);
+        self.metrics.partition_append_batch_wait_us =
+            self.metrics.partition_append_batch_wait_us.max(wait_us);
     }
 
     pub fn append_consumer_cursor(&mut self, record: &ConsumerCursorRecord) -> Result<()> {
@@ -356,6 +371,9 @@ impl Wal {
             partition_append_batches: self.metrics.partition_append_batches,
             partition_append_records: self.metrics.partition_append_records,
             partition_append_bytes: self.metrics.partition_append_bytes,
+            partition_append_batch_max_records: self.metrics.partition_append_batch_max_records,
+            partition_append_batch_max_bytes: self.metrics.partition_append_batch_max_bytes,
+            partition_append_batch_wait_us: self.metrics.partition_append_batch_wait_us,
             flushes: self.metrics.flushes,
         }
     }
