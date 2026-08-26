@@ -557,12 +557,12 @@ impl Morrow {
                 DurablePublishFlushMode::SleepThenFlush => {
                     tokio::time::sleep(self.config.fsync_interval()).await;
                     self.flush_partition(&record).await?;
-                    self.wal.flush().await?;
+                    self.wal.flush_grouped(self.config.fsync_interval()).await?;
                 }
                 #[cfg(test)]
                 DurablePublishFlushMode::FlushImmediately => {
                     self.flush_partition(&record).await?;
-                    self.wal.flush().await?;
+                    self.wal.flush_grouped(Duration::ZERO).await?;
                 }
             }
         }

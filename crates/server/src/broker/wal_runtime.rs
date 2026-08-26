@@ -8,6 +8,16 @@ const WAL_QUEUE_CAPACITY: usize = 128;
 pub(super) struct WalRuntime {
     sender: SyncSender<WalCommand>,
     next_publish_seq: Arc<AtomicU64>,
+    flush_coordinator: Arc<FlushCoordinator>,
+}
+
+struct FlushCoordinator {
+    state: tokio::sync::Mutex<FlushState>,
+}
+
+struct FlushState {
+    running: bool,
+    waiters: Vec<tokio::sync::oneshot::Sender<Result<()>>>,
 }
 
 enum WalCommand {
@@ -77,6 +87,12 @@ impl WalRuntime {
         Self {
             sender,
             next_publish_seq: Arc::new(AtomicU64::new(next_publish_seq)),
+            flush_coordinator: Arc::new(FlushCoordinator {
+                state: tokio::sync::Mutex::new(FlushState {
+                    running: false,
+                    waiters: Vec::new(),
+                }),
+            }),
         }
     }
 
@@ -275,6 +291,43 @@ impl WalRuntime {
             .map_err(|err| BrokerError::with_source("WAL worker join failed", err))?
     }
 
+    /// Join concurrent durability requests into one WAL barrier. The first
+    /// caller opens a commit epoch; arrivals during the configured interval
+    /// share its flush and all receive the same result.
+    pub(super) async fn flush_grouped(&self, interval: Duration) -> Result<()> {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let start_worker = {
+            let mut state = self.flush_coordinator.state.lock().await;
+            state.waiters.push(sender);
+            if state.running {
+                false
+            } else {
+                state.running = true;
+                true
+            }
+        };
+        if start_worker {
+            let runtime = self.clone();
+            let coordinator = self.flush_coordinator.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(interval).await;
+                let result = runtime.flush().await;
+                let mut state = coordinator.state.lock().await;
+                state.running = false;
+                for waiter in state.waiters.drain(..) {
+                    let outcome = match &result {
+                        Ok(()) => Ok(()),
+                        Err(error) => Err(BrokerError::msg(error.to_string())),
+                    };
+                    let _ = waiter.send(outcome);
+                }
+            });
+        }
+        receiver
+            .await
+            .map_err(|_| BrokerError::msg("WAL group-commit coordinator stopped"))?
+    }
+
     pub(super) async fn checkpoint(
         &self,
         messages: Vec<PublishRecord>,
@@ -428,5 +481,28 @@ fn wal_worker(mut wal: Wal, receiver: mpsc::Receiver<WalCommand>) {
                 let _ = response.send(Ok(wal.status(retained_message_count, consumer_count)));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn concurrent_flushes_join_one_group_commit_epoch() {
+        let directory = tempfile::tempdir().unwrap();
+        let (wal, _) = Wal::open(directory.path(), Duration::from_millis(1), 96).unwrap();
+        let runtime = WalRuntime::new(wal);
+        let first = runtime.clone();
+        let second = runtime.clone();
+        let (left, right) = tokio::join!(
+            first.flush_grouped(Duration::from_millis(5)),
+            second.flush_grouped(Duration::from_millis(5)),
+        );
+        left.unwrap();
+        right.unwrap();
+        let state = runtime.flush_coordinator.state.lock().await;
+        assert!(!state.running);
+        assert!(state.waiters.is_empty());
     }
 }
