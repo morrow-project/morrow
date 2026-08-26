@@ -463,10 +463,15 @@ async fn run_partition_ingress_queue(
         let max_records = partition_ingress_batch_records();
         let max_bytes = partition_ingress_batch_bytes();
         let delay = tokio::time::Duration::from_millis(partition_ingress_batch_delay_ms());
+        let deadline = tokio::time::Instant::now() + delay;
         let mut bytes = data_append_envelope_bytes(&first.envelope);
         let mut items = vec![first];
         while items.len() < max_records {
-            let Ok(Some(candidate)) = tokio::time::timeout(delay, receiver.recv()).await else {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            let Ok(Some(candidate)) = tokio::time::timeout(remaining, receiver.recv()).await else {
                 break;
             };
             let candidate_bytes = data_append_envelope_bytes(&candidate.envelope);
