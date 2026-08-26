@@ -18,6 +18,7 @@ pub(super) struct DurableBrokerState {
     pub(super) producer_epochs: HashMap<String, u64>,
     pub(super) producer_sequences: HashMap<(String, u64, u64), ProducerDedupEntry>,
     pub(super) producer_in_flight: HashSet<(String, u64, u64)>,
+    pub(super) acked_cleanup: HashSet<u64>,
 }
 
 #[derive(Debug, Clone)]
