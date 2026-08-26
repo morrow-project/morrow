@@ -435,13 +435,23 @@ impl PartitionLogSet {
         stream: &str,
         partition: PartitionId,
     ) -> Result<PartitionRetentionStatus> {
-        Ok(self
-            .logs
-            .get(&(stream.to_string(), partition))
-            .ok_or_else(|| crate::error::BrokerError::msg("unknown stream partition"))?
+        let key = (stream.to_string(), partition);
+        if let Some(log) = self.logs.get(&key) {
+            return Ok(log
+                .lock()
+                .expect("partition log lock poisoned")
+                .retention_status(partition));
+        }
+        self.dynamic_logs
             .lock()
-            .expect("partition log lock poisoned")
-            .retention_status(partition))
+            .expect("dynamic partition log lock poisoned")
+            .get(&key)
+            .ok_or_else(|| crate::error::BrokerError::msg("unknown stream partition"))
+            .map(|log| {
+                log.lock()
+                    .expect("partition log lock poisoned")
+                    .retention_status(partition)
+            })
     }
 
     pub(crate) fn recovery_status(&self) -> PartitionRecoveryStatus {

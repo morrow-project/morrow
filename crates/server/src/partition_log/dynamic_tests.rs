@@ -50,6 +50,12 @@ fn activated_partition_can_append_and_reload_without_startup_recovery() {
             .payload,
         b"hello"
     );
+    assert_eq!(
+        logs.retention_status("orders", PartitionId(1))
+            .unwrap()
+            .next_offset,
+        1
+    );
 }
 
 #[test]

@@ -624,7 +624,10 @@ impl Morrow {
             .definitions()
             .iter()
             .map(|definition| {
-                let partitions = (0..definition.partitions)
+                let partition_count = expansions
+                    .get(definition.name.as_str())
+                    .map_or(definition.partitions, |expansion| expansion.current().0);
+                let partitions = (0..partition_count)
                     .map(|partition| {
                         partition_logs.retention_status(
                             definition.name.as_str(),
