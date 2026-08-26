@@ -1817,6 +1817,11 @@ impl Morrow {
             .lock()
             .await
             .usage(crate::work_scheduler::WorkClass::Compaction);
+        let foreground_usage = self
+            .work_scheduler
+            .lock()
+            .await
+            .usage(crate::work_scheduler::WorkClass::Foreground);
         let retention_usage = self
             .work_scheduler
             .lock()
@@ -1835,6 +1840,22 @@ impl Morrow {
         metrics.push_str(&format!(
             "morrow_work_compaction_active {}\n",
             compaction_usage.concurrency
+        ));
+        metrics.push_str(
+            "# HELP morrow_work_foreground_rejections_total Foreground publish operations rejected by the work budget.\n",
+        );
+        metrics.push_str("# TYPE morrow_work_foreground_rejections_total counter\n");
+        metrics.push_str(&format!(
+            "morrow_work_foreground_rejections_total {}\n",
+            foreground_usage.rejected
+        ));
+        metrics.push_str(
+            "# HELP morrow_work_foreground_active Active foreground publish operations.\n",
+        );
+        metrics.push_str("# TYPE morrow_work_foreground_active gauge\n");
+        metrics.push_str(&format!(
+            "morrow_work_foreground_active {}\n",
+            foreground_usage.concurrency
         ));
         metrics.push_str(
             "# HELP morrow_work_retention_rejections_total Retention jobs rejected by the work budget.\n",
