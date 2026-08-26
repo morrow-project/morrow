@@ -42,3 +42,10 @@ The `/wal` administrative status also reports `partition_append_batches`,
 `partition_append_records`, `partition_append_bytes`, and `flushes`. These
 counters make it possible to verify that a workload is sharing append and
 durability work rather than merely measuring concurrent single-record writes.
+
+Standalone partition appends are coalesced by the WAL worker before they are
+written. Compatible records for one stream partition share a bounded append
+batch (up to 256 records or 8 MiB). The worker waits at most 1 ms by default
+for more records; operators can tune that window with
+`MORROW_WAL_PARTITION_APPEND_BATCH_DELAY_MS` (0--100 ms). Records from other
+partitions remain ordered and are not mixed into the batch.

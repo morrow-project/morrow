@@ -1,11 +1,13 @@
 use super::*;
 use crate::wal::GroupStateRecord;
 use std::collections::HashMap;
-use std::sync::mpsc::{self, SyncSender};
+use std::sync::mpsc::{self, RecvTimeoutError, SyncSender};
+use std::time::Duration;
 
 const WAL_QUEUE_CAPACITY: usize = 128;
 const MAX_PARTITION_APPEND_BATCH_RECORDS: usize = 256;
 const MAX_PARTITION_APPEND_BATCH_BYTES: usize = 8 * 1024 * 1024;
+const MAX_PARTITION_APPEND_BATCH_DELAY_MS: u64 = 100;
 
 #[derive(Clone)]
 pub(super) struct WalRuntime {
@@ -491,15 +493,24 @@ fn wal_worker(mut wal: Wal, receiver: mpsc::Receiver<WalCommand>) {
         };
         match command {
             WalCommand::PartitionAppend(record, response) => {
+                let partition = (record.stream.clone(), record.partition);
                 let mut records = vec![record];
                 let mut responses = vec![response];
                 let mut estimated_bytes = records
                     .iter()
                     .map(partition_append_estimated_bytes)
                     .sum::<usize>();
+                let deadline = std::time::Instant::now()
+                    + Duration::from_millis(partition_append_batch_delay_ms());
                 while records.len() < MAX_PARTITION_APPEND_BATCH_RECORDS {
-                    match receiver.try_recv() {
-                        Ok(WalCommand::PartitionAppend(record, response)) => {
+                    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                    if remaining.is_zero() {
+                        break;
+                    }
+                    match receiver.recv_timeout(remaining) {
+                        Ok(WalCommand::PartitionAppend(record, response))
+                            if (record.stream.clone(), record.partition) == partition =>
+                        {
                             let record_bytes = partition_append_estimated_bytes(&record);
                             if estimated_bytes.saturating_add(record_bytes)
                                 > MAX_PARTITION_APPEND_BATCH_BYTES
@@ -515,7 +526,7 @@ fn wal_worker(mut wal: Wal, receiver: mpsc::Receiver<WalCommand>) {
                             pending = Some(command);
                             break;
                         }
-                        Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => break,
+                        Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => break,
                     }
                 }
                 let mut outcomes = Vec::with_capacity(records.len());
@@ -659,6 +670,14 @@ fn wal_worker(mut wal: Wal, receiver: mpsc::Receiver<WalCommand>) {
             }
         }
     }
+}
+
+fn partition_append_batch_delay_ms() -> u64 {
+    std::env::var("MORROW_WAL_PARTITION_APPEND_BATCH_DELAY_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(1)
+        .min(MAX_PARTITION_APPEND_BATCH_DELAY_MS)
 }
 
 fn partition_append_estimated_bytes(record: &PartitionAppendRecord) -> usize {
