@@ -2,7 +2,7 @@ use super::{log::PartitionLog, *};
 use crate::error::ResultExt;
 use crate::partition_cache::PartitionResourceCache;
 use crate::wal::PublishRecord;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::sync::{
     Mutex,
     atomic::{AtomicU64, Ordering},
@@ -18,6 +18,7 @@ const MAX_METADATA_CACHE_CAPACITY: usize = 1_000_000;
 pub struct PartitionLogSet {
     logs: HashMap<(String, PartitionId), Mutex<PartitionLog>>,
     sticky: Mutex<HashMap<String, u64>>,
+    dirty: Mutex<HashSet<(String, PartitionId)>>,
     next_legacy_seq: AtomicU64,
     pub truncations: u64,
     recovery: PartitionRecoveryStatus,
@@ -134,6 +135,7 @@ impl PartitionLogSet {
             Self {
                 logs,
                 sticky: Mutex::new(HashMap::new()),
+                dirty: Mutex::new(HashSet::new()),
                 next_legacy_seq: AtomicU64::new(next_legacy_seq),
                 truncations,
                 recovery: PartitionRecoveryStatus {
@@ -198,19 +200,30 @@ impl PartitionLogSet {
             .expect("partition log lock poisoned")
             .append(envelope)?;
         self.cache_envelope(&appended);
+        self.dirty
+            .lock()
+            .expect("dirty partition lock poisoned")
+            .insert((appended.stream.as_str().to_string(), appended.partition));
         Ok(appended)
     }
 
     pub fn flush(&self) -> Result<()> {
-        for log in self.logs.values() {
-            log.lock()
-                .expect("partition log lock poisoned")
-                .release_resources()?;
+        let dirty = std::mem::take(&mut *self.dirty.lock().expect("dirty partition lock poisoned"));
+        for key in dirty {
+            if let Some(log) = self.logs.get(&key) {
+                log.lock()
+                    .expect("partition log lock poisoned")
+                    .release_resources()?;
+            }
         }
         Ok(())
     }
 
     pub fn flush_partition(&self, stream: &str, partition: PartitionId) -> Result<()> {
+        self.dirty
+            .lock()
+            .expect("dirty partition lock poisoned")
+            .remove(&(stream.to_string(), partition));
         self.logs
             .get(&(stream.to_string(), partition))
             .ok_or_else(|| crate::error::BrokerError::msg("unknown stream partition"))?
@@ -230,6 +243,10 @@ impl PartitionLogSet {
             .expect("partition log lock poisoned")
             .append_committed(envelope)?;
         self.cache_envelope(&appended);
+        self.dirty
+            .lock()
+            .expect("dirty partition lock poisoned")
+            .insert((appended.stream.as_str().to_string(), appended.partition));
         Ok(appended)
     }
 
@@ -246,6 +263,7 @@ impl PartitionLogSet {
             .lock()
             .expect("partition log lock poisoned")
             .rewrite(records, None);
+        self.mark_dirty(stream, partition);
         self.clear_metadata_cache();
         result
     }
@@ -286,6 +304,7 @@ impl PartitionLogSet {
                 })
                 .collect::<Result<Vec<_>>>()?;
             log.rewrite(&retained, Some(change.earliest_offset))?;
+            self.mark_dirty(&change.stream, change.partition);
         }
         self.clear_metadata_cache();
         Ok(changes)
@@ -334,6 +353,7 @@ impl PartitionLogSet {
             .lock()
             .expect("partition log lock poisoned")
             .rewrite(records, Some(change.earliest_offset));
+        self.mark_dirty(&change.stream, change.partition);
         self.clear_metadata_cache();
         result
     }
@@ -346,6 +366,7 @@ impl PartitionLogSet {
             .lock()
             .expect("partition log lock poisoned")
             .advance_retention_floor(change.earliest_offset);
+        self.mark_dirty(&change.stream, change.partition);
         self.clear_metadata_cache();
         result
     }
@@ -505,6 +526,13 @@ impl PartitionLogSet {
                 ),
                 envelope.clone(),
             );
+    }
+
+    fn mark_dirty(&self, stream: &str, partition: PartitionId) {
+        self.dirty
+            .lock()
+            .expect("dirty partition lock poisoned")
+            .insert((stream.to_string(), partition));
     }
 
     fn clear_metadata_cache(&self) {
