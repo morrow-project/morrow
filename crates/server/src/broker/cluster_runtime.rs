@@ -154,6 +154,14 @@ impl ClusterRuntime {
         }
     }
 
+    pub(super) fn partition_assignment_count(&self) -> usize {
+        match self {
+            Self::Real(runtime) => runtime.partition_assignment_count(),
+            #[cfg(test)]
+            Self::Fake(runtime) => runtime.durable_state().partition_assignments.len(),
+        }
+    }
+
     pub(super) async fn quorum_available(&self) -> bool {
         match self {
             Self::Real(runtime) => runtime.quorum_available().await,
