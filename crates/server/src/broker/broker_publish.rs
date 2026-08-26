@@ -597,6 +597,13 @@ impl Morrow {
                     self.wal
                         .flush_partitions_grouped(
                             self.partition_logs.clone(),
+                            record
+                                .stream
+                                .clone()
+                                .ok_or_else(|| BrokerError::msg("durable record has no stream"))?,
+                            crate::stream::PartitionId(record.partition.ok_or_else(|| {
+                                BrokerError::msg("durable record has no partition")
+                            })?),
                             self.config.fsync_interval(),
                         )
                         .await?;
@@ -605,7 +612,17 @@ impl Morrow {
                 #[cfg(test)]
                 DurablePublishFlushMode::FlushImmediately => {
                     self.wal
-                        .flush_partitions_grouped(self.partition_logs.clone(), Duration::ZERO)
+                        .flush_partitions_grouped(
+                            self.partition_logs.clone(),
+                            record
+                                .stream
+                                .clone()
+                                .ok_or_else(|| BrokerError::msg("durable record has no stream"))?,
+                            crate::stream::PartitionId(record.partition.ok_or_else(|| {
+                                BrokerError::msg("durable record has no partition")
+                            })?),
+                            Duration::ZERO,
+                        )
                         .await?;
                     self.wal.flush_grouped(Duration::ZERO).await?;
                 }

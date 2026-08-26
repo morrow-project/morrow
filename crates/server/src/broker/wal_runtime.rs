@@ -1,5 +1,6 @@
 use super::*;
 use crate::wal::GroupStateRecord;
+use std::collections::HashMap;
 use std::sync::mpsc::{self, SyncSender};
 
 const WAL_QUEUE_CAPACITY: usize = 128;
@@ -9,7 +10,7 @@ pub(super) struct WalRuntime {
     sender: SyncSender<WalCommand>,
     next_publish_seq: Arc<AtomicU64>,
     flush_coordinator: Arc<FlushCoordinator>,
-    partition_flush_coordinator: Arc<FlushCoordinator>,
+    partition_flush_coordinators: Arc<tokio::sync::Mutex<HashMap<String, Arc<FlushCoordinator>>>>,
 }
 
 struct FlushCoordinator {
@@ -96,12 +97,7 @@ impl WalRuntime {
                     waiters: Vec::new(),
                 }),
             }),
-            partition_flush_coordinator: Arc::new(FlushCoordinator {
-                state: tokio::sync::Mutex::new(FlushState {
-                    running: false,
-                    waiters: Vec::new(),
-                }),
-            }),
+            partition_flush_coordinators: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -372,11 +368,28 @@ impl WalRuntime {
     pub(super) async fn flush_partitions_grouped(
         &self,
         partition_logs: Arc<crate::partition_log::PartitionLogSet>,
+        stream: String,
+        partition: crate::stream::PartitionId,
         interval: Duration,
     ) -> Result<()> {
+        let key = format!("{stream}:{}", partition.0);
+        let coordinator = {
+            let mut coordinators = self.partition_flush_coordinators.lock().await;
+            coordinators
+                .entry(key)
+                .or_insert_with(|| {
+                    Arc::new(FlushCoordinator {
+                        state: tokio::sync::Mutex::new(FlushState {
+                            running: false,
+                            waiters: Vec::new(),
+                        }),
+                    })
+                })
+                .clone()
+        };
         let (sender, receiver) = tokio::sync::oneshot::channel();
         let start_worker = {
-            let mut state = self.partition_flush_coordinator.state.lock().await;
+            let mut state = coordinator.state.lock().await;
             state.waiters.push(sender);
             if state.running {
                 false
@@ -386,13 +399,15 @@ impl WalRuntime {
             }
         };
         if start_worker {
-            let coordinator = self.partition_flush_coordinator.clone();
+            let coordinator = coordinator.clone();
             tokio::spawn(async move {
                 tokio::time::sleep(interval).await;
-                let result = tokio::task::spawn_blocking(move || partition_logs.flush())
-                    .await
-                    .map_err(|err| BrokerError::with_source("partition flush worker failed", err))
-                    .and_then(|result| result);
+                let result = tokio::task::spawn_blocking(move || {
+                    partition_logs.flush_partition(&stream, partition)
+                })
+                .await
+                .map_err(|err| BrokerError::with_source("partition flush worker failed", err))
+                .and_then(|result| result);
                 let mut state = coordinator.state.lock().await;
                 state.running = false;
                 for waiter in state.waiters.drain(..) {
