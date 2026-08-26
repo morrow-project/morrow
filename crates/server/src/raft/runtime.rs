@@ -317,38 +317,20 @@ impl RaftRuntime {
         if !metadata.stream_definitions.is_empty() {
             return self.validate_metadata_configuration(&metadata);
         }
-        let replica_order = self.nodes.keys().copied().collect::<Vec<_>>();
+        let replicas = self.nodes.keys().copied().collect::<BTreeSet<_>>();
+        let replica_order = replicas.iter().copied().collect::<Vec<_>>();
         let mut assignments = HashMap::new();
         for stream in &self.configured_streams {
             for partition in 0..stream.partitions {
-                let replica_count = usize::try_from(stream.storage.replicas)
-                    .unwrap_or(replica_order.len())
-                    .min(replica_order.len())
-                    .max(1);
-                let replicas = (0..replica_count)
-                    .map(|offset| {
-                        replica_order[(partition as usize + offset) % replica_order.len()]
-                    })
-                    .collect::<BTreeSet<_>>();
-                let leader_id = replica_order[partition as usize % replica_order.len()];
-                let active_count = usize::try_from(stream.storage.min_ack_replicas)
-                    .unwrap_or(replica_count)
-                    .min(replica_count)
-                    .max(1);
-                let active_commit_set = std::iter::once(leader_id)
-                    .chain(
-                        replicas
-                            .iter()
-                            .copied()
-                            .filter(move |node| *node != leader_id),
-                    )
-                    .take(active_count)
-                    .collect();
+                let leader_id = replica_order
+                    .get(partition as usize % replica_order.len())
+                    .copied()
+                    .unwrap_or(self.node_id);
                 assignments.insert(
                     partition_key(stream.name.as_str(), partition),
                     PartitionAssignmentMetadata {
                         replicas: replicas.clone(),
-                        active_commit_set,
+                        active_commit_set: replicas.clone(),
                         replica_set_generation: 1,
                         phase: PartitionReconfigurationPhase::Stable,
                         leader_id,
@@ -398,14 +380,13 @@ impl RaftRuntime {
                 }),
             "local stream configuration differs from metadata consensus"
         );
+        let replicas = self.nodes.keys().copied().collect::<BTreeSet<_>>();
         crate::broker_ensure!(
-            metadata.partition_assignments.values().all(|assignment| {
-                assignment
-                    .replicas
-                    .iter()
-                    .all(|node| self.nodes.contains_key(node))
-            }),
-            "partition assignment references an unknown broker"
+            metadata
+                .partition_assignments
+                .values()
+                .all(|assignment| assignment.replicas == replicas),
+            "local cluster membership differs from partition assignments"
         );
         Ok(())
     }
