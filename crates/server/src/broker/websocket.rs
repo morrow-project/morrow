@@ -18,6 +18,7 @@ use tokio_tungstenite::{
 };
 
 const TEXT_SUBPROTOCOL: &str = "morrow.v1.text";
+const BINARY_SUBPROTOCOL: &str = "morrow.v1.binary";
 const BRIDGE_CAPACITY: usize = 128 * 1024;
 
 impl Morrow {
@@ -82,6 +83,8 @@ impl Morrow {
             .max(self.config.max_payload)
             .saturating_add(self.config.max_control_line);
         let allowed_origins = Arc::new(config.allowed_origins);
+        let binary_mode = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let callback_mode = Arc::clone(&binary_mode);
         let callback = move |request: &Request, mut response: Response| {
             validate_origin(request, &allowed_origins)?;
             let requested = request
@@ -93,6 +96,13 @@ impl Morrow {
                 return Ok(response);
             }
             let protocol = if requested
+                .split(',')
+                .map(str::trim)
+                .any(|protocol| protocol == BINARY_SUBPROTOCOL)
+            {
+                callback_mode.store(true, Ordering::Relaxed);
+                BINARY_SUBPROTOCOL
+            } else if requested
                 .split(',')
                 .map(str::trim)
                 .any(|protocol| protocol == TEXT_SUBPROTOCOL)
@@ -142,6 +152,8 @@ impl Morrow {
             websocket_write,
             broker_read,
             control_rx,
+            binary_mode.load(Ordering::Relaxed),
+            max_frame,
             self.metrics.clone(),
         ));
 
@@ -261,35 +273,96 @@ async fn broker_to_websocket<W, R>(
     mut websocket: W,
     mut broker: R,
     mut control: mpsc::Receiver<Message>,
+    binary_mode: bool,
+    max_frame: usize,
     metrics: Arc<BrokerMetrics>,
 ) -> std::result::Result<(), WebSocketError>
 where
     W: futures_util::Sink<Message, Error = WebSocketError> + Unpin,
     R: tokio::io::AsyncRead + Unpin,
 {
-    let mut buffer = vec![0_u8; 16 * 1024];
+    let mut read_buffer = vec![0_u8; 16 * 1024];
+    let mut frame_buffer = Vec::new();
     loop {
         tokio::select! {
             Some(message) = control.recv() => {
                 websocket.send(message).await?;
             }
-            read = broker.read(&mut buffer) => {
+                read = broker.read(&mut read_buffer) => {
                 let read = read.map_err(WebSocketError::Io)?;
                 if read == 0 {
                     websocket.close().await?;
                     return Ok(());
                 }
-                let text = String::from_utf8_lossy(&buffer[..read]).into_owned();
-                websocket.send(Message::text(text)).await?;
-                metrics
-                    .websocket_messages_sent_total
-                    .fetch_add(1, Ordering::Relaxed);
-                metrics
-                    .websocket_bytes_sent_total
-                    .fetch_add(read as u64, Ordering::Relaxed);
+                if binary_mode {
+                    frame_buffer.extend_from_slice(&read_buffer[..read]);
+                    if frame_buffer.len() > 0 {
+                        for frame in drain_broker_frames(&mut frame_buffer, max_frame)? {
+                            let len = frame.len();
+                            websocket.send(Message::binary(frame)).await?;
+                            metrics.websocket_messages_sent_total.fetch_add(1, Ordering::Relaxed);
+                            metrics.websocket_bytes_sent_total.fetch_add(len as u64, Ordering::Relaxed);
+                        }
+                    }
+                } else {
+                    let text = String::from_utf8_lossy(&read_buffer[..read]).into_owned();
+                    websocket.send(Message::text(text)).await?;
+                    metrics.websocket_messages_sent_total.fetch_add(1, Ordering::Relaxed);
+                    metrics.websocket_bytes_sent_total.fetch_add(read as u64, Ordering::Relaxed);
+                }
             }
         }
     }
+}
+
+fn drain_broker_frames(
+    buffer: &mut Vec<u8>,
+    max_frame: usize,
+) -> std::result::Result<Vec<Vec<u8>>, WebSocketError> {
+    if buffer.len() > max_frame {
+        return Err(WebSocketError::Capacity(CapacityError::MessageTooLong {
+            size: buffer.len(),
+            max_size: max_frame,
+        }));
+    }
+    let mut frames = Vec::new();
+    while let Some(header_end) = buffer.windows(2).position(|window| window == b"\r\n") {
+        let header = &buffer[..header_end];
+        let frame_len = if header.starts_with(b"MSG ") {
+            header
+                .split(|byte| *byte == b' ')
+                .next_back()
+                .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                .and_then(|bytes| bytes.parse::<usize>().ok())
+                .map(|payload_len| header_end + 2 + payload_len + 2)
+        } else if header.starts_with(b"HMSG ") {
+            header
+                .split(|byte| *byte == b' ')
+                .next_back()
+                .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                .and_then(|bytes| bytes.parse::<usize>().ok())
+                .map(|payload_len| header_end + 2 + payload_len + 2)
+        } else {
+            Some(header_end + 2)
+        };
+        let Some(frame_len) = frame_len else {
+            return Err(WebSocketError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid broker frame length",
+            )));
+        };
+        if frame_len > max_frame {
+            return Err(WebSocketError::Capacity(CapacityError::MessageTooLong {
+                size: frame_len,
+                max_size: max_frame,
+            }));
+        }
+        if buffer.len() < frame_len {
+            break;
+        }
+        frames.push(buffer.drain(..frame_len).collect());
+    }
+    Ok(frames)
 }
 
 #[cfg(test)]
@@ -311,5 +384,20 @@ mod tests {
     fn missing_origin_is_allowed_for_non_browser_clients() {
         let request = Request::builder().uri("ws://localhost/").body(()).unwrap();
         assert!(validate_origin(&request, &[]).is_ok());
+    }
+
+    #[test]
+    fn binary_broker_frames_are_reassembled_without_lossy_conversion() {
+        let mut buffer = b"MSG subject 1 5\r\nhel".to_vec();
+        assert!(drain_broker_frames(&mut buffer, 64).unwrap().is_empty());
+        buffer.extend_from_slice(b"lo\r\nMSG other 1 2\r\nok\r\n");
+        assert_eq!(
+            drain_broker_frames(&mut buffer, 64).unwrap(),
+            vec![
+                b"MSG subject 1 5\r\nhello\r\n".to_vec(),
+                b"MSG other 1 2\r\nok\r\n".to_vec()
+            ]
+        );
+        assert!(buffer.is_empty());
     }
 }
