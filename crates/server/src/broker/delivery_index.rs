@@ -13,10 +13,17 @@ impl DurableBrokerState {
                 seq: record.seq,
             }));
         }
-        for consumer in self.consumers.values_mut() {
-            consumer
-                .cursors
-                .observe_published_record(&consumer.record.filter_subject, record);
+        let matched = self
+            .consumer_interest_index
+            .matching(&record.subject)
+            .into_iter()
+            .collect::<HashSet<_>>();
+        for consumer_id in matched {
+            if let Some(consumer) = self.consumers.get_mut(&consumer_id) {
+                consumer
+                    .cursors
+                    .observe_published_record(&consumer.record.filter_subject, record);
+            }
         }
     }
 
