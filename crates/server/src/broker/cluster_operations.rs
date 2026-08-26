@@ -21,6 +21,14 @@ impl Morrow {
     }
 
     pub(super) async fn start_route_mesh(&self, listener: Option<TcpListener>) -> Result<()> {
+        if self
+            .config
+            .cluster
+            .as_ref()
+            .is_some_and(|cluster| !cluster.role.serves_client_traffic())
+        {
+            return Ok(());
+        }
         let Some(route_mesh) = &self.route_mesh else {
             return Ok(());
         };

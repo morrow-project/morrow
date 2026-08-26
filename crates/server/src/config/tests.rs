@@ -445,6 +445,16 @@ fn parses_fixed_controller_voters_and_rejects_broker_voter() {
 }
 
 #[test]
+fn cluster_roles_define_data_and_metadata_plane_membership() {
+    assert!(crate::config::ClusterRole::Combined.serves_client_traffic());
+    assert!(crate::config::ClusterRole::Combined.participates_in_metadata_quorum());
+    assert!(!crate::config::ClusterRole::Controller.serves_client_traffic());
+    assert!(crate::config::ClusterRole::Controller.participates_in_metadata_quorum());
+    assert!(crate::config::ClusterRole::Broker.serves_client_traffic());
+    assert!(!crate::config::ClusterRole::Broker.participates_in_metadata_quorum());
+}
+
+#[test]
 fn rejects_cluster_missing_self_node() {
     let err = Config::from_json(&serde_json::json!({
         "wal_dir": "./target/test-wal-cluster-missing-self",
