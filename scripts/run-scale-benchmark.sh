@@ -6,6 +6,7 @@ usage() {
   echo "  --controller-voters N                    (default: 3)"
   echo "  --roles-share-process true|false         (default follows profile)"
   echo "  --metrics-url URL                        (optional endpoint captured per case)"
+  echo "  --server-pid PID                         (optional per-case resource snapshots)"
   echo "  --modes LIST                             (default: fire-and-forget,sync,async,batch)"
   echo "  --ack-levels LIST                        (default: accepted,durable,high-durability)"
 }
@@ -42,10 +43,34 @@ validate_topology_metrics() {
   test "$actual_voters" = "$controller_voters" || die "topology metrics report $actual_voters controller voters; expected $controller_voters"
   grep -Fq "morrow_node_role{role=\"$expected_role\"} 1" "$metrics_file" || die "topology metrics do not identify the endpoint as role $expected_role"
 }
+capture_resources() {
+  output_file=$1
+  test -n "$server_pid" || return 0
+  rss_kib=; cpu_percent=; threads=; fd_count=; cpu_time_ticks=
+  case "$(uname -s)" in
+    Linux)
+      if test -r "/proc/$server_pid/status"; then
+        rss_kib=$(awk '/^VmRSS:/ { print $2; exit }' "/proc/$server_pid/status")
+        threads=$(awk '/^Threads:/ { print $2; exit }' "/proc/$server_pid/status")
+        cpu_time_ticks=$(awk '{ print $14 + $15 }' "/proc/$server_pid/stat" 2>/dev/null || true)
+        fd_count=$(/usr/bin/find "/proc/$server_pid/fd" -maxdepth 1 -type l 2>/dev/null | wc -l | tr -d ' ')
+      fi
+      ;;
+    Darwin)
+      ps_line=$(ps -p "$server_pid" -o rss=,pcpu=,nlwp= 2>/dev/null || true)
+      set -- $ps_line
+      rss_kib=${1:-}; cpu_percent=${2:-}; threads=${3:-}
+      fd_count=$(lsof -p "$server_pid" 2>/dev/null | tail -n +2 | wc -l | tr -d ' ')
+      ;;
+  esac
+  printf '{"pid":%s,"rss_kib":%s,"cpu_percent":%s,"threads":%s,"fd_count":%s,"cpu_time_ticks":%s}\n' \
+    "$server_pid" "${rss_kib:-null}" "${cpu_percent:-null}" "${threads:-null}" "${fd_count:-null}" "${cpu_time_ticks:-null}" >"$output_file"
+}
 server=; client_config=; broker_counts=1,3,5; topics=1,10,100; partitions=1,4,16
 clients=5; duration=10s; payload_size=128
 deployment_profile=combined; controller_voters=3; roles_share_process=true
 metrics_url=
+server_pid=
 modes=fire-and-forget,sync,async,batch
 ack_levels=accepted,durable,high-durability
 output_dir="target/scale-benchmarks/$(date -u +%Y%m%dT%H%M%SZ)"; build=true
@@ -60,6 +85,7 @@ while test "$#" -gt 0; do
     --controller-voters) test "$#" -ge 2 || die "$1 requires a value"; controller_voters=$2; shift 2 ;;
     --roles-share-process) test "$#" -ge 2 || die "$1 requires a value"; roles_share_process=$2; shift 2 ;;
     --metrics-url) test "$#" -ge 2 || die "$1 requires a value"; metrics_url=$2; shift 2 ;;
+    --server-pid) test "$#" -ge 2 || die "$1 requires a value"; server_pid=$2; shift 2 ;;
     --modes) test "$#" -ge 2 || die "$1 requires a value"; modes=$2; shift 2 ;;
     --ack-levels) test "$#" -ge 2 || die "$1 requires a value"; ack_levels=$2; shift 2 ;;
     --clients) test "$#" -ge 2 || die "$1 requires a value"; clients=$2; shift 2 ;;
@@ -73,6 +99,11 @@ while test "$#" -gt 0; do
 done
 test -n "$server" || die "--server is required"
 test -f "$client_config" || die "--client-config must name a file"
+if test -n "$server_pid"; then
+  case "$server_pid" in ''|*[!0-9]*) die "--server-pid must be a positive integer" ;; esac
+  test "$server_pid" -gt 0 || die "--server-pid must be a positive integer"
+  kill -0 "$server_pid" 2>/dev/null || die "server process $server_pid is not running"
+fi
 case "$deployment_profile" in combined|separated) ;; *) die "--deployment-profile must be combined or separated" ;; esac
 case "$roles_share_process" in true|false) ;; *) die "--roles-share-process must be true or false" ;; esac
 case "$controller_voters" in ''|*[!0-9]*|0) die "--controller-voters must be a positive integer" ;; esac
@@ -120,7 +151,9 @@ for broker_count in $broker_counts; do
     for partition_count in $partitions; do
       case_dir="$output_dir/brokers-$broker_count/topics-$topic_count/partitions-$partition_count"
       mkdir -p "$case_dir"
+      capture_resources "$case_dir/resources-before.json"
       scripts/run-publish-benchmark-matrix.sh --topology external --client-config "$client_config" --server "$server" --clients "$clients" --duration "$duration" --payload-size "$payload_size" --subjects "$topic_count" --partitions "$partition_count" --modes "$modes" --ack-levels "$ack_levels" --output-dir "$case_dir" --quiet
+      capture_resources "$case_dir/resources-after.json"
       if test -n "$metrics_url"; then
         curl -sSfL "$metrics_url" >"$case_dir/metrics.prom" || die "failed to capture metrics from $metrics_url"
         validate_topology_metrics "$case_dir/metrics.prom"

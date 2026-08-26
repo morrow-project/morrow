@@ -39,6 +39,14 @@ activity and broker queue/replication counters available beside the benchmark
 result instead of requiring a second, unsynchronised scrape.
 When supplied, the fixture also fails a case if the endpoint reports a different
 controller-voter count or process role than the selected topology profile.
+
+Pass `--server-pid PID` to capture `resources-before.json` and
+`resources-after.json` in every case directory. These snapshots report resident
+memory, CPU time, thread count, and open file descriptors; macOS also records
+the sampled process CPU percentage. The PID is explicit so a host running
+multiple Morrow processes cannot silently report the wrong process, and it must
+remain alive for the duration of the run.
+
 Partition recovery is capped at eight workers by default. Operators can lower
 that concurrency for large catalogs or constrained hosts with
 `MORROW_PARTITION_RECOVERY_WORKERS`; values are clamped to the safe range
