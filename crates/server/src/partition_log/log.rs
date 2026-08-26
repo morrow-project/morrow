@@ -28,7 +28,9 @@ struct SegmentRange {
     path: PathBuf,
     first_offset: u64,
     last_offset: u64,
-    reader: File,
+    /// Sealed segment readers are opened on demand and released after each
+    /// lookup so descriptor usage does not grow with retained history.
+    reader: Option<File>,
     sparse_index: Vec<(u64, u64)>,
 }
 
@@ -112,7 +114,7 @@ impl PartitionLog {
                     path: path.clone(),
                     first_offset: first.offset,
                     last_offset: last.offset,
-                    reader: open_segment_reader(path)?,
+                    reader: None,
                     sparse_index: load_sparse_index(path)?,
                 });
             }
@@ -225,7 +227,7 @@ impl PartitionLog {
                 path: active_path.clone(),
                 first_offset: envelope.offset,
                 last_offset: envelope.offset,
-                reader: open_segment_reader(&active_path)?,
+                reader: None,
                 sparse_index: load_sparse_index(&active_path)?,
             });
         }
@@ -351,7 +353,7 @@ impl PartitionLog {
                 let range = &mut self.segment_ranges[range_index];
                 range.first_offset = retained[0].offset;
                 range.last_offset = retained.last().unwrap().offset;
-                range.reader = open_segment_reader(&path)?;
+                range.reader = None;
                 range.sparse_index = load_sparse_index(&path)?;
                 if let Some(segment) = self
                     .sealed_subject_segments
@@ -484,12 +486,13 @@ impl PartitionLog {
             if offset < range.first_offset || offset > range.last_offset {
                 continue;
             }
-            range.reader.seek(SeekFrom::Start(SEGMENT_HEADER_LEN))?;
+            let mut reader = open_segment_reader(&range.path)?;
+            reader.seek(SeekFrom::Start(SEGMENT_HEADER_LEN))?;
             if let Some(position) = indexed_position(&range.sparse_index, offset) {
-                range.reader.seek(SeekFrom::Start(position))?;
+                reader.seek(SeekFrom::Start(position))?;
             }
             while let Some((envelope, _)) =
-                read_batch_with_key(&mut range.reader, self.encryption.as_ref())?
+                read_batch_with_key(&mut reader, self.encryption.as_ref())?
             {
                 if envelope.offset == offset {
                     return Ok(Some(envelope));
