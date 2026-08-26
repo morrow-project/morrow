@@ -121,6 +121,21 @@ impl Morrow {
             .release(crate::work_scheduler::WorkClass::Retention, 0, 0);
     }
 
+    pub(super) async fn partitioning_for_stream(
+        &self,
+        stream: &str,
+        configured_partitions: u32,
+        configured_epoch: u64,
+    ) -> (u32, u64) {
+        self.partition_expansions
+            .lock()
+            .await
+            .get(stream)
+            .map_or((configured_partitions, configured_epoch), |expansion| {
+                expansion.current()
+            })
+    }
+
     pub async fn begin_partition_expansion(
         &self,
         stream: &str,
