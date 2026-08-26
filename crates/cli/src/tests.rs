@@ -312,6 +312,38 @@ fn parses_direct_partition_routing_controls() {
 }
 
 #[test]
+fn parses_partition_metadata_url_and_token() {
+    let args = Args::parse(
+        [
+            "morrow-cli",
+            "bench",
+            "pub",
+            "orders.created",
+            "--stream",
+            "orders",
+            "--partition-metadata-url",
+            "http://127.0.0.1:1812/partition-metadata",
+            "--partition-metadata-token",
+            "admin-token",
+        ]
+        .into_iter()
+        .map(str::to_string),
+    )
+    .unwrap();
+    let Command::Bench { options, .. } = args.command else {
+        panic!("expected benchmark command");
+    };
+    assert_eq!(
+        options.partition_metadata_url.as_deref(),
+        Some("http://127.0.0.1:1812/partition-metadata")
+    );
+    assert_eq!(
+        options.partition_metadata_token.as_deref(),
+        Some("admin-token")
+    );
+}
+
+#[test]
 fn rejects_invalid_benchmark_combinations() {
     for arguments in [
         vec![
@@ -337,6 +369,13 @@ fn rejects_invalid_benchmark_combinations() {
         vec!["bench", "pub", "orders", "--header", "Morrow-QoS:1"],
         vec!["bench", "pub", "orders", "--messages", "0"],
         vec!["bench", "pub", "orders", "--stream", "orders"],
+        vec![
+            "bench",
+            "pub",
+            "orders",
+            "--partition-metadata-url",
+            "http://127.0.0.1:1812",
+        ],
     ] {
         let result = Args::parse(
             std::iter::once("morrow-cli")

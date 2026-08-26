@@ -117,6 +117,8 @@ fn parse_benchmark(mode: BenchmarkMode, mut args: impl Iterator<Item = String>) 
     let mut csv = None;
     let mut stream = None;
     let mut partition_metadata = None;
+    let mut partition_metadata_url = None;
+    let mut partition_metadata_token = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--messages" => messages = Some(parse_usize(&mut args, "--messages")?),
@@ -198,6 +200,13 @@ fn parse_benchmark(mode: BenchmarkMode, mut args: impl Iterator<Item = String>) 
                     "--partition-metadata",
                 )?))
             }
+            "--partition-metadata-url" => {
+                partition_metadata_url = Some(next_value(&mut args, "--partition-metadata-url")?)
+            }
+            "--partition-metadata-token" => {
+                partition_metadata_token =
+                    Some(next_value(&mut args, "--partition-metadata-token")?)
+            }
             _ => {
                 return Err(CliError::msg(format!(
                     "unknown bench {} option {arg}",
@@ -261,22 +270,37 @@ fn parse_benchmark(mode: BenchmarkMode, mut args: impl Iterator<Item = String>) 
         concurrency = 1;
     }
     let publishing = matches!(mode, BenchmarkMode::Pub | BenchmarkMode::PubSub);
-    if (stream.is_some() || partition_metadata.is_some()) && !publishing {
+    if (stream.is_some()
+        || partition_metadata.is_some()
+        || partition_metadata_url.is_some()
+        || partition_metadata_token.is_some())
+        && !publishing
+    {
         return Err(CliError::msg(
             "--stream and --partition-metadata apply only to publish workloads",
         ));
     }
-    if partition_metadata.is_some() && stream.is_none() {
+    if (partition_metadata.is_some() || partition_metadata_url.is_some()) && stream.is_none() {
         return Err(CliError::msg(
             "--stream is required when --partition-metadata is set",
         ));
     }
-    if stream.is_some() && partition_metadata.is_none() {
+    if stream.is_some() && partition_metadata.is_none() && partition_metadata_url.is_none() {
         return Err(CliError::msg(
             "--partition-metadata is required when --stream is set",
         ));
     }
-    if partition_metadata.is_some()
+    if partition_metadata.is_some() && partition_metadata_url.is_some() {
+        return Err(CliError::msg(
+            "--partition-metadata and --partition-metadata-url are mutually exclusive",
+        ));
+    }
+    if partition_metadata_token.is_some() && partition_metadata_url.is_none() {
+        return Err(CliError::msg(
+            "--partition-metadata-token requires --partition-metadata-url",
+        ));
+    }
+    if (partition_metadata.is_some() || partition_metadata_url.is_some())
         && matches!(publish_mode, PublishMode::Async | PublishMode::Batch)
     {
         return Err(CliError::msg(
@@ -418,6 +442,8 @@ fn parse_benchmark(mode: BenchmarkMode, mut args: impl Iterator<Item = String>) 
             csv,
             stream,
             partition_metadata,
+            partition_metadata_url,
+            partition_metadata_token,
         },
     })
 }
