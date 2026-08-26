@@ -38,6 +38,10 @@ pub(super) async fn send_data_append_batch_on_client(
     client: &NetworkClient,
     requests: Vec<DataAppendRequest>,
 ) -> Result<Vec<DataAppendResponse>> {
+    crate::broker_ensure!(
+        !requests.is_empty() && requests.len() <= MAX_DATA_APPEND_BATCH_RECORDS,
+        "partition append batch size is outside the supported bound"
+    );
     match client
         .request(RaftRequest::DataAppendBatch(requests))
         .await

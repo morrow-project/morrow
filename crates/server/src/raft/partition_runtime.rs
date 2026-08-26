@@ -99,7 +99,7 @@ impl RaftRuntime {
                 )
                 .await?;
                 let mut predecessor_checksum = request.predecessor_checksum;
-                let mut append_batch = Vec::with_capacity(committed_records.len() + 1);
+                let mut append_batch = Vec::with_capacity(MAX_DATA_APPEND_BATCH_RECORDS);
                 for record in committed_records {
                     let record_checksum =
                         crate::partition_log::committed_envelope_checksum(&record)?;
@@ -116,13 +116,21 @@ impl RaftRuntime {
                         envelope: record,
                     });
                     predecessor_checksum = Some(record_checksum);
+                    if append_batch.len() == MAX_DATA_APPEND_BATCH_RECORDS {
+                        send_data_append_batch_on_client(
+                            &client,
+                            std::mem::take(&mut append_batch),
+                        )
+                        .await?;
+                    }
                 }
                 append_batch.push(request);
-                let responses = send_data_append_batch_on_client(&client, append_batch).await?;
-                responses
+                let response = send_data_append_batch_on_client(&client, append_batch)
+                    .await?
                     .into_iter()
                     .last()
-                    .ok_or_else(|| BrokerError::msg("partition append batch was empty"))
+                    .ok_or_else(|| BrokerError::msg("partition append batch was empty"))?;
+                Ok::<_, BrokerError>(response)
             };
             if required {
                 let node_id = *node_id;
