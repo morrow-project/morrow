@@ -964,13 +964,22 @@ impl Morrow {
             ),
             None => None,
         };
-        let websocket_listener = match self.config.websocket.as_ref() {
-            Some(config) => Some(
-                TcpListener::bind(config.listen)
-                    .await
-                    .with_context(|| format!("binding WebSocket listener {}", config.listen))?,
-            ),
-            None => None,
+        let serves_client_traffic = self
+            .config
+            .cluster
+            .as_ref()
+            .is_none_or(|cluster| cluster.role.serves_client_traffic());
+        let websocket_listener = if serves_client_traffic {
+            match self.config.websocket.as_ref() {
+                Some(config) => Some(
+                    TcpListener::bind(config.listen)
+                        .await
+                        .with_context(|| format!("binding WebSocket listener {}", config.listen))?,
+                ),
+                None => None,
+            }
+        } else {
+            None
         };
         let route_listener = match self
             .config
