@@ -11,6 +11,24 @@ metadata quorum grew. Use `--deployment-profile combined` with
 `--roles-share-process true` for combined nodes, or `--deployment-profile
 separated --roles-share-process false` for dedicated controllers and brokers.
 
+For a local separated topology, generate and start dedicated processes with
+`scripts/start-local-cluster.sh`. It clones a normal server JSON template,
+creates three controller voters and two brokers by default, assigns unique
+client/Raft/route ports and storage directories, and keeps the controller voter
+set fixed while the broker count changes:
+
+```sh
+scripts/start-local-cluster.sh \
+  --base-config crates/integration/tests/fixtures/cluster-node-1.json \
+  --controllers 3 --brokers 2
+```
+
+The command prints the generated config directory, log directory, and process
+IDs. Stop it with Ctrl-C; add `--keep-running` when another shell will manage
+the processes. Point `run-scale-benchmark.sh --server` at one broker's client
+address and use `--deployment-profile separated --controller-voters 3
+--roles-share-process false --expected-brokers 2`.
+
 Example:
 
 ```sh
