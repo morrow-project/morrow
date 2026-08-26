@@ -68,6 +68,8 @@ fi
 if "$build"; then cargo build --release -p cli --locked; fi
 test -x target/release/morrow || die "target/release/morrow is not executable"
 mkdir -p "$output_dir"
+case_index="$output_dir/cases.ndjson"
+: > "$case_index"
 started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 hostname_value=$(hostname 2>/dev/null || true)
 os_name=$(uname -s 2>/dev/null || true)
@@ -84,6 +86,9 @@ for broker_count in $broker_counts; do
       case_dir="$output_dir/brokers-$broker_count/topics-$topic_count/partitions-$partition_count"
       mkdir -p "$case_dir"
       scripts/run-publish-benchmark-matrix.sh --topology external --client-config "$client_config" --server "$server" --clients "$clients" --duration "$duration" --payload-size "$payload_size" --subjects "$topic_count" --partitions "$partition_count" --output-dir "$case_dir" --quiet
+      printf '{"broker_count":%s,"topics":%s,"partitions":%s,"deployment_profile":"%s","controller_voter_count":%s,"roles_share_process":%s,"result_dir":"%s"}\n' \
+        "$broker_count" "$topic_count" "$partition_count" "$deployment_profile" "$controller_voters" "$roles_share_process" \
+        "$(json_escape "$case_dir")" >> "$case_index"
     done
   done
 done
