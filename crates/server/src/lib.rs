@@ -9,6 +9,7 @@ pub mod error;
 pub mod materialized_view;
 pub mod middleware;
 pub mod partition_batch;
+pub mod partition_cache;
 pub mod partition_log;
 pub mod partition_replication;
 pub(crate) mod quota;
@@ -29,6 +30,9 @@ mod partition_batch_tests;
 
 #[cfg(test)]
 mod state_shards_tests;
+
+#[cfg(test)]
+mod partition_cache_tests;
 
 pub use broker::Morrow;
 pub use config::Config;
