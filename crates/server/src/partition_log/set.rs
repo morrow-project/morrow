@@ -203,7 +203,9 @@ impl PartitionLogSet {
 
     pub fn flush(&self) -> Result<()> {
         for log in self.logs.values() {
-            log.lock().expect("partition log lock poisoned").flush()?;
+            log.lock()
+                .expect("partition log lock poisoned")
+                .release_resources()?;
         }
         Ok(())
     }
@@ -214,7 +216,7 @@ impl PartitionLogSet {
             .ok_or_else(|| crate::error::BrokerError::msg("unknown stream partition"))?
             .lock()
             .expect("partition log lock poisoned")
-            .flush()
+            .release_resources()
     }
 
     pub fn append_committed(&self, envelope: MessageEnvelope) -> Result<MessageEnvelope> {

@@ -39,7 +39,7 @@ pub(super) struct PartitionLog {
     dir: PathBuf,
     stream: StreamId,
     partition: PartitionId,
-    file: File,
+    file: Option<File>,
     segment_id: u64,
     active_bytes: u64,
     segment_bytes: u64,
@@ -153,7 +153,7 @@ impl PartitionLog {
                 dir,
                 stream: stream.clone(),
                 partition,
-                file,
+                file: Some(file),
                 segment_id,
                 active_bytes,
                 segment_bytes,
@@ -205,7 +205,7 @@ impl PartitionLog {
             self.rotate()?;
         }
         let position = self.active_bytes;
-        self.file.write_all(&batch.bytes)?;
+        self.active_file()?.write_all(&batch.bytes)?;
         self.active_bytes += batch.len;
         self.next_offset += 1;
         let bytes = batch.len;
@@ -251,8 +251,16 @@ impl PartitionLog {
     }
 
     pub(super) fn flush(&mut self) -> Result<()> {
-        self.file.flush()?;
-        self.file.sync_data()?;
+        if let Some(file) = self.file.as_mut() {
+            file.flush()?;
+            file.sync_data()?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn release_resources(&mut self) -> Result<()> {
+        self.flush()?;
+        self.file = None;
         Ok(())
     }
 
@@ -461,7 +469,7 @@ impl PartitionLog {
         self.sealed_subject_segments.push(sealed);
         self.segment_id += 1;
         let path = segment_path(&self.dir, self.segment_id);
-        self.file = create_segment(&path)?;
+        self.file = Some(create_segment(&path)?);
         self.active_bytes = SEGMENT_HEADER_LEN;
         Ok(())
     }
@@ -512,6 +520,22 @@ impl PartitionLog {
         next_offset: u64,
     ) -> Result<()> {
         stage_rewrite(&self.dir, records, next_offset, self.encryption.as_ref())
+    }
+
+    fn active_file(&mut self) -> Result<&mut File> {
+        if self.file.is_none() {
+            let path = segment_path(&self.dir, self.segment_id);
+            self.file = Some(
+                OpenOptions::new()
+                    .read(true)
+                    .append(true)
+                    .open(&path)
+                    .with_context(|| {
+                        format!("reopening partition-log segment {}", path.display())
+                    })?,
+            );
+        }
+        Ok(self.file.as_mut().expect("active file opened above"))
     }
 }
 
