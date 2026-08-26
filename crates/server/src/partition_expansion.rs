@@ -31,7 +31,17 @@ impl PartitionExpansion {
     }
 
     pub fn begin(&mut self, partitions: u32) -> Option<&ExpansionPlan> {
-        if partitions <= self.current_partitions || self.pending.is_some() {
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.to_partitions == partitions)
+        {
+            return self.pending.as_ref();
+        }
+        if self.pending.is_some() {
+            return None;
+        }
+        if partitions <= self.current_partitions {
             return None;
         }
         self.pending = Some(ExpansionPlan {
@@ -50,7 +60,7 @@ impl PartitionExpansion {
         if count > plan.to_partitions {
             return false;
         }
-        plan.prepared_partitions = count;
+        plan.prepared_partitions = plan.prepared_partitions.max(count);
         true
     }
 
