@@ -18,6 +18,7 @@ use crate::error::{BrokerError, Result};
 
 const KEY_LEN: usize = 32;
 const NONCE_LEN: usize = 12;
+const KEY_CACHE_CAPACITY: usize = 16;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, Serialize, PartialOrd)]
 pub struct KeyVersion(u32);
@@ -129,6 +130,7 @@ impl KeyProvider for FileKeyProvider {
 struct KeyRingState {
     active: KeyVersion,
     retained: std::collections::BTreeSet<KeyVersion>,
+    prepared: BTreeMap<KeyVersion, Arc<RandomizedNonceKey>>,
 }
 
 /// Envelope encryption with online key rotation.
@@ -150,12 +152,17 @@ impl fmt::Debug for KeyRing {
 
 impl KeyRing {
     pub fn new(provider: Arc<dyn KeyProvider>, active: KeyVersion) -> Result<Self> {
-        provider.load_key(active)?;
+        let key_bytes = provider.load_key(active)?;
+        let prepared = Arc::new(
+            RandomizedNonceKey::new(&AES_256_GCM, &key_bytes)
+                .map_err(|_| BrokerError::msg("encryption key initialization failed"))?,
+        );
         Ok(Self {
             provider,
             state: RwLock::new(KeyRingState {
                 active,
                 retained: [active].into_iter().collect(),
+                prepared: [(active, prepared)].into_iter().collect(),
             }),
         })
     }
@@ -177,7 +184,7 @@ impl KeyRing {
     }
 
     pub fn rotate(&self, version: KeyVersion) -> Result<()> {
-        self.provider.load_key(version)?;
+        self.prepared_key(version)?;
         let mut state = self.state.write().expect("key ring lock poisoned");
         let previous = state.active;
         state.retained.insert(previous);
@@ -186,11 +193,57 @@ impl KeyRing {
         Ok(())
     }
 
+    /// Explicitly evict a version after the storage layer has established that
+    /// no retained data requires it. Future use fails closed until the version
+    /// is loaded again through rotation.
+    pub fn revoke(&self, version: KeyVersion) {
+        let mut state = self.state.write().expect("key ring lock poisoned");
+        state.retained.remove(&version);
+        state.prepared.remove(&version);
+    }
+
+    pub fn invalidate(&self, version: KeyVersion) {
+        let mut state = self.state.write().expect("key ring lock poisoned");
+        state.prepared.remove(&version);
+    }
+
+    fn prepared_key(&self, version: KeyVersion) -> Result<Arc<RandomizedNonceKey>> {
+        if let Some(key) = self
+            .state
+            .read()
+            .expect("key ring lock poisoned")
+            .prepared
+            .get(&version)
+            .cloned()
+        {
+            return Ok(key);
+        }
+        let key_bytes = self.provider.load_key(version)?;
+        let key = Arc::new(
+            RandomizedNonceKey::new(&AES_256_GCM, &key_bytes)
+                .map_err(|_| BrokerError::msg("encryption key initialization failed"))?,
+        );
+        let mut state = self.state.write().expect("key ring lock poisoned");
+        if let Some(existing) = state.prepared.get(&version).cloned() {
+            return Ok(existing);
+        }
+        if state.prepared.len() >= KEY_CACHE_CAPACITY {
+            if let Some(evicted) = state
+                .prepared
+                .keys()
+                .copied()
+                .find(|candidate| *candidate != state.active)
+            {
+                state.prepared.remove(&evicted);
+            }
+        }
+        state.prepared.insert(version, key.clone());
+        Ok(key)
+    }
+
     pub fn encrypt(&self, plaintext: &[u8], aad: &[u8]) -> Result<EncryptedBlob> {
         let version = self.active_version();
-        let key_bytes = self.provider.load_key(version)?;
-        let key = RandomizedNonceKey::new(&AES_256_GCM, &key_bytes)
-            .map_err(|_| BrokerError::msg("encryption key initialization failed"))?;
+        let key = self.prepared_key(version)?;
         let mut ciphertext = plaintext.to_vec();
         let nonce = key
             .seal_in_place_append_tag(Aad::from(aad), &mut ciphertext)
@@ -206,9 +259,7 @@ impl KeyRing {
         if blob.nonce.len() != NONCE_LEN {
             return Err(BrokerError::msg("invalid encryption nonce"));
         }
-        let key_bytes = self.provider.load_key(blob.key_version)?;
-        let key = RandomizedNonceKey::new(&AES_256_GCM, &key_bytes)
-            .map_err(|_| BrokerError::msg("encryption key initialization failed"))?;
+        let key = self.prepared_key(blob.key_version)?;
         let nonce = Nonce::try_assume_unique_for_key(&blob.nonce)
             .map_err(|_| BrokerError::msg("invalid encryption nonce"))?;
         let mut plaintext = blob.ciphertext.clone();
@@ -297,6 +348,7 @@ mod tests {
         assert!(ring.decrypt(&blob, b"object-key").is_err());
         let blob = ring.encrypt(b"secret", b"object-key").unwrap();
         assert!(ring.decrypt(&blob, b"other-key").is_err());
+        ring.invalidate(KeyVersion::new(1));
         provider.revoke(KeyVersion::new(1));
         assert!(ring.decrypt(&blob, b"object-key").is_err());
         assert!(ring.rotate(KeyVersion::new(1)).is_err());
@@ -329,6 +381,7 @@ mod tests {
         });
         let ring = KeyRing::new(provider.clone(), KeyVersion::new(1)).unwrap();
         let blob = ring.encrypt(b"kms", b"object").unwrap();
+        ring.invalidate(KeyVersion::new(1));
         provider.failures.store(1, Ordering::Relaxed);
         assert!(ring.decrypt(&blob, b"object").is_err());
         assert_eq!(ring.decrypt(&blob, b"object").unwrap(), b"kms");
