@@ -485,7 +485,7 @@ impl Client {
         self.read_frame().await
     }
 
-    async fn read_frame(&mut self) -> Result<Option<ServerFrame>> {
+    pub(crate) async fn read_frame(&mut self) -> Result<Option<ServerFrame>> {
         let mut line = Vec::new();
         let read = self
             .stream

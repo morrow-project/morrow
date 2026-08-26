@@ -186,6 +186,30 @@ async fn ping_roundtrip_buffers_delivery_that_arrives_before_pong() {
 }
 
 #[tokio::test]
+async fn acknowledgement_buffers_delivery_that_arrives_before_confirmation() {
+    let (client_io, server_io) = tokio::io::duplex(1024);
+    let mut client = duplex_client(client_io);
+    let server = tokio::spawn(async move {
+        let mut server = tokio::io::BufReader::new(server_io);
+        let mut ack = String::new();
+        server.read_line(&mut ack).await.unwrap();
+        assert_eq!(ack, "ACK consumer 1 2\r\n");
+        server
+            .get_mut()
+            .write_all(
+                b"DELIVER service/echo sid1 _MORROW/ACK/consumer/3/4 5\r\nhello\r\nD-OK ACK consumer 1 2\r\n",
+            )
+            .await
+            .unwrap();
+    });
+
+    client.ack("_MORROW/ACK/consumer/1/2").await.unwrap();
+    let message = client.next_message().await.unwrap();
+    assert_eq!(message.payload, b"hello");
+    server.await.unwrap();
+}
+
+#[tokio::test]
 async fn parses_hdeliver_with_reply_and_morrow_ack_header() {
     let (mut writer, reader) = tokio::io::duplex(128);
     writer

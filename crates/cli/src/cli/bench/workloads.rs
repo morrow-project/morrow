@@ -137,7 +137,7 @@ async fn publish_worker(
     if workload.options.publish_mode == PublishMode::FireAndForget {
         client.ping_roundtrip().await?;
     }
-    stats.elapsed = measured_start.elapsed();
+    stats.elapsed = measurement_elapsed(&workload.options, measured_start);
     validate_acknowledgements(&workload.options, &stats)?;
     Ok(stats)
 }
@@ -495,7 +495,7 @@ async fn receiver_worker(
         )
         .await;
     }
-    stats.elapsed = measured_start.elapsed();
+    stats.elapsed = measurement_elapsed(&workload.options, measured_start);
     if stats.duplicates > 0 {
         return Err(CliError::msg(format!(
             "benchmark received {} duplicate deliveries",

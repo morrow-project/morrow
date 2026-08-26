@@ -211,14 +211,20 @@ async fn cli_bench_request_and_service_modes_complete_parallel_work() {
         "--json",
     ])
     .await;
-    assert!(request.status.success(), "{}", stderr(&request));
+    let response = wait_output(server, CLI_COMMAND_TIMEOUT).await;
+    assert!(
+        request.status.success(),
+        "request: {}; responder: {}",
+        stderr(&request),
+        stderr(&response)
+    );
     let request_result: serde_json::Value = serde_json::from_slice(&request.stdout).unwrap();
     assert_eq!(request_result["aggregate"]["operations"], 20);
 
-    let response = wait_output(server, CLI_COMMAND_TIMEOUT).await;
     assert!(response.status.success(), "{}", stderr(&response));
     let response_result: serde_json::Value = serde_json::from_slice(&response.stdout).unwrap();
     assert_eq!(response_result["aggregate"]["operations"], 20);
+    assert_eq!(response_result["aggregate"]["acknowledgements"], 20);
     harness.shutdown().await;
 }
 

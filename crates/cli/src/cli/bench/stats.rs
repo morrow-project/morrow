@@ -141,6 +141,13 @@ pub(crate) fn pacing_delay(
     throughput_delay.max(sleep_delay)
 }
 
+pub(crate) fn measurement_elapsed(options: &BenchmarkOptions, start: Instant) -> Duration {
+    options
+        .duration_ms
+        .map(Duration::from_millis)
+        .unwrap_or_else(|| start.elapsed())
+}
+
 pub(super) fn measurement_headers(
     workload: &PreparedWorkload,
     sequence: usize,

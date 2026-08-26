@@ -1,4 +1,5 @@
 use super::*;
+use std::time::Instant;
 
 #[test]
 fn parses_client_config_defaults() {
@@ -346,6 +347,23 @@ fn benchmark_rate_limiting_uses_the_slower_constraint() {
     );
     assert_eq!(
         bench::stats::pacing_delay(10, 1, 1_000, 5),
+        Duration::from_millis(50)
+    );
+}
+
+#[test]
+fn duration_results_exclude_setup_and_drain_time() {
+    let args = Args::parse(
+        ["morrow-cli", "bench", "pub", "orders", "--duration", "50ms"]
+            .into_iter()
+            .map(str::to_string),
+    )
+    .unwrap();
+    let Command::Bench { options, .. } = args.command else {
+        panic!("expected benchmark command");
+    };
+    assert_eq!(
+        bench::stats::measurement_elapsed(&options, Instant::now() - Duration::from_secs(1)),
         Duration::from_millis(50)
     );
 }
