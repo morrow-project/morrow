@@ -1,6 +1,48 @@
 use super::delivery_index::scheduled_at_ms;
 use super::*;
 
+pub(crate) fn startup_assigned_partitions(config: &Config) -> Option<BTreeSet<(String, u32)>> {
+    let cluster = config.cluster.as_ref()?;
+    match cluster.role {
+        crate::config::ClusterRole::Combined => None,
+        crate::config::ClusterRole::Controller => Some(BTreeSet::new()),
+        crate::config::ClusterRole::Broker => {
+            let data_nodes = cluster
+                .nodes
+                .iter()
+                .map(|node| node.node_id)
+                .filter(|node_id| !cluster.controller_voters.contains(node_id))
+                .collect::<Vec<_>>();
+            let mut data_nodes = data_nodes;
+            data_nodes.sort_unstable();
+            if data_nodes.is_empty() {
+                return Some(BTreeSet::new());
+            }
+            let local_index = data_nodes.iter().position(|node| *node == cluster.node_id);
+            let Some(local_index) = local_index else {
+                return Some(BTreeSet::new());
+            };
+            let mut assigned = BTreeSet::new();
+            for stream in config.streams.definitions() {
+                let replicas = usize::try_from(stream.storage.replicas)
+                    .unwrap_or(data_nodes.len())
+                    .min(data_nodes.len())
+                    .max(1);
+                for partition in 0..stream.partitions {
+                    let owns_partition = (0..replicas).any(|offset| {
+                        data_nodes[(partition as usize + offset) % data_nodes.len()]
+                            == data_nodes[local_index]
+                    });
+                    if owns_partition {
+                        assigned.insert((stream.name.as_str().to_string(), partition));
+                    }
+                }
+            }
+            Some(assigned)
+        }
+    }
+}
+
 impl Morrow {
     pub(super) async fn rebuild_tenant_disk_usage(&self) -> Result<()> {
         let records = self
@@ -213,11 +255,13 @@ impl Morrow {
         if let Some(cluster) = &config.cluster {
             wal.namespace_delivery_ids(cluster.node_id);
         }
-        let (partition_logs, mut envelopes) = PartitionLogSet::open_with_encryption(
+        let assigned_partitions = startup_assigned_partitions(&config);
+        let (partition_logs, mut envelopes) = PartitionLogSet::open_with_encryption_for_partitions(
             &config.wal_dir,
             &config.streams,
             config.wal_segment_bytes,
             encryption,
+            assigned_partitions.as_ref(),
         )?;
         partition_logs.enforce_retention(&mut envelopes, &config.streams, hooks.clock.now_ms())?;
         let mut envelope_seqs = envelopes
