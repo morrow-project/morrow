@@ -70,9 +70,11 @@ impl Drop for WorkReservation {
         let class = self.class;
         let records = self.records;
         let bytes = self.bytes;
-        tokio::spawn(async move {
-            scheduler.lock().await.release(class, records, bytes);
-        });
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                scheduler.lock().await.release(class, records, bytes);
+            });
+        }
     }
 }
 

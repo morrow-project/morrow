@@ -1066,18 +1066,18 @@ impl Morrow {
         move_: crate::reassignment::PlacementMove,
         source_epoch: u64,
     ) -> Result<u64> {
-        let reserved = self.work_scheduler.lock().await.try_reserve(
+        let _reservation = crate::work_scheduler::WorkReservation::try_acquire(
+            self.work_scheduler.clone(),
             crate::work_scheduler::WorkClass::Reassignment,
             0,
             0,
+        )
+        .await;
+        crate::broker_ensure!(
+            _reservation.is_some(),
+            "reassignment work budget is exhausted"
         );
-        crate::broker_ensure!(reserved, "reassignment work budget is exhausted");
         let result = self.reassignment.lock().await.begin(move_, source_epoch);
-        self.work_scheduler.lock().await.release(
-            crate::work_scheduler::WorkClass::Reassignment,
-            0,
-            0,
-        );
         result
     }
 
@@ -1086,34 +1086,34 @@ impl Morrow {
         id: u64,
         progress: crate::reassignment::ReassignmentProgress,
     ) -> Result<crate::reassignment::ReassignmentPhase> {
-        let reserved = self.work_scheduler.lock().await.try_reserve(
+        let _reservation = crate::work_scheduler::WorkReservation::try_acquire(
+            self.work_scheduler.clone(),
             crate::work_scheduler::WorkClass::Reassignment,
             0,
             0,
+        )
+        .await;
+        crate::broker_ensure!(
+            _reservation.is_some(),
+            "reassignment work budget is exhausted"
         );
-        crate::broker_ensure!(reserved, "reassignment work budget is exhausted");
         let result = self.reassignment.lock().await.advance(id, progress);
-        self.work_scheduler.lock().await.release(
-            crate::work_scheduler::WorkClass::Reassignment,
-            0,
-            0,
-        );
         result
     }
 
     pub async fn reassignment_rollback(&self, id: u64, reason: &str) -> Result<()> {
-        let reserved = self.work_scheduler.lock().await.try_reserve(
+        let _reservation = crate::work_scheduler::WorkReservation::try_acquire(
+            self.work_scheduler.clone(),
             crate::work_scheduler::WorkClass::Reassignment,
             0,
             0,
+        )
+        .await;
+        crate::broker_ensure!(
+            _reservation.is_some(),
+            "reassignment work budget is exhausted"
         );
-        crate::broker_ensure!(reserved, "reassignment work budget is exhausted");
         let result = self.reassignment.lock().await.rollback(id, reason);
-        self.work_scheduler.lock().await.release(
-            crate::work_scheduler::WorkClass::Reassignment,
-            0,
-            0,
-        );
         result
     }
 
