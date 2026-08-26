@@ -160,16 +160,21 @@ impl RaftRuntime {
                     .iter()
                     .map(data_append_envelope_bytes)
                     .sum::<usize>() as u64;
+                let work_class = if required {
+                    crate::work_scheduler::WorkClass::Control
+                } else {
+                    crate::work_scheduler::WorkClass::CatchUp
+                };
                 let reserved = if catch_up_records == 0 {
                     false
                 } else {
                     let mut scheduler = work_scheduler.lock().await;
-                    if !scheduler.try_reserve(
-                        crate::work_scheduler::WorkClass::CatchUp,
-                        catch_up_records,
-                        catch_up_bytes,
-                    ) {
-                        return Err(BrokerError::msg("catch-up work budget exhausted"));
+                    if !scheduler.try_reserve(work_class, catch_up_records, catch_up_bytes) {
+                        return Err(BrokerError::msg(if required {
+                            "quorum replication work budget exhausted"
+                        } else {
+                            "catch-up work budget exhausted"
+                        }));
                     }
                     true
                 };
@@ -239,7 +244,7 @@ impl RaftRuntime {
                 .await;
                 if reserved {
                     work_scheduler.lock().await.release(
-                        crate::work_scheduler::WorkClass::CatchUp,
+                        work_class,
                         catch_up_records,
                         catch_up_bytes,
                     );
