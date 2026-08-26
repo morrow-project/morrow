@@ -455,6 +455,34 @@ fn cluster_roles_define_data_and_metadata_plane_membership() {
 }
 
 #[test]
+fn controller_role_rejects_data_plane_listeners() {
+    let mut value = serde_json::json!({
+        "websocket": {
+            "listen": "127.0.0.1:4223",
+            "allowed_origins": []
+        },
+        "cluster": {
+            "enabled": true,
+            "role": "controller",
+            "node_id": 1,
+            "auth_token": "cluster-secret",
+            "raft_listen": "127.0.0.1:5221",
+            "allow_insecure_internal_transports": true,
+            "raft_dir": "./target/test-controller-role/raft",
+            "nodes": [
+                {"node_id": 1, "raft_addr": "localhost:5221", "client_addr": "localhost:4221"}
+            ],
+            "controller_voters": [1]
+        }
+    });
+    assert!(Config::from_json(&value).is_err());
+    value["websocket"] = serde_json::Value::Null;
+    value["cluster"]["route_listen"] = serde_json::json!("127.0.0.1:6223");
+    value["cluster"]["route_advertise"] = serde_json::json!("localhost:6223");
+    assert!(Config::from_json(&value).is_err());
+}
+
+#[test]
 fn rejects_cluster_missing_self_node() {
     let err = Config::from_json(&serde_json::json!({
         "wal_dir": "./target/test-wal-cluster-missing-self",

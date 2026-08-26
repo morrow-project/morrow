@@ -458,6 +458,18 @@ impl Config {
         }
         if let Some(cluster) = &self.cluster {
             cluster.validate()?;
+            if cluster.role == ClusterRole::Controller {
+                crate::broker_ensure!(
+                    self.websocket.is_none(),
+                    "controller nodes must not configure a WebSocket listener"
+                );
+                crate::broker_ensure!(
+                    cluster.route_listen.is_none()
+                        && cluster.route_advertise.is_none()
+                        && cluster.routes.is_empty(),
+                    "controller nodes must not configure a broker route listener or routes"
+                );
+            }
             if create_dirs {
                 std::fs::create_dir_all(&cluster.raft_dir).with_context(|| {
                     format!("creating Raft directory {}", cluster.raft_dir.display())
