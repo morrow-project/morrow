@@ -277,6 +277,9 @@ impl ReplicaDataStore {
             return Ok(Vec::new());
         };
         let start = after.map_or(0, |offset| offset.saturating_add(1));
+        if start > high_watermark {
+            return Ok(Vec::new());
+        }
         self.records
             .get(&(stream.to_string(), partition))
             .into_iter()

@@ -326,19 +326,15 @@ impl RaftRuntime {
         let mut replicated = 1usize;
         let mut flushed = usize::from(fsync);
         let mut joins = tokio::task::JoinSet::new();
-        let committed_records = self.partition_data.lock().unwrap().catch_up_records(
-            &metadata,
-            envelope.stream.as_str(),
-            envelope.partition,
-            None,
-        )?;
+        let metadata = Arc::new(metadata);
         for node_id in self.nodes.keys() {
             if *node_id == self.node_id {
                 continue;
             }
             let client = self.data_client(*node_id).await?;
             let request = request.clone();
-            let committed_records = committed_records.clone();
+            let partition_data = self.partition_data.clone();
+            let metadata = metadata.clone();
             joins.spawn(async move {
                 let progress = send_data_progress_on_client(
                     &client,
@@ -348,10 +344,15 @@ impl RaftRuntime {
                     },
                 )
                 .await?;
-                for record in committed_records
-                    .into_iter()
-                    .filter(|record| progress.is_none_or(|offset| record.offset > offset))
-                {
+                let committed_records = load_partition_delta(
+                    partition_data,
+                    metadata,
+                    request.envelope.stream.as_str().to_string(),
+                    request.envelope.partition,
+                    progress,
+                )
+                .await?;
+                for record in committed_records {
                     send_data_append_on_client(
                         &client,
                         DataAppendRequest {
@@ -555,4 +556,21 @@ impl RaftRuntime {
     pub fn node_id(&self) -> u64 {
         self.node_id
     }
+}
+
+async fn load_partition_delta(
+    partition_data: SharedReplicaData,
+    metadata: Arc<DurableState>,
+    stream: String,
+    partition: crate::stream::PartitionId,
+    after: Option<u64>,
+) -> Result<Vec<crate::partition_log::MessageEnvelope>> {
+    tokio::task::spawn_blocking(move || {
+        partition_data
+            .lock()
+            .map_err(|_| BrokerError::msg("partition data lock poisoned"))?
+            .catch_up_records(&metadata, &stream, partition, after)
+    })
+    .await
+    .map_err(|err| BrokerError::with_source("partition delta worker failed", err))?
 }
