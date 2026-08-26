@@ -53,8 +53,24 @@ impl Morrow {
     }
 
     pub(super) async fn apply_cluster_partition(&self, envelope: MessageEnvelope) -> Result<()> {
-        let _delta_application = self.cluster_delta_gate.lock().await;
-        self.apply_cluster_partition_ordered(envelope).await
+        let shard = crate::state_shards::shard_for(
+            crate::state_shards::StateShardKey::Partition {
+                stream: envelope.stream.as_str(),
+                partition: envelope.partition.0,
+            },
+            self.state_shard_gates.len(),
+        );
+        let shard_wait_started = Instant::now();
+        let _state_shard_guard = self.state_shard_gates[shard].lock().await;
+        self.metrics
+            .state_shard_wait_us
+            .observe(shard_wait_started.elapsed());
+        let shard_hold_started = Instant::now();
+        let result = self.apply_cluster_partition_ordered(envelope).await;
+        self.metrics
+            .state_shard_hold_us
+            .observe(shard_hold_started.elapsed());
+        result
     }
 
     async fn apply_cluster_partition_ordered(&self, envelope: MessageEnvelope) -> Result<()> {

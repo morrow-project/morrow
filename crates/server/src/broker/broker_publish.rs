@@ -368,13 +368,6 @@ impl Morrow {
 
         if let Some(cluster) = self.cluster_runtime().await {
             let partition = select_partition(&stream, &subject_name, key.as_deref(), publisher_id);
-            let shard = crate::state_shards::shard_for(
-                crate::state_shards::StateShardKey::Partition {
-                    stream: stream.name.as_str(),
-                    partition: partition.0,
-                },
-                self.state_shard_gates.len(),
-            );
             let stored_headers = headers
                 .iter()
                 .map(|(name, value)| MessageHeader {
@@ -423,17 +416,7 @@ impl Morrow {
             let retention_result = cluster.enforce_retention(self.hooks.clock.now_ms());
             self.release_retention_work().await;
             retention_result?;
-            let shard_wait_started = Instant::now();
-            let state_shard_guard = self.state_shard_gates[shard].lock().await;
-            self.metrics
-                .state_shard_wait_us
-                .observe(shard_wait_started.elapsed());
-            let shard_hold_started = Instant::now();
             self.apply_cluster_partition(envelope.clone()).await?;
-            drop(state_shard_guard);
-            self.metrics
-                .state_shard_hold_us
-                .observe(shard_hold_started.elapsed());
             let _storage_operation = self.storage_gate.read().await;
             let tenants = self.config.tenant_quotas.keys().cloned().collect();
             crate::broker_ensure!(
