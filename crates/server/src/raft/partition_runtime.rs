@@ -136,6 +136,7 @@ impl RaftRuntime {
             let requests = requests.clone();
             let partition_data = self.partition_data.clone();
             let metadata = metadata.clone();
+            let work_scheduler = self.work_scheduler.clone();
             let required = required_nodes.contains(node_id);
             let task = async move {
                 let progress = send_data_progress_on_client(
@@ -154,66 +155,96 @@ impl RaftRuntime {
                     progress,
                 )
                 .await?;
-                let mut append_batch = Vec::with_capacity(max_records);
-                let mut append_batch_bytes = 0usize;
-                let mut predecessor_checksum = requests[0].predecessor_checksum;
-                let mut last_response = None;
-                for record in committed_records {
-                    let checksum = crate::partition_log::committed_envelope_checksum(&record)?;
-                    let record_bytes = data_append_envelope_bytes(&record);
-                    if !append_batch.is_empty()
-                        && (append_batch.len() == max_records
-                            || append_batch_bytes.saturating_add(record_bytes) > max_bytes)
-                    {
-                        last_response = send_data_append_batch_on_client(
-                            &client,
-                            std::mem::take(&mut append_batch),
-                        )
-                        .await?
-                        .into_iter()
-                        .last();
-                        append_batch_bytes = 0;
+                let catch_up_records = committed_records.len() as u64;
+                let catch_up_bytes = committed_records
+                    .iter()
+                    .map(data_append_envelope_bytes)
+                    .sum::<usize>() as u64;
+                let reserved = if catch_up_records == 0 {
+                    false
+                } else {
+                    let mut scheduler = work_scheduler.lock().await;
+                    if !scheduler.try_reserve(
+                        crate::work_scheduler::WorkClass::CatchUp,
+                        catch_up_records,
+                        catch_up_bytes,
+                    ) {
+                        return Err(BrokerError::msg("catch-up work budget exhausted"));
                     }
-                    append_batch.push(DataAppendRequest {
-                        leader_id: requests[0].leader_id,
-                        leader_epoch: requests[0].leader_epoch,
-                        replica_set_generation: requests[0].replica_set_generation,
-                        fsync: requests[0].fsync,
-                        committed_high_watermark: requests[0].committed_high_watermark,
-                        predecessor_offset: record.offset.checked_sub(1),
-                        predecessor_checksum,
-                        batch_digest: checksum,
-                        durability: requests[0].durability,
-                        envelope: record,
-                    });
-                    append_batch_bytes = append_batch_bytes.saturating_add(record_bytes);
-                    predecessor_checksum = Some(checksum);
-                }
-                for request in requests {
-                    let record_bytes = data_append_envelope_bytes(&request.envelope);
-                    if !append_batch.is_empty()
-                        && (append_batch.len() == max_records
-                            || append_batch_bytes.saturating_add(record_bytes) > max_bytes)
-                    {
-                        last_response = send_data_append_batch_on_client(
-                            &client,
-                            std::mem::take(&mut append_batch),
-                        )
-                        .await?
-                        .into_iter()
-                        .last();
-                        append_batch_bytes = 0;
+                    true
+                };
+                let result = async {
+                    let mut append_batch = Vec::with_capacity(max_records);
+                    let mut append_batch_bytes = 0usize;
+                    let mut predecessor_checksum = requests[0].predecessor_checksum;
+                    let mut last_response = None;
+                    for record in committed_records {
+                        let checksum = crate::partition_log::committed_envelope_checksum(&record)?;
+                        let record_bytes = data_append_envelope_bytes(&record);
+                        if !append_batch.is_empty()
+                            && (append_batch.len() == max_records
+                                || append_batch_bytes.saturating_add(record_bytes) > max_bytes)
+                        {
+                            last_response = send_data_append_batch_on_client(
+                                &client,
+                                std::mem::take(&mut append_batch),
+                            )
+                            .await?
+                            .into_iter()
+                            .last();
+                            append_batch_bytes = 0;
+                        }
+                        append_batch.push(DataAppendRequest {
+                            leader_id: requests[0].leader_id,
+                            leader_epoch: requests[0].leader_epoch,
+                            replica_set_generation: requests[0].replica_set_generation,
+                            fsync: requests[0].fsync,
+                            committed_high_watermark: requests[0].committed_high_watermark,
+                            predecessor_offset: record.offset.checked_sub(1),
+                            predecessor_checksum,
+                            batch_digest: checksum,
+                            durability: requests[0].durability,
+                            envelope: record,
+                        });
+                        append_batch_bytes = append_batch_bytes.saturating_add(record_bytes);
+                        predecessor_checksum = Some(checksum);
                     }
-                    append_batch.push(request);
-                    append_batch_bytes = append_batch_bytes.saturating_add(record_bytes);
+                    for request in requests {
+                        let record_bytes = data_append_envelope_bytes(&request.envelope);
+                        if !append_batch.is_empty()
+                            && (append_batch.len() == max_records
+                                || append_batch_bytes.saturating_add(record_bytes) > max_bytes)
+                        {
+                            last_response = send_data_append_batch_on_client(
+                                &client,
+                                std::mem::take(&mut append_batch),
+                            )
+                            .await?
+                            .into_iter()
+                            .last();
+                            append_batch_bytes = 0;
+                        }
+                        append_batch.push(request);
+                        append_batch_bytes = append_batch_bytes.saturating_add(record_bytes);
+                    }
+                    if !append_batch.is_empty() {
+                        last_response = send_data_append_batch_on_client(&client, append_batch)
+                            .await?
+                            .into_iter()
+                            .last();
+                    }
+                    last_response
+                        .ok_or_else(|| BrokerError::msg("partition append batch was empty"))
                 }
-                if !append_batch.is_empty() {
-                    last_response = send_data_append_batch_on_client(&client, append_batch)
-                        .await?
-                        .into_iter()
-                        .last();
+                .await;
+                if reserved {
+                    work_scheduler.lock().await.release(
+                        crate::work_scheduler::WorkClass::CatchUp,
+                        catch_up_records,
+                        catch_up_bytes,
+                    );
                 }
-                last_response.ok_or_else(|| BrokerError::msg("partition append batch was empty"))
+                result
             };
             if required {
                 let node_id = *node_id;

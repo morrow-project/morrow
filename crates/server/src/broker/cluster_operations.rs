@@ -11,6 +11,7 @@ impl Morrow {
             &self.config.streams,
             self.config.wal_segment_bytes,
             self.quotas.clone(),
+            self.work_scheduler.clone(),
         )
         .await?;
         runtime.spawn_listener(

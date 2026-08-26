@@ -17,6 +17,7 @@ pub struct RaftRuntime {
     pub(super) raft_tls: Option<RaftTlsRuntime>,
     pub(super) quotas: Arc<crate::quota::QuotaRuntime>,
     pub(super) data_clients: Arc<tokio::sync::Mutex<HashMap<u64, NetworkClient>>>,
+    pub(super) work_scheduler: Arc<tokio::sync::Mutex<crate::work_scheduler::WorkScheduler>>,
 }
 #[derive(Debug, Clone)]
 pub struct ClusterNode {
@@ -89,6 +90,7 @@ impl RaftRuntime {
         streams: &crate::stream::StreamCatalog,
         segment_bytes: u64,
         quotas: Arc<crate::quota::QuotaRuntime>,
+        work_scheduler: Arc<tokio::sync::Mutex<crate::work_scheduler::WorkScheduler>>,
     ) -> Result<Self> {
         std::fs::create_dir_all(&config.raft_dir)
             .with_context(|| format!("creating Raft directory {}", config.raft_dir.display()))?;
@@ -255,6 +257,7 @@ impl RaftRuntime {
             raft_tls,
             quotas,
             data_clients: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            work_scheduler,
         })
     }
 
