@@ -523,7 +523,12 @@ fn repeated_byte_retention_reaches_a_bounded_physical_steady_state() {
         .sum::<u64>();
     assert!(physical_log_bytes <= codec::SEGMENT_HEADER_LEN + 512);
     let (_, replay) = PartitionLogSet::open(dir.path(), &catalog, 256).unwrap();
-    assert_eq!(replay, envelopes);
+    let expected_metadata = envelopes
+        .iter()
+        .cloned()
+        .map(MessageEnvelope::into_resident_metadata)
+        .collect::<Vec<_>>();
+    assert_eq!(replay, expected_metadata);
 }
 
 #[test]
