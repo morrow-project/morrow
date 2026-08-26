@@ -120,6 +120,30 @@ fn decoded_metadata_cache_is_populated_by_appends_and_reads() {
     assert_eq!(logs.metadata_cache_stats(), (1, 0));
 }
 
+#[test]
+fn partition_resource_is_released_at_flush_and_reopened_for_append() {
+    let dir = TempDir::new().unwrap();
+    let catalog = catalog(1);
+    let logs = PartitionLogSet::open(dir.path(), &catalog, 4096).unwrap().0;
+    let stream = &catalog.definitions()[0];
+    assert_eq!(logs.active_resource_count(), 1);
+    logs.append(AppendRequest {
+        partition_hint: Some(PartitionId(0)),
+        ..request(stream, None, &[])
+    })
+    .unwrap();
+    logs.flush().unwrap();
+    assert_eq!(logs.active_resource_count(), 0);
+    let appended = logs
+        .append(AppendRequest {
+            partition_hint: Some(PartitionId(0)),
+            ..request(stream, None, &[])
+        })
+        .unwrap();
+    assert_eq!(appended.offset, 1);
+    assert_eq!(logs.active_resource_count(), 1);
+}
+
 fn request_for_subject<'a>(stream: &'a StreamDefinition, subject: &'a str) -> AppendRequest<'a> {
     let mut request = request(stream, None, &[]);
     request.subject = subject;
