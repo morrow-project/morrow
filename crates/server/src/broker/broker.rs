@@ -114,6 +114,12 @@ impl Morrow {
         )
     }
 
+    pub(super) async fn acquire_retention_work(&self) {
+        while !self.reserve_retention_work().await {
+            tokio::task::yield_now().await;
+        }
+    }
+
     pub(super) async fn release_retention_work(&self) {
         self.work_scheduler
             .lock()

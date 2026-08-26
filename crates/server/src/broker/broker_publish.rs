@@ -422,10 +422,7 @@ impl Morrow {
                 Err(error) => return Err(error),
             };
             disk_reservation.commit();
-            crate::broker_ensure!(
-                self.reserve_retention_work().await,
-                "retention work budget exhausted"
-            );
+            self.acquire_retention_work().await;
             let retention_result = cluster.enforce_retention(self.hooks.clock.now_ms());
             self.release_retention_work().await;
             retention_result?;
@@ -438,10 +435,7 @@ impl Morrow {
             for change in &changes {
                 self.partition_logs.advance_retention(change)?;
             }
-            crate::broker_ensure!(
-                self.reserve_retention_work().await,
-                "retention work budget exhausted"
-            );
+            self.acquire_retention_work().await;
             let released_result = self
                 .inner
                 .lock()
@@ -592,10 +586,7 @@ impl Morrow {
             for change in &changes {
                 self.partition_logs.advance_retention(change)?;
             }
-            crate::broker_ensure!(
-                self.reserve_retention_work().await,
-                "retention work budget exhausted"
-            );
+            self.acquire_retention_work().await;
             let released_result = self
                 .inner
                 .lock()
