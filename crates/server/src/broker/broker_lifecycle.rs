@@ -1066,7 +1066,19 @@ impl Morrow {
         move_: crate::reassignment::PlacementMove,
         source_epoch: u64,
     ) -> Result<u64> {
-        self.reassignment.lock().await.begin(move_, source_epoch)
+        let reserved = self.work_scheduler.lock().await.try_reserve(
+            crate::work_scheduler::WorkClass::Reassignment,
+            0,
+            0,
+        );
+        crate::broker_ensure!(reserved, "reassignment work budget is exhausted");
+        let result = self.reassignment.lock().await.begin(move_, source_epoch);
+        self.work_scheduler.lock().await.release(
+            crate::work_scheduler::WorkClass::Reassignment,
+            0,
+            0,
+        );
+        result
     }
 
     pub async fn reassignment_advance(
@@ -1074,11 +1086,35 @@ impl Morrow {
         id: u64,
         progress: crate::reassignment::ReassignmentProgress,
     ) -> Result<crate::reassignment::ReassignmentPhase> {
-        self.reassignment.lock().await.advance(id, progress)
+        let reserved = self.work_scheduler.lock().await.try_reserve(
+            crate::work_scheduler::WorkClass::Reassignment,
+            0,
+            0,
+        );
+        crate::broker_ensure!(reserved, "reassignment work budget is exhausted");
+        let result = self.reassignment.lock().await.advance(id, progress);
+        self.work_scheduler.lock().await.release(
+            crate::work_scheduler::WorkClass::Reassignment,
+            0,
+            0,
+        );
+        result
     }
 
     pub async fn reassignment_rollback(&self, id: u64, reason: &str) -> Result<()> {
-        self.reassignment.lock().await.rollback(id, reason)
+        let reserved = self.work_scheduler.lock().await.try_reserve(
+            crate::work_scheduler::WorkClass::Reassignment,
+            0,
+            0,
+        );
+        crate::broker_ensure!(reserved, "reassignment work budget is exhausted");
+        let result = self.reassignment.lock().await.rollback(id, reason);
+        self.work_scheduler.lock().await.release(
+            crate::work_scheduler::WorkClass::Reassignment,
+            0,
+            0,
+        );
+        result
     }
 
     pub async fn serve(self) -> Result<()> {
@@ -1838,21 +1874,28 @@ impl Morrow {
         metrics.push_str(&format!(
             "morrow_partition_active_commit_members {active_commit_members}\n"
         ));
-        let compaction_usage = self
-            .work_scheduler
-            .lock()
-            .await
-            .usage(crate::work_scheduler::WorkClass::Compaction);
-        let foreground_usage = self
-            .work_scheduler
-            .lock()
-            .await
-            .usage(crate::work_scheduler::WorkClass::Foreground);
-        let retention_usage = self
-            .work_scheduler
-            .lock()
-            .await
-            .usage(crate::work_scheduler::WorkClass::Retention);
+        let scheduler = self.work_scheduler.lock().await;
+        let control_usage = scheduler.usage(crate::work_scheduler::WorkClass::Control);
+        let foreground_usage = scheduler.usage(crate::work_scheduler::WorkClass::Foreground);
+        let observer_usage = scheduler.usage(crate::work_scheduler::WorkClass::Observer);
+        let catch_up_usage = scheduler.usage(crate::work_scheduler::WorkClass::CatchUp);
+        let snapshot_usage = scheduler.usage(crate::work_scheduler::WorkClass::Snapshot);
+        let reassignment_usage = scheduler.usage(crate::work_scheduler::WorkClass::Reassignment);
+        let compaction_usage = scheduler.usage(crate::work_scheduler::WorkClass::Compaction);
+        let retention_usage = scheduler.usage(crate::work_scheduler::WorkClass::Retention);
+        drop(scheduler);
+        for (name, usage) in [
+            ("control", control_usage),
+            ("observer", observer_usage),
+            ("catch_up", catch_up_usage),
+            ("snapshot", snapshot_usage),
+            ("reassignment", reassignment_usage),
+        ] {
+            metrics.push_str(&format!(
+                "# HELP morrow_work_{name}_rejections_total Work items rejected by the {name} budget.\n# TYPE morrow_work_{name}_rejections_total counter\nmorrow_work_{name}_rejections_total {}\n# HELP morrow_work_{name}_active Active {name} work items.\n# TYPE morrow_work_{name}_active gauge\nmorrow_work_{name}_active {}\n",
+                usage.rejected, usage.concurrency
+            ));
+        }
         metrics.push_str(
             "# HELP morrow_work_compaction_rejections_total Compaction jobs rejected by the work budget.\n",
         );
