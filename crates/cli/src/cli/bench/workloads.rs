@@ -176,17 +176,37 @@ async fn publish_one(
         let msg_id = format!("bench-{worker}-{sequence}");
         let ack = if let (Some(stream), Some(routed)) = (workload.options.stream.as_deref(), routed)
         {
-            routed
-                .publish_to_stream_with_qos_and_headers(
-                    stream,
-                    &subject,
-                    &workload.payload,
-                    level,
-                    &msg_id,
-                    key.as_deref(),
-                    &headers,
-                )
-                .await?
+            if let Some(url) = workload.options.partition_metadata_url.clone() {
+                let token = workload.options.partition_metadata_token.clone();
+                routed
+                    .publish_to_stream_with_qos_and_headers_refresh(
+                        stream,
+                        &subject,
+                        &workload.payload,
+                        level,
+                        &msg_id,
+                        key.as_deref(),
+                        &headers,
+                        move || async move {
+                            super::fetch_partition_metadata(&url, token.as_deref())
+                                .await
+                                .map_err(|error| error.to_string())
+                        },
+                    )
+                    .await?
+            } else {
+                routed
+                    .publish_to_stream_with_qos_and_headers(
+                        stream,
+                        &subject,
+                        &workload.payload,
+                        level,
+                        &msg_id,
+                        key.as_deref(),
+                        &headers,
+                    )
+                    .await?
+            }
         } else {
             client
                 .publish_with_qos_key_and_headers(

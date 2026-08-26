@@ -3,6 +3,7 @@
 use serde::Deserialize;
 use std::{
     collections::{HashMap, VecDeque},
+    future::Future,
     net::SocketAddr,
 };
 
@@ -198,6 +199,51 @@ impl RoutedClient {
                             "publish failed after one metadata refresh retry: {first_error}; retry: {retry_error}"
                         ))
                     })
+            }
+        }
+    }
+
+    /// Refresh metadata once after a bounded publish failure, then retry with
+    /// the stable producer identity. The caller owns the metadata transport so
+    /// this remains usable with HTTP, an embedded control client, or a cached
+    /// file; the routing layer only enforces one refresh attempt.
+    pub async fn publish_to_stream_with_qos_and_headers_refresh<F, Fut>(
+        &mut self,
+        stream: &str,
+        subject: &str,
+        payload: &[u8],
+        level: protocol::AckLevel,
+        msg_id: &str,
+        key: Option<&str>,
+        headers: &[(String, String)],
+        refresh: F,
+    ) -> super::error::Result<ProducerAck>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<Vec<u8>, String>>,
+    {
+        match self
+            .publish_to_stream_with_qos_and_headers(
+                stream, subject, payload, level, msg_id, key, headers,
+            )
+            .await
+        {
+            Ok(ack) => Ok(ack),
+            Err(first_error) => {
+                let metadata = refresh().await.map_err(|refresh_error| {
+                    super::error::ClientError::msg(format!(
+                        "publish failed and metadata refresh failed: {first_error}; refresh: {refresh_error}"
+                    ))
+                })?;
+                self.apply_metadata_json(&metadata).map_err(|error| {
+                    super::error::ClientError::msg(format!(
+                        "publish failed and refreshed metadata was invalid: {first_error}; metadata: {error}"
+                    ))
+                })?;
+                self.publish_to_stream_with_qos_and_headers(
+                    stream, subject, payload, level, msg_id, key, headers,
+                )
+                .await
             }
         }
     }
