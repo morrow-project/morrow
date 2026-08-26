@@ -185,6 +185,16 @@ impl PartitionLeaderCache {
         {
             return false;
         }
+        if self.streams.get(&metadata.name).is_some_and(|current| {
+            current.partitioning_epoch == metadata.partitioning_epoch
+                && current
+                    .leaders
+                    .iter()
+                    .zip(&metadata.leaders)
+                    .any(|(existing, next)| next.leader_epoch < existing.leader_epoch)
+        }) {
+            return false;
+        }
         let name = metadata.name.clone();
         self.streams.insert(name.clone(), metadata);
         self.order.retain(|entry| entry != &name);
