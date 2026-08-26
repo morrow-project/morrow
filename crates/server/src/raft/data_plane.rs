@@ -303,7 +303,7 @@ impl ReplicaDataStore {
         if let Some(predecessor_offset) = request.predecessor_offset {
             crate::broker_ensure!(
                 current_offset == Some(predecessor_offset),
-                "partition append has a gap or stale predecessor"
+                "partition append has a gap or stale predecessor (current={current_offset:?}, predecessor={predecessor_offset})"
             );
             if let Some(expected_checksum) = request.predecessor_checksum {
                 let predecessor = self
@@ -458,10 +458,24 @@ impl ReplicaDataStore {
                     });
                 }
             }
-            crate::broker_ensure!(
-                request.high_watermark == current.high_watermark.saturating_add(1),
-                "partition commit has a gap"
-            );
+            if request.high_watermark != current.high_watermark.saturating_add(1) {
+                let expected = current.high_watermark.saturating_add(1);
+                let contiguous = self.records.get(&key).is_some_and(|records| {
+                    records.range(expected..=request.high_watermark).count()
+                        == usize::try_from(
+                            request
+                                .high_watermark
+                                .saturating_sub(current.high_watermark),
+                        )
+                        .unwrap_or(usize::MAX)
+                });
+                crate::broker_ensure!(
+                    contiguous,
+                    "partition commit has a gap (current={}, requested={})",
+                    current.high_watermark,
+                    request.high_watermark
+                );
+            }
         }
         let appended_bytes = crate::raft::append_journal(
             &self.commit_journal,

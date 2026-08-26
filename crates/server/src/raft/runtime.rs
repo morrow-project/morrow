@@ -21,6 +21,7 @@ pub struct RaftRuntime {
     pub(super) work_scheduler: Arc<tokio::sync::Mutex<crate::work_scheduler::WorkScheduler>>,
     pub(super) partition_ingress_queues:
         Arc<tokio::sync::Mutex<HashMap<String, super::partition_runtime::PartitionIngressQueue>>>,
+    pub(super) metadata_bootstrap_gate: Arc<tokio::sync::Mutex<()>>,
 }
 #[derive(Debug, Clone)]
 pub struct ClusterNode {
@@ -269,6 +270,7 @@ impl RaftRuntime {
             data_clients: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             work_scheduler,
             partition_ingress_queues: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            metadata_bootstrap_gate: Arc::new(tokio::sync::Mutex::new(())),
         })
     }
 
@@ -515,6 +517,13 @@ impl RaftRuntime {
 
     pub async fn current_leader(&self) -> Option<u64> {
         self.raft.current_leader().await
+    }
+
+    pub fn partition_assignment_count(&self) -> usize {
+        self.state_machine
+            .durable_state()
+            .partition_assignments
+            .len()
     }
 
     pub async fn quorum_available(&self) -> bool {

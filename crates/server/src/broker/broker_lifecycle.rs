@@ -1335,6 +1335,12 @@ impl Morrow {
         self.cluster_runtime().await?.current_leader().await
     }
 
+    pub async fn cluster_partition_assignment_count(&self) -> usize {
+        self.cluster_runtime()
+            .await
+            .map_or(0, |cluster| cluster.partition_assignment_count())
+    }
+
     pub(super) async fn health_response(&self) -> HealthResponse {
         let cluster = self.cluster_response().await;
         let route_degraded = cluster

@@ -65,12 +65,34 @@ pub(super) struct PartitionIngressItem {
 }
 
 impl RaftRuntime {
+    async fn ensure_partition_metadata_ready(&self) -> Result<()> {
+        if self
+            .state_machine
+            .durable_state()
+            .stream_definitions
+            .is_empty()
+        {
+            let _gate = self.metadata_bootstrap_gate.lock().await;
+            if self
+                .state_machine
+                .durable_state()
+                .stream_definitions
+                .is_empty()
+                && self.raft.current_leader().await == Some(self.node_id)
+            {
+                self.ensure_metadata_ready().await?;
+            }
+        }
+        Ok(())
+    }
+
     pub async fn replicate_partition(
         &self,
         envelope: crate::partition_log::MessageEnvelope,
         fsync: bool,
         cluster_durable: bool,
     ) -> Result<crate::partition_log::MessageEnvelope> {
+        self.ensure_partition_metadata_ready().await?;
         let key = partition_key(envelope.stream.as_str(), envelope.partition.0);
         let (response, receiver) = tokio::sync::oneshot::channel();
         let envelope_bytes = data_append_envelope_bytes(&envelope);
@@ -138,6 +160,7 @@ impl RaftRuntime {
         fsync: bool,
         cluster_durable: bool,
     ) -> Result<Vec<crate::partition_log::MessageEnvelope>> {
+        self.ensure_partition_metadata_ready().await?;
         let (max_records, max_bytes) = data_append_batch_limits();
         crate::broker_ensure!(
             !envelopes.is_empty() && envelopes.len() <= max_records,
@@ -186,7 +209,14 @@ impl RaftRuntime {
             assignment.leader_id == self.node_id,
             "partition leader assignment is not committed"
         );
-        let previous = metadata.partition_commits.get(&key);
+        let local_commit = self
+            .partition_data
+            .lock()
+            .unwrap()
+            .commit_metadata(first.stream.as_str(), first.partition);
+        let previous = local_commit
+            .as_ref()
+            .or_else(|| metadata.partition_commits.get(&key));
         if metadata.feature_gates.contains("partition-local-commit-v1") {
             crate::broker_ensure!(
                 previous.is_none_or(|commit| {
@@ -250,7 +280,7 @@ impl RaftRuntime {
         let mut joins = tokio::task::JoinSet::new();
         let metadata = Arc::new(metadata);
         for node_id in self.nodes.keys() {
-            if *node_id == self.node_id {
+            if *node_id == self.node_id || !assignment.replicas.contains(node_id) {
                 continue;
             }
             let client = self.data_client(*node_id).await?;

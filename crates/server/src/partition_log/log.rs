@@ -193,7 +193,9 @@ impl PartitionLog {
         }
         crate::broker_ensure!(
             envelope.offset == self.next_offset,
-            "partition-log append creates an offset gap"
+            "partition-log append creates an offset gap (next={}, requested={})",
+            self.next_offset,
+            envelope.offset
         );
         let batch = match &self.encryption {
             Some(encryption) => encode_encrypted_batch_with_len(&envelope, encryption)?,

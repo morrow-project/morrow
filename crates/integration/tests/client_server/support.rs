@@ -249,7 +249,16 @@ impl ClusterHarness {
                 && observed.iter().all(|observed| *observed == Some(leader))
                 && self.nodes.iter().any(|node| node.node_id == leader)
             {
-                return leader;
+                let mut assignments_ready = true;
+                for broker in &self.brokers {
+                    if broker.cluster_partition_assignment_count().await == 0 {
+                        assignments_ready = false;
+                        break;
+                    }
+                }
+                if assignments_ready {
+                    return leader;
+                }
             }
             assert!(
                 tokio::time::Instant::now() < deadline,
@@ -592,7 +601,11 @@ fn test_streams() -> server::stream::StreamCatalog {
                 subjects: vec![subject.to_string()],
                 partitions: 1,
                 partitioning: Default::default(),
-                storage: Default::default(),
+                storage: server::stream::StoragePolicy {
+                    mode: server::stream::StorageMode::Quorum,
+                    replicas: 3,
+                    min_ack_replicas: 2,
+                },
                 retention: Default::default(),
             })
             .collect(),

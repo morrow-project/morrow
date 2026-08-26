@@ -24,8 +24,22 @@ impl Morrow {
         }
         let runtime = ClusterRuntime::real(runtime);
         self.sync_from_cluster(&runtime).await?;
+        let bootstrap_runtime = runtime.clone();
         *self.cluster.lock().await = Some(runtime);
+        self.spawn_metadata_bootstrap(bootstrap_runtime);
         Ok(())
+    }
+
+    fn spawn_metadata_bootstrap(&self, runtime: ClusterRuntime) {
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_millis(25));
+            loop {
+                interval.tick().await;
+                if runtime.is_leader().await && runtime.ensure_metadata_ready().await.is_ok() {
+                    break;
+                }
+            }
+        });
     }
 
     fn spawn_broker_registration(
