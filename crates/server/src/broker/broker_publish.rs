@@ -387,7 +387,6 @@ impl Morrow {
                 },
                 self.state_shard_gates.len(),
             );
-            let state_shard_guard = self.state_shard_gates[shard].lock().await;
             let stored_headers = headers
                 .iter()
                 .map(|(name, value)| MessageHeader {
@@ -436,6 +435,7 @@ impl Morrow {
             let retention_result = cluster.enforce_retention(self.hooks.clock.now_ms());
             self.release_retention_work().await;
             retention_result?;
+            let state_shard_guard = self.state_shard_gates[shard].lock().await;
             self.apply_cluster_partition(envelope.clone()).await?;
             drop(state_shard_guard);
             let _storage_operation = self.storage_gate.read().await;
@@ -509,7 +509,6 @@ impl Morrow {
             },
             self.state_shard_gates.len(),
         );
-        let state_shard_guard = self.state_shard_gates[shard].lock().await;
         let pending_envelope = MessageEnvelope {
             namespace,
             stream: stream.name.clone(),
@@ -551,6 +550,7 @@ impl Morrow {
                 }
             };
             disk_reservation.commit();
+            let _state_shard_guard = self.state_shard_gates[shard].lock().await;
             self.metrics
                 .partition_writes_total
                 .fetch_add(1, Ordering::Relaxed);
@@ -586,7 +586,6 @@ impl Morrow {
             inner.apply_record_compaction(record.seq, &self.config.streams);
             (record, released)
         };
-        drop(state_shard_guard);
         for (tenant, bytes) in released {
             self.tenant_quotas.release(
                 &tenant,
