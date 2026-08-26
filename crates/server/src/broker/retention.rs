@@ -31,19 +31,11 @@ impl DurableBrokerState {
             })
             .map(|(seq, _)| *seq)
             .collect::<HashSet<_>>();
-        let retained = self
-            .messages
-            .values()
-            .filter(|record| retained_partition_record(record, change))
-            .filter(|record| {
-                record
-                    .offset
-                    .is_some_and(|offset| offset >= change.earliest_offset)
-            })
-            .map(|record| partition_logs.load_record(record))
-            .map(|record| record.and_then(|record| message_envelope(&record)))
-            .collect::<Result<Vec<_>>>()?;
-        partition_logs.retain_partition(change, &retained)?;
+        // The partition log owns physical retention. Keep the broker state
+        // update bounded to the records that actually leave the window; the
+        // log can discard obsolete sealed segments without cloning the whole
+        // retained history through the broker state lock.
+        partition_logs.advance_retention(change)?;
         self.messages.retain(|seq, _| !removed.contains(seq));
         self.remove_compaction_sequences(&removed);
         self.partition_sequences

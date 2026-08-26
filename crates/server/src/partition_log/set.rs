@@ -285,6 +285,15 @@ impl PartitionLogSet {
             .rewrite(records, Some(change.earliest_offset))
     }
 
+    pub(crate) fn advance_retention(&self, change: &RetentionChange) -> Result<()> {
+        self.logs
+            .get(&(change.stream.clone(), change.partition))
+            .ok_or_else(|| crate::error::BrokerError::msg("unknown stream partition"))?
+            .lock()
+            .expect("partition log lock poisoned")
+            .advance_retention_floor(change.earliest_offset)
+    }
+
     pub(crate) fn compact_visible_offsets(
         &self,
         visible_offsets: &HashMap<(String, PartitionId), BTreeSet<u64>>,
