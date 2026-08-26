@@ -37,3 +37,8 @@ Pass `--metrics-url http://host:admin-port/metrics` to capture a Prometheus
 snapshot as `metrics.prom` inside every case directory. This makes controller
 activity and broker queue/replication counters available beside the benchmark
 result instead of requiring a second, unsynchronised scrape.
+
+Partition recovery is capped at eight workers by default. Operators can lower
+that concurrency for large catalogs or constrained hosts with
+`MORROW_PARTITION_RECOVERY_WORKERS`; values are clamped to the safe range
+`1..=8`.

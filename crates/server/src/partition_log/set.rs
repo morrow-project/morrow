@@ -9,6 +9,7 @@ use std::sync::{
 use std::time::Instant;
 
 const MAX_RECOVERY_WORKERS: usize = 8;
+const MIN_RECOVERY_WORKERS: usize = 1;
 
 #[derive(Debug)]
 pub struct PartitionLogSet {
@@ -63,9 +64,14 @@ impl PartitionLogSet {
                     .map(|partition| (stream.name.clone(), PartitionId(partition)))
             })
             .collect::<Vec<_>>();
+        let configured_workers = std::env::var("MORROW_PARTITION_RECOVERY_WORKERS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(MAX_RECOVERY_WORKERS)
+            .clamp(MIN_RECOVERY_WORKERS, MAX_RECOVERY_WORKERS);
         let workers = std::thread::available_parallelism()
             .map_or(1, usize::from)
-            .min(MAX_RECOVERY_WORKERS)
+            .min(configured_workers)
             .min(work.len().max(1));
         let chunk_size = work.len().max(1).div_ceil(workers);
         let recovered = std::thread::scope(|scope| -> Result<Vec<_>> {
