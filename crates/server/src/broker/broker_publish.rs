@@ -174,6 +174,7 @@ impl Morrow {
             payload.len() <= self.config.max_payload,
             "payload exceeds max payload"
         );
+        let original_subject = subject_name.clone();
         self.authorize_publish(publisher_id, &subject_name).await?;
         let producer_sequence = producer_ack.as_ref().and_then(|ack| ack.producer.clone());
         let producer_fingerprint = producer_sequence.as_ref().map(|_| {
@@ -236,7 +237,9 @@ impl Morrow {
             payload.len() <= self.config.max_payload,
             "middleware payload exceeds max payload"
         );
-        self.authorize_publish(publisher_id, &subject_name).await?;
+        if subject_name != original_subject {
+            self.authorize_publish(publisher_id, &subject_name).await?;
+        }
         for emitted in emitted_messages {
             Box::pin(self.publish_with_depth(
                 publisher_id,
