@@ -390,6 +390,10 @@ impl TransientState {
         headers: &[(String, String)],
         payload: &[u8],
     ) -> (Vec<Delivery>, RouteInterestChanges) {
+        let header_refs = headers
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .collect::<Vec<_>>();
         let matched = self
             .interest_index
             .matching(subject_name)
@@ -398,10 +402,6 @@ impl TransientState {
                 let subscription = self.subscriptions.get(&key)?;
                 let (connection_id, _) = &key;
                 let client = connections.clients.get(connection_id)?;
-                let header_refs = headers
-                    .iter()
-                    .map(|(name, value)| (name.as_str(), value.as_str()))
-                    .collect::<Vec<_>>();
                 let frame = if header_refs.is_empty() {
                     protocol::msg(subject_name, &subscription.sid, reply_to, payload)
                 } else {
