@@ -20,6 +20,9 @@ scripts/run-scale-benchmark.sh \
 ```
 
 Each case is written below the output directory as JSON/CSV benchmark artifacts,
-with a machine-readable `manifest.json` at the root. Keep these artifacts with
-the release commit when comparing throughput, p95 latency, resource use, and
-controller activity across topology sizes.
+with a machine-readable `manifest.json` at the root. The manifest captures the
+UTC start time, host and kernel, online CPU count, total memory when the host
+exposes it, CPU model, and nominal CPU frequency. Empty or unavailable host
+values are recorded as an empty string or `null`, rather than guessed. Keep
+these artifacts with the release commit when comparing throughput, p95 latency,
+resource use, and controller activity across topology sizes.
