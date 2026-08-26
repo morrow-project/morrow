@@ -1,6 +1,57 @@
 use super::*;
 
 #[tokio::test]
+async fn partition_expansion_is_epoch_fenced_by_broker_runtime() {
+    let dir = TempDir::new().unwrap();
+    let broker = deterministic_broker(
+        test_config(dir.path()),
+        Arc::new(ManualClock::new(1_000)),
+        None,
+    );
+
+    let plan = broker.begin_partition_expansion("orders", 8).await.unwrap();
+    assert_eq!(plan.from_partitions, 1);
+    assert_eq!(plan.to_partitions, 8);
+    assert!(!broker.partition_expansion_epoch("orders", 4).await.unwrap());
+    assert!(
+        broker
+            .mark_partition_expansion_prepared("orders", 8)
+            .await
+            .is_ok()
+    );
+    assert_eq!(
+        broker.activate_partition_expansion("orders").await.unwrap(),
+        (8, 2)
+    );
+    assert!(broker.partition_expansion_epoch("orders", 2).await.unwrap());
+}
+
+#[tokio::test]
+async fn partition_expansion_state_survives_restart() {
+    let dir = TempDir::new().unwrap();
+    let config = test_config(dir.path());
+    let broker = deterministic_broker(config.clone(), Arc::new(ManualClock::new(1_000)), None);
+    broker.begin_partition_expansion("orders", 4).await.unwrap();
+    broker
+        .mark_partition_expansion_prepared("orders", 4)
+        .await
+        .unwrap();
+    assert_eq!(
+        broker.activate_partition_expansion("orders").await.unwrap(),
+        (4, 2)
+    );
+    drop(broker);
+
+    let restarted = deterministic_broker(config, Arc::new(ManualClock::new(2_000)), None);
+    assert!(
+        restarted
+            .partition_expansion_epoch("orders", 2)
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
 async fn configured_materialized_view_projects_committed_records() {
     let dir = TempDir::new().unwrap();
     let mut config = test_config(dir.path());
@@ -815,6 +866,25 @@ async fn http_cluster_endpoint_reports_standalone_node() {
     assert!(response.contains("\"leader_id\":null"));
     assert!(response.contains("\"peers\":[]"));
 }
+
+#[tokio::test]
+async fn partition_metadata_response_is_versioned_and_filterable() {
+    let scenario = Scenario::new_fake_cluster_local_node(3, 1, Some(1));
+
+    let response = scenario
+        .broker()
+        .partition_metadata_response(Some("orders"))
+        .await;
+
+    assert_eq!(response.version, 1);
+    assert!(
+        response
+            .partitions
+            .iter()
+            .all(|partition| partition.stream == "orders")
+    );
+}
+
 #[tokio::test]
 async fn http_cluster_endpoint_reports_cluster_role_and_leader() {
     let scenario = Scenario::new_fake_cluster_local_node(3, 1, Some(1));

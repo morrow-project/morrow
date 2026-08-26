@@ -53,6 +53,7 @@ const UNAUTHENTICATED_READ_TIMEOUT_MS: u64 = 5_000;
 const ROUTE_FRAME_READ_TIMEOUT_MS: u64 = 5_000;
 const MAX_ROUTE_FRAME: usize = 2 * 1024 * 1024;
 const MAX_BLOCKING_STORAGE_OPS: usize = 64;
+const STATE_SHARD_COUNT: usize = 64;
 
 mod broker;
 mod broker_authorization;
@@ -80,6 +81,7 @@ mod pull_consumer;
 mod pull_delivery;
 mod pull_waiters;
 mod redelivery;
+mod registration;
 mod retention;
 mod route_connection;
 mod route_interests;
@@ -92,6 +94,7 @@ mod wal_runtime;
 mod websocket;
 
 pub use self::broker::Morrow;
+pub(crate) use self::registration::BrokerControlRegistry;
 #[allow(unused_imports)]
 use self::{
     cluster_runtime::*, compaction::*, consumer::*, consumer_group_commands::*, fake_cluster::*,

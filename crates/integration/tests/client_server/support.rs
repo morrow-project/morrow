@@ -174,6 +174,7 @@ impl ClusterHarness {
                 auth: auth.clone(),
                 cluster: Some(ClusterConfig {
                     enabled: true,
+                    role: server::config::ClusterRole::Combined,
                     node_id: node.node_id,
                     auth_token: "test-cluster-token".to_string(),
                     raft_listen: node.raft_addr,
@@ -205,6 +206,7 @@ impl ClusterHarness {
                             },
                         })
                         .collect(),
+                    controller_voters: nodes.iter().map(|node| node.node_id).collect(),
                     election_timeout_min_ms: 150,
                     election_timeout_max_ms: 300,
                     heartbeat_interval_ms: 50,

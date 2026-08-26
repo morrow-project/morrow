@@ -9,6 +9,7 @@ use std::sync::{
 use std::time::Instant;
 
 const MAX_RECOVERY_WORKERS: usize = 8;
+const MIN_RECOVERY_WORKERS: usize = 1;
 
 #[derive(Debug)]
 pub struct PartitionLogSet {
@@ -34,6 +35,18 @@ impl PartitionLogSet {
         segment_bytes: u64,
         encryption: Option<std::sync::Arc<crate::encryption::KeyRing>>,
     ) -> Result<(Self, Vec<MessageEnvelope>)> {
+        Self::open_with_encryption_for_partitions(wal_dir, catalog, segment_bytes, encryption, None)
+    }
+
+    /// Open only the partitions assigned to this broker. An empty assignment
+    /// is valid and defers all partition-log recovery until placement is known.
+    pub(crate) fn open_with_encryption_for_partitions(
+        wal_dir: &Path,
+        catalog: &StreamCatalog,
+        segment_bytes: u64,
+        encryption: Option<std::sync::Arc<crate::encryption::KeyRing>>,
+        assigned: Option<&BTreeSet<(String, u32)>>,
+    ) -> Result<(Self, Vec<MessageEnvelope>)> {
         let root = wal_dir.join("streams");
         std::fs::create_dir_all(&root)
             .with_context(|| format!("creating stream data directory {}", root.display()))?;
@@ -43,12 +56,22 @@ impl PartitionLogSet {
             .iter()
             .flat_map(|stream| {
                 (0..stream.partitions)
+                    .filter(|partition| {
+                        assigned.is_none_or(|assigned| {
+                            assigned.contains(&(stream.name.as_str().to_string(), *partition))
+                        })
+                    })
                     .map(|partition| (stream.name.clone(), PartitionId(partition)))
             })
             .collect::<Vec<_>>();
+        let configured_workers = std::env::var("MORROW_PARTITION_RECOVERY_WORKERS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(MAX_RECOVERY_WORKERS)
+            .clamp(MIN_RECOVERY_WORKERS, MAX_RECOVERY_WORKERS);
         let workers = std::thread::available_parallelism()
             .map_or(1, usize::from)
-            .min(MAX_RECOVERY_WORKERS)
+            .min(configured_workers)
             .min(work.len().max(1));
         let chunk_size = work.len().max(1).div_ceil(workers);
         let recovered = std::thread::scope(|scope| -> Result<Vec<_>> {
@@ -252,10 +275,12 @@ impl PartitionLogSet {
         for stream in streams {
             for partition in 0..stream.partitions {
                 let partition = PartitionId(partition);
-                let log = self
+                let Some(log) = self
                     .logs
                     .get(&(stream.name.as_str().to_string(), partition))
-                    .expect("catalog partitions are opened together");
+                else {
+                    continue;
+                };
                 if let Some(earliest_offset) = log
                     .lock()
                     .expect("partition log lock poisoned")

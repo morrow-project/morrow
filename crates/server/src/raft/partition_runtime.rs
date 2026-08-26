@@ -13,11 +13,6 @@ impl RaftRuntime {
             .get(&key)
             .ok_or_else(|| BrokerError::msg("partition has no write coordinator"))?;
         let _write_guard = write_gate.lock().await;
-        crate::broker_ensure!(
-            self.raft.current_leader().await == Some(self.node_id),
-            "not partition leader"
-        );
-        self.ensure_metadata_ready().await?;
         let metadata = self.durable_state();
         crate::broker_ensure!(
             self.partition_data
@@ -104,28 +99,38 @@ impl RaftRuntime {
                 )
                 .await?;
                 let mut predecessor_checksum = request.predecessor_checksum;
+                let mut append_batch = Vec::with_capacity(MAX_DATA_APPEND_BATCH_RECORDS);
                 for record in committed_records {
                     let record_checksum =
                         crate::partition_log::committed_envelope_checksum(&record)?;
-                    send_data_append_on_client(
-                        &client,
-                        DataAppendRequest {
-                            leader_id: request.leader_id,
-                            leader_epoch: request.leader_epoch,
-                            replica_set_generation: request.replica_set_generation,
-                            fsync: request.fsync,
-                            committed_high_watermark: request.committed_high_watermark,
-                            predecessor_offset: record.offset.checked_sub(1),
-                            predecessor_checksum,
-                            batch_digest: record_checksum,
-                            durability: request.durability,
-                            envelope: record,
-                        },
-                    )
-                    .await?;
+                    append_batch.push(DataAppendRequest {
+                        leader_id: request.leader_id,
+                        leader_epoch: request.leader_epoch,
+                        replica_set_generation: request.replica_set_generation,
+                        fsync: request.fsync,
+                        committed_high_watermark: request.committed_high_watermark,
+                        predecessor_offset: record.offset.checked_sub(1),
+                        predecessor_checksum,
+                        batch_digest: record_checksum,
+                        durability: request.durability,
+                        envelope: record,
+                    });
                     predecessor_checksum = Some(record_checksum);
+                    if append_batch.len() == MAX_DATA_APPEND_BATCH_RECORDS {
+                        send_data_append_batch_on_client(
+                            &client,
+                            std::mem::take(&mut append_batch),
+                        )
+                        .await?;
+                    }
                 }
-                send_data_append_on_client(&client, request).await
+                append_batch.push(request);
+                let response = send_data_append_batch_on_client(&client, append_batch)
+                    .await?
+                    .into_iter()
+                    .last()
+                    .ok_or_else(|| BrokerError::msg("partition append batch was empty"))?;
+                Ok::<_, BrokerError>(response)
             };
             if required {
                 let node_id = *node_id;

@@ -63,6 +63,10 @@ impl ClusterConfig {
             "cluster.nodes must contain at least one node"
         );
         crate::broker_ensure!(
+            !self.controller_voters.is_empty(),
+            "cluster.controller_voters must contain at least one node"
+        );
+        crate::broker_ensure!(
             self.allow_insecure_internal_transports || self.raft_tls.is_some(),
             "cluster.raft_tls is required unless allow_insecure_internal_transports is true"
         );
@@ -93,6 +97,29 @@ impl ClusterConfig {
                     "cluster.nodes contains duplicate route_addr {route_addr}"
                 );
             }
+        }
+        let mut voters = std::collections::HashSet::new();
+        for voter in &self.controller_voters {
+            crate::broker_ensure!(
+                *voter > 0 && ids.contains(voter),
+                "cluster.controller_voters must reference configured node IDs"
+            );
+            crate::broker_ensure!(
+                voters.insert(*voter),
+                "cluster.controller_voters contains duplicate node_id"
+            );
+        }
+        if self.role == ClusterRole::Controller {
+            crate::broker_ensure!(
+                self.controller_voters.contains(&self.node_id),
+                "controller node must be a controller voter"
+            );
+        }
+        if self.role == ClusterRole::Broker {
+            crate::broker_ensure!(
+                !self.controller_voters.contains(&self.node_id),
+                "broker node must not be a controller voter"
+            );
         }
         crate::broker_ensure!(has_self, "cluster.node_id must be present in cluster.nodes");
         crate::broker_ensure!(
@@ -170,6 +197,10 @@ impl ClusterConfig {
         self.route_advertise
             .as_deref()
             .or_else(|| self.self_node().and_then(|node| node.route_addr.as_deref()))
+    }
+
+    pub fn is_controller_voter(&self) -> bool {
+        self.controller_voters.contains(&self.node_id)
     }
 }
 
@@ -261,8 +292,21 @@ pub(super) fn get_cluster_config(value: &serde_json::Value) -> Result<Option<Clu
     let heartbeat_interval_ms = get_u64(cluster, "heartbeat_interval_ms")?.unwrap_or(50);
     let snapshot_threshold = get_u64(cluster, "snapshot_threshold")?.unwrap_or(10_000);
     let nodes = get_cluster_nodes(cluster)?;
+    let role = match get_string(cluster, "role")?.as_deref() {
+        None | Some("combined") => crate::config::ClusterRole::Combined,
+        Some("controller") => crate::config::ClusterRole::Controller,
+        Some("broker") => crate::config::ClusterRole::Broker,
+        Some(_) => {
+            return Err(BrokerError::msg(
+                "config field cluster.role must be combined, controller, or broker",
+            ));
+        }
+    };
+    let controller_voters = get_u64_array(cluster, "controller_voters")?
+        .unwrap_or_else(|| nodes.iter().map(|node| node.node_id).collect());
     let config = ClusterConfig {
         enabled,
+        role,
         node_id,
         auth_token,
         raft_listen,
@@ -276,6 +320,7 @@ pub(super) fn get_cluster_config(value: &serde_json::Value) -> Result<Option<Clu
         raft_dir,
         bootstrap,
         nodes,
+        controller_voters,
         election_timeout_min_ms,
         election_timeout_max_ms,
         heartbeat_interval_ms,
@@ -283,6 +328,26 @@ pub(super) fn get_cluster_config(value: &serde_json::Value) -> Result<Option<Clu
     };
     config.validate()?;
     Ok(Some(config))
+}
+
+fn get_u64_array(value: &serde_json::Value, key: &str) -> Result<Option<Vec<u64>>> {
+    match value.get(key) {
+        Some(serde_json::Value::Array(values)) => values
+            .iter()
+            .map(|value| {
+                value.as_u64().ok_or_else(|| {
+                    BrokerError::msg(format!(
+                        "config field cluster.{key} must contain only integers"
+                    ))
+                })
+            })
+            .collect::<Result<Vec<_>>>()
+            .map(Some),
+        Some(serde_json::Value::Null) | None => Ok(None),
+        Some(_) => Err(BrokerError::msg(format!(
+            "config field cluster.{key} must be an array"
+        ))),
+    }
 }
 
 fn get_cluster_nodes(value: &serde_json::Value) -> Result<Vec<ClusterNodeConfig>> {

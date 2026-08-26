@@ -167,6 +167,9 @@ pub enum ServerFrame {
 #[path = "client/error.rs"]
 mod error;
 pub use error::ClientError;
+pub mod routing;
+#[cfg(test)]
+mod routing_tests;
 use error::Result;
 #[path = "client/auth.rs"]
 mod auth;

@@ -5,6 +5,7 @@ pub struct RaftRuntime {
     pub(super) raft: BrokerRaft,
     pub(super) state_machine: StateMachineStore,
     pub(super) nodes: HashMap<u64, ClusterNode>,
+    pub(super) data_node_ids: BTreeSet<u64>,
     pub(super) auth_token: String,
     pub(super) node_id: u64,
     pub(super) tls_enabled: bool,
@@ -32,6 +33,56 @@ pub(super) struct RaftTlsRuntime {
     pub(super) handshake_timeout_ms: u64,
 }
 impl RaftRuntime {
+    pub(crate) async fn register_with_controller(
+        &self,
+        controller_id: u64,
+        registration: protocol::broker_control::BrokerRegistration,
+    ) -> Result<protocol::broker_control::RegistrationAccepted> {
+        let response = self
+            .data_client(controller_id)
+            .await?
+            .broker_control(protocol::broker_control::BrokerControlFrame::Register(
+                registration,
+            ))
+            .await?;
+        match response {
+            protocol::broker_control::BrokerControlFrame::RegisterAccepted(accepted) => {
+                Ok(accepted)
+            }
+            protocol::broker_control::BrokerControlFrame::Error(error) => {
+                Err(BrokerError::msg(format!(
+                    "broker registration rejected ({}): {}",
+                    error.code, error.message
+                )))
+            }
+            _ => Err(BrokerError::msg("unexpected broker registration response")),
+        }
+    }
+
+    pub(crate) async fn heartbeat_with_controller(
+        &self,
+        controller_id: u64,
+        heartbeat: protocol::broker_control::BrokerHeartbeat,
+    ) -> Result<()> {
+        match self
+            .data_client(controller_id)
+            .await?
+            .broker_control(protocol::broker_control::BrokerControlFrame::Heartbeat(
+                heartbeat,
+            ))
+            .await?
+        {
+            protocol::broker_control::BrokerControlFrame::HeartbeatAccepted => Ok(()),
+            protocol::broker_control::BrokerControlFrame::Error(error) => {
+                Err(BrokerError::msg(format!(
+                    "broker heartbeat rejected ({}): {}",
+                    error.code, error.message
+                )))
+            }
+            _ => Err(BrokerError::msg("unexpected heartbeat response")),
+        }
+    }
+
     pub(crate) async fn open(
         config: &ClusterConfig,
         tls_enabled: bool,
@@ -55,9 +106,19 @@ impl RaftRuntime {
                 )
             })
             .collect::<HashMap<_, _>>();
+        let data_node_ids = nodes
+            .keys()
+            .copied()
+            .filter(|node_id| {
+                !matches!(config.role, crate::config::ClusterRole::Controller)
+                    && (matches!(config.role, crate::config::ClusterRole::Combined)
+                        || !config.controller_voters.contains(node_id))
+            })
+            .collect();
         let raft_nodes = config
             .nodes
             .iter()
+            .filter(|node| config.controller_voters.contains(&node.node_id))
             .map(|node| (node.node_id, BasicNode::new(node.raft_addr.clone())))
             .collect::<BTreeMap<_, _>>();
 
@@ -80,10 +141,23 @@ impl RaftRuntime {
         })
         .await
         .map_err(|err| BrokerError::with_source("opening Raft state worker", err))??;
-        let mut replica_data = ReplicaDataStore::open(
+        let metadata = state_machine.durable_state();
+        let assigned = (!metadata.partition_assignments.is_empty()).then(|| {
+            metadata
+                .partition_assignments
+                .iter()
+                .filter(|(_, assignment)| assignment.replicas.contains(&config.node_id))
+                .filter_map(|(key, _)| {
+                    let (stream, partition) = key.rsplit_once(':')?;
+                    Some((stream.to_string(), partition.parse().ok()?))
+                })
+                .collect::<std::collections::BTreeSet<_>>()
+        });
+        let mut replica_data = ReplicaDataStore::open_for_partitions(
             &config.raft_dir.join("partition-data"),
             streams,
             segment_bytes,
+            assigned.as_ref(),
         )?;
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -169,6 +243,7 @@ impl RaftRuntime {
             raft,
             state_machine,
             nodes,
+            data_node_ids,
             auth_token: config.auth_token.clone(),
             node_id: config.node_id,
             tls_enabled,
@@ -204,7 +279,12 @@ impl RaftRuntime {
         Ok(client)
     }
 
-    pub fn spawn_listener(&self, listener: TcpListener) {
+    pub(crate) fn spawn_listener(
+        &self,
+        listener: TcpListener,
+        broker_control: crate::broker::BrokerControlRegistry,
+        accepts_broker_control: bool,
+    ) {
         let raft = self.raft.clone();
         let state_machine = self.state_machine.clone();
         let auth_token = self.auth_token.clone();
@@ -220,6 +300,8 @@ impl RaftRuntime {
                 partition_data,
                 tls,
                 quotas,
+                broker_control,
+                accepts_broker_control,
             )
             .await
             {
@@ -316,18 +398,45 @@ impl RaftRuntime {
         if !metadata.stream_definitions.is_empty() {
             return self.validate_metadata_configuration(&metadata);
         }
-        let replicas = self.nodes.keys().copied().collect::<BTreeSet<_>>();
+        let replica_order = self.data_node_ids.iter().copied().collect::<Vec<_>>();
+        crate::broker_ensure!(
+            !replica_order.is_empty(),
+            "metadata bootstrap requires at least one data broker"
+        );
         let mut assignments = HashMap::new();
         for stream in &self.configured_streams {
             for partition in 0..stream.partitions {
+                let replica_count = usize::try_from(stream.storage.replicas)
+                    .unwrap_or(replica_order.len())
+                    .min(replica_order.len())
+                    .max(1);
+                let replicas = (0..replica_count)
+                    .map(|offset| {
+                        replica_order[(partition as usize + offset) % replica_order.len()]
+                    })
+                    .collect::<BTreeSet<_>>();
+                let leader_id = initial_partition_leader(&replica_order, partition);
+                let active_count = usize::try_from(stream.storage.min_ack_replicas)
+                    .unwrap_or(replica_count)
+                    .min(replica_count)
+                    .max(1);
+                let active_commit_set = std::iter::once(leader_id)
+                    .chain(
+                        replicas
+                            .iter()
+                            .copied()
+                            .filter(move |node| *node != leader_id),
+                    )
+                    .take(active_count)
+                    .collect();
                 assignments.insert(
                     partition_key(stream.name.as_str(), partition),
                     PartitionAssignmentMetadata {
                         replicas: replicas.clone(),
-                        active_commit_set: replicas.clone(),
+                        active_commit_set,
                         replica_set_generation: 1,
                         phase: PartitionReconfigurationPhase::Stable,
-                        leader_id: self.node_id,
+                        leader_id,
                         leader_epoch: 1,
                     },
                 );
@@ -363,40 +472,6 @@ impl RaftRuntime {
             "not metadata leader"
         );
         self.ensure_metadata_bootstrap().await?;
-        let assignments = self
-            .state_machine
-            .durable_state()
-            .partition_assignments
-            .into_iter()
-            .filter(|(_, assignment)| assignment.leader_id != self.node_id)
-            .collect::<Vec<_>>();
-        for (key, assignment) in assignments {
-            let (stream, partition) = key
-                .rsplit_once(':')
-                .ok_or_else(|| BrokerError::msg("invalid partition assignment key"))?;
-            let partition = partition
-                .parse::<u32>()
-                .map_err(|_| BrokerError::msg("invalid partition assignment number"))?;
-            let leader_epoch = assignment.leader_epoch.saturating_add(1);
-            let response = self
-                .client_write(BrokerCommand::PartitionLeaderUpdate {
-                    stream: stream.to_string(),
-                    partition,
-                    leader_id: self.node_id,
-                    leader_epoch,
-                })
-                .await?;
-            crate::broker_ensure!(
-                matches!(
-                    response,
-                    BrokerResponse::PartitionLeaderUpdate {
-                        leader_id,
-                        leader_epoch: committed_epoch,
-                    } if leader_id == self.node_id && committed_epoch == leader_epoch
-                ),
-                "partition leader epoch update rejected"
-            );
-        }
         Ok(())
     }
 
@@ -408,13 +483,14 @@ impl RaftRuntime {
                 }),
             "local stream configuration differs from metadata consensus"
         );
-        let replicas = self.nodes.keys().copied().collect::<BTreeSet<_>>();
         crate::broker_ensure!(
-            metadata
-                .partition_assignments
-                .values()
-                .all(|assignment| assignment.replicas == replicas),
-            "local cluster membership differs from partition assignments"
+            metadata.partition_assignments.values().all(|assignment| {
+                assignment
+                    .replicas
+                    .iter()
+                    .all(|node| self.nodes.contains_key(node))
+            }),
+            "partition assignment references an unknown broker"
         );
         Ok(())
     }
@@ -455,6 +531,10 @@ impl RaftRuntime {
     pub fn node_id(&self) -> u64 {
         self.node_id
     }
+}
+
+pub(super) fn initial_partition_leader(replica_order: &[u64], partition: u32) -> u64 {
+    replica_order[partition as usize % replica_order.len()]
 }
 
 pub(super) async fn load_partition_delta(

@@ -198,6 +198,18 @@ async fn binary_partition_frames_preserve_byte_strings_and_reject_unknown_versio
     let decoded: RaftRequest = read_frame(&mut reader).await.unwrap();
     assert!(matches!(decoded, RaftRequest::DataAppend(_)));
 
+    let batch = RaftRequest::DataAppendBatch(vec![match request {
+        RaftRequest::DataAppend(request) => request,
+        _ => unreachable!(),
+    }]);
+    let mut batch_frame = Vec::new();
+    write_frame(&mut batch_frame, &batch).await.unwrap();
+    let mut batch_reader = &batch_frame[..];
+    assert!(matches!(
+        read_frame::<_, RaftRequest>(&mut batch_reader).await.unwrap(),
+        RaftRequest::DataAppendBatch(requests) if requests.len() == 1
+    ));
+
     frame[4] = RAFT_PROTOCOL_VERSION.saturating_add(1);
     let mut reader = &frame[..];
     let error = read_frame::<_, RaftRequest>(&mut reader).await.unwrap_err();
@@ -534,4 +546,13 @@ fn policy_replacements_are_monotonic_and_consensus_managed() {
         }),
         BrokerResponse::Noop
     );
+}
+
+#[test]
+fn initial_partition_leaders_round_robin_across_data_brokers() {
+    let eligible = [3, 7, 11];
+    let leaders = (0..7)
+        .map(|partition| super::runtime::initial_partition_leader(&eligible, partition))
+        .collect::<Vec<_>>();
+    assert_eq!(leaders, vec![3, 7, 11, 3, 7, 11, 3]);
 }

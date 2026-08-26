@@ -1,5 +1,6 @@
 use super::*;
 use crate::wal::GroupStateRecord;
+use std::collections::HashMap;
 use std::sync::mpsc::{self, SyncSender};
 
 const WAL_QUEUE_CAPACITY: usize = 128;
@@ -9,6 +10,7 @@ pub(super) struct WalRuntime {
     sender: SyncSender<WalCommand>,
     next_publish_seq: Arc<AtomicU64>,
     flush_coordinator: Arc<FlushCoordinator>,
+    partition_flush_coordinators: Arc<tokio::sync::Mutex<HashMap<String, Arc<FlushCoordinator>>>>,
 }
 
 struct FlushCoordinator {
@@ -22,6 +24,7 @@ struct FlushState {
 
 enum WalCommand {
     PartitionAppend(PartitionAppendRecord, mpsc::Sender<Result<()>>),
+    PartitionAppendBatch(Vec<PartitionAppendRecord>, mpsc::Sender<Result<()>>),
     ConsumerUpsert(ConsumerRecord, mpsc::Sender<Result<()>>),
     ConsumerCursor(ConsumerCursorRecord, mpsc::Sender<Result<()>>),
     ConsumerCursorDelta(ConsumerCursorDeltaRecord, mpsc::Sender<Result<()>>),
@@ -94,6 +97,7 @@ impl WalRuntime {
                     waiters: Vec::new(),
                 }),
             }),
+            partition_flush_coordinators: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -103,6 +107,28 @@ impl WalRuntime {
 
     pub(super) fn append_partition_append(&self, record: &PartitionAppendRecord) -> Result<()> {
         self.request(|response| WalCommand::PartitionAppend(record.clone(), response))
+    }
+
+    pub(super) fn append_partition_append_batch(
+        &self,
+        records: Vec<PartitionAppendRecord>,
+    ) -> Result<()> {
+        const MAX_PARTITION_APPEND_BATCH_BYTES: usize = 8 * 1024 * 1024;
+        crate::broker_ensure!(
+            !records.is_empty() && records.len() <= 256,
+            "partition append batch is outside the supported bound"
+        );
+        let encoded_bytes = records
+            .iter()
+            .map(|record| {
+                record.stream.len() + record.subject.len() + std::mem::size_of::<u64>() * 2
+            })
+            .sum::<usize>();
+        crate::broker_ensure!(
+            encoded_bytes <= MAX_PARTITION_APPEND_BATCH_BYTES,
+            "partition append batch bytes exceed the supported bound"
+        );
+        self.request(|response| WalCommand::PartitionAppendBatch(records, response))
     }
 
     /// Async callers use these adapters so bounded queue backpressure and WAL
@@ -336,6 +362,68 @@ impl WalRuntime {
             .map_err(|_| BrokerError::msg("WAL group-commit coordinator stopped"))?
     }
 
+    /// Join concurrent high-durability partition flushes into one physical
+    /// barrier. The whole partition log set is flushed once for the group;
+    /// callers still await the same durability boundary individually.
+    pub(super) async fn flush_partitions_grouped(
+        &self,
+        partition_logs: Arc<crate::partition_log::PartitionLogSet>,
+        stream: String,
+        partition: crate::stream::PartitionId,
+        interval: Duration,
+    ) -> Result<()> {
+        let key = format!("{stream}:{}", partition.0);
+        let coordinator = {
+            let mut coordinators = self.partition_flush_coordinators.lock().await;
+            coordinators
+                .entry(key)
+                .or_insert_with(|| {
+                    Arc::new(FlushCoordinator {
+                        state: tokio::sync::Mutex::new(FlushState {
+                            running: false,
+                            waiters: Vec::new(),
+                        }),
+                    })
+                })
+                .clone()
+        };
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let start_worker = {
+            let mut state = coordinator.state.lock().await;
+            state.waiters.push(sender);
+            if state.running {
+                false
+            } else {
+                state.running = true;
+                true
+            }
+        };
+        if start_worker {
+            let coordinator = coordinator.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(interval).await;
+                let result = tokio::task::spawn_blocking(move || {
+                    partition_logs.flush_partition(&stream, partition)
+                })
+                .await
+                .map_err(|err| BrokerError::with_source("partition flush worker failed", err))
+                .and_then(|result| result);
+                let mut state = coordinator.state.lock().await;
+                state.running = false;
+                for waiter in state.waiters.drain(..) {
+                    let outcome = match &result {
+                        Ok(()) => Ok(()),
+                        Err(error) => Err(BrokerError::msg(error.to_string())),
+                    };
+                    let _ = waiter.send(outcome);
+                }
+            });
+        }
+        receiver
+            .await
+            .map_err(|_| BrokerError::msg("partition group-commit coordinator stopped"))?
+    }
+
     pub(super) async fn checkpoint(
         &self,
         messages: Vec<PublishRecord>,
@@ -395,6 +483,12 @@ fn wal_worker(mut wal: Wal, receiver: mpsc::Receiver<WalCommand>) {
         match command {
             WalCommand::PartitionAppend(record, response) => {
                 let _ = response.send(wal.append_partition_append(&record));
+            }
+            WalCommand::PartitionAppendBatch(records, response) => {
+                let result = records
+                    .iter()
+                    .try_for_each(|record| wal.append_partition_append(record));
+                let _ = response.send(result);
             }
             WalCommand::ConsumerUpsert(record, response) => {
                 let _ = response.send(wal.append_consumer_upsert(&record));

@@ -8,6 +8,8 @@ use std::sync::Mutex as StdMutex;
 const PARTITION_COMMIT_JOURNAL: &str = "commit-state.journal";
 const COMMIT_CHECKPOINT_RECORDS: u64 = 1_024;
 const COMMIT_CHECKPOINT_BYTES: u64 = 8 * 1024 * 1024;
+pub(super) const MAX_DATA_APPEND_BATCH_RECORDS: usize = 256;
+pub(super) const MAX_DATA_APPEND_BATCH_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct PartitionCommitRecord {
@@ -128,7 +130,22 @@ pub(super) struct ReplicaDataStore {
 
 impl ReplicaDataStore {
     pub(super) fn open(root: &Path, streams: &StreamCatalog, segment_bytes: u64) -> Result<Self> {
-        let (logs, replay) = PartitionLogSet::open(root, streams, segment_bytes)?;
+        Self::open_for_partitions(root, streams, segment_bytes, None)
+    }
+
+    pub(super) fn open_for_partitions(
+        root: &Path,
+        streams: &StreamCatalog,
+        segment_bytes: u64,
+        assigned: Option<&std::collections::BTreeSet<(String, u32)>>,
+    ) -> Result<Self> {
+        let (logs, replay) = PartitionLogSet::open_with_encryption_for_partitions(
+            root,
+            streams,
+            segment_bytes,
+            None,
+            assigned,
+        )?;
         let mut records: HashMap<_, BTreeMap<_, _>> = HashMap::new();
         for envelope in replay {
             records
@@ -207,6 +224,14 @@ impl ReplicaDataStore {
     }
 
     pub(super) fn append(&mut self, request: &DataAppendRequest) -> Result<DataAppendResponse> {
+        self.append_inner(request, true)
+    }
+
+    fn append_inner(
+        &mut self,
+        request: &DataAppendRequest,
+        flush: bool,
+    ) -> Result<DataAppendResponse> {
         crate::broker_ensure!(
             request.envelope.leader_epoch <= request.leader_epoch,
             "data append is from a stale leader epoch"
@@ -287,13 +312,45 @@ impl ReplicaDataStore {
                 request.envelope.clone().into_resident_metadata(),
             );
         }
-        if request.fsync {
+        if request.fsync && flush {
             self.logs.flush()?;
         }
         Ok(DataAppendResponse {
             match_offset: request.envelope.offset,
-            flushed_offset: request.fsync.then_some(request.envelope.offset),
+            flushed_offset: (request.fsync && flush).then_some(request.envelope.offset),
         })
+    }
+
+    pub(super) fn append_batch(
+        &mut self,
+        requests: &[DataAppendRequest],
+    ) -> Result<Vec<DataAppendResponse>> {
+        crate::broker_ensure!(
+            !requests.is_empty() && requests.len() <= MAX_DATA_APPEND_BATCH_RECORDS,
+            "partition append batch size is outside the supported bound"
+        );
+        let payload_bytes = requests
+            .iter()
+            .map(|request| request.envelope.payload.len())
+            .sum::<usize>();
+        crate::broker_ensure!(
+            payload_bytes <= MAX_DATA_APPEND_BATCH_BYTES,
+            "partition append batch bytes exceed the supported bound"
+        );
+        let mut responses = Vec::with_capacity(requests.len());
+        let should_flush = requests.iter().any(|request| request.fsync);
+        for request in requests {
+            responses.push(self.append_inner(request, false)?);
+        }
+        if should_flush {
+            self.logs.flush()?;
+            for (response, request) in responses.iter_mut().zip(requests) {
+                if request.fsync {
+                    response.flushed_offset = Some(request.envelope.offset);
+                }
+            }
+        }
+        Ok(responses)
     }
 
     pub(super) fn commit(&mut self, request: &DataCommitRequest) -> Result<DataCommitResponse> {

@@ -10,11 +10,13 @@ pub(super) enum RaftRequest {
         data: Vec<u8>,
     },
     DataAppend(DataAppendRequest),
+    DataAppendBatch(Vec<DataAppendRequest>),
     DataCommit(DataCommitRequest),
     DataProgress(DataProgressRequest),
     DataManifest(DataManifestRequest),
     DataHeartbeat(DataHeartbeatRequest),
     DataSnapshotChunk(DataSnapshotChunk),
+    BrokerControl(protocol::broker_control::BrokerControlFrame),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -30,11 +32,13 @@ pub(super) enum RaftResponse {
     Vote(VoteResponse<u64>),
     FullSnapshot(SnapshotResponse<u64>),
     DataAppend(DataAppendResponse),
+    DataAppendBatch(Vec<DataAppendResponse>),
     DataCommit(DataCommitResponse),
     DataProgress(Option<u64>),
     DataManifest(DataManifestResponse),
     DataHeartbeat(DataHeartbeatResponse),
     DataSnapshotChunkAck { offset: u64, checksum: u32 },
+    BrokerControl(protocol::broker_control::BrokerControlFrame),
     Error(String),
 }
 
@@ -46,6 +50,8 @@ pub(super) async fn serve_raft(
     partition_data: SharedReplicaData,
     tls: Option<RaftTlsRuntime>,
     quotas: Arc<crate::quota::QuotaRuntime>,
+    broker_control: crate::broker::BrokerControlRegistry,
+    accepts_broker_control: bool,
 ) -> Result<()> {
     let io_gate = Arc::new(tokio::sync::Semaphore::new(64));
     loop {
@@ -59,6 +65,8 @@ pub(super) async fn serve_raft(
         let partition_data = partition_data.clone();
         let tls = tls.clone();
         let io_gate = io_gate.clone();
+        let broker_control = broker_control.clone();
+        let accepts_broker_control = accepts_broker_control;
         tokio::spawn(async move {
             let _permit = permit;
             let result = if let Some(tls) = tls {
@@ -81,6 +89,8 @@ pub(super) async fn serve_raft(
                                 partition_data,
                                 Some(peer_id),
                                 io_gate,
+                                broker_control,
+                                accepts_broker_control,
                             )
                             .await
                         }
@@ -98,6 +108,8 @@ pub(super) async fn serve_raft(
                     partition_data,
                     None,
                     io_gate,
+                    broker_control,
+                    accepts_broker_control,
                 )
                 .await
             };
@@ -116,6 +128,8 @@ pub(super) async fn handle_raft_stream<S>(
     partition_data: SharedReplicaData,
     tls_peer_id: Option<u64>,
     io_gate: Arc<tokio::sync::Semaphore>,
+    broker_control: crate::broker::BrokerControlRegistry,
+    accepts_broker_control: bool,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -149,13 +163,11 @@ where
                 );
                 let committed = metadata.partition_commits.get(&key);
                 let assignment = metadata.partition_assignments.get(&key);
-                if raft.current_leader().await != Some(request.leader_id)
-                    || assignment.is_none_or(|assignment| {
-                        assignment.leader_id != request.leader_id
-                            || assignment.leader_epoch != request.leader_epoch
-                            || assignment.replica_set_generation != request.replica_set_generation
-                    })
-                {
+                if assignment.is_none_or(|assignment| {
+                    assignment.leader_id != request.leader_id
+                        || assignment.leader_epoch != request.leader_epoch
+                        || assignment.replica_set_generation != request.replica_set_generation
+                }) {
                     RaftResponse::Error("fenced partition leader epoch".to_string())
                 } else if request.batch_digest
                     != crate::partition_log::committed_envelope_checksum(&request.envelope)
@@ -177,17 +189,48 @@ where
                     }
                 }
             }
+            RaftRequest::DataAppendBatch(requests) => {
+                let metadata = state_machine.durable_state();
+                let valid = requests.iter().all(|request| {
+                    let key = partition_key(
+                        request.envelope.stream.as_str(),
+                        request.envelope.partition.0,
+                    );
+                    metadata
+                        .partition_assignments
+                        .get(&key)
+                        .is_some_and(|assignment| {
+                            assignment.leader_id == request.leader_id
+                                && assignment.leader_epoch == request.leader_epoch
+                                && assignment.replica_set_generation
+                                    == request.replica_set_generation
+                        })
+                        && request.batch_digest
+                            == crate::partition_log::committed_envelope_checksum(&request.envelope)
+                                .unwrap_or_default()
+                });
+                if !valid || requests.is_empty() || requests.len() > MAX_DATA_APPEND_BATCH_RECORDS {
+                    RaftResponse::Error("invalid partition append batch".to_string())
+                } else {
+                    match run_replica_io(io_gate.clone(), partition_data.clone(), move |store| {
+                        store.append_batch(&requests)
+                    })
+                    .await
+                    {
+                        Ok(response) => RaftResponse::DataAppendBatch(response),
+                        Err(err) => RaftResponse::Error(err.to_string()),
+                    }
+                }
+            }
             RaftRequest::DataCommit(request) => {
                 let metadata = state_machine.durable_state();
                 let key = partition_key(&request.stream, request.partition.0);
                 let assignment = metadata.partition_assignments.get(&key);
-                if raft.current_leader().await != Some(request.leader_id)
-                    || assignment.is_none_or(|assignment| {
-                        assignment.leader_id != request.leader_id
-                            || assignment.leader_epoch != request.leader_epoch
-                            || assignment.replica_set_generation != request.replica_set_generation
-                    })
-                {
+                if assignment.is_none_or(|assignment| {
+                    assignment.leader_id != request.leader_id
+                        || assignment.leader_epoch != request.leader_epoch
+                        || assignment.replica_set_generation != request.replica_set_generation
+                }) {
                     RaftResponse::Error("fenced partition commit".to_string())
                 } else {
                     match run_replica_io(io_gate.clone(), partition_data.clone(), move |store| {
@@ -260,6 +303,46 @@ where
                         offset: chunk.offset,
                         checksum,
                     }
+                }
+            }
+            RaftRequest::BrokerControl(frame) => {
+                use protocol::broker_control::BrokerControlFrame;
+                if !accepts_broker_control {
+                    RaftResponse::BrokerControl(BrokerControlFrame::Error(
+                        protocol::broker_control::ControlError {
+                            code: "control_plane_unavailable".to_string(),
+                            message: "broker-only nodes do not host the control plane".to_string(),
+                        },
+                    ))
+                } else {
+                    RaftResponse::BrokerControl(match frame {
+                        BrokerControlFrame::Register(registration) => {
+                            match broker_control.register(registration).await {
+                                Ok(result) => BrokerControlFrame::RegisterAccepted(result.accepted),
+                                Err(error) => BrokerControlFrame::Error(
+                                    protocol::broker_control::ControlError {
+                                        code: "registration_rejected".to_string(),
+                                        message: error.to_string(),
+                                    },
+                                ),
+                            }
+                        }
+                        BrokerControlFrame::Heartbeat(heartbeat) => {
+                            match broker_control.heartbeat(heartbeat).await {
+                                Ok(()) => BrokerControlFrame::HeartbeatAccepted,
+                                Err(error) => BrokerControlFrame::Error(
+                                    protocol::broker_control::ControlError {
+                                        code: "heartbeat_rejected".to_string(),
+                                        message: error.to_string(),
+                                    },
+                                ),
+                            }
+                        }
+                        _ => BrokerControlFrame::Error(protocol::broker_control::ControlError {
+                            code: "unsupported_control_request".to_string(),
+                            message: "control frame is not a request".to_string(),
+                        }),
+                    })
                 }
             }
         };

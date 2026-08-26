@@ -147,6 +147,7 @@ fn validate_cluster(cluster: Option<&Value>) -> Result<()> {
         "config.cluster",
         &[
             "enabled",
+            "role",
             "node_id",
             "auth_token",
             "auth_token_file",
@@ -161,6 +162,7 @@ fn validate_cluster(cluster: Option<&Value>) -> Result<()> {
             "raft_dir",
             "bootstrap",
             "nodes",
+            "controller_voters",
             "election_timeout_min_ms",
             "election_timeout_max_ms",
             "heartbeat_interval_ms",
