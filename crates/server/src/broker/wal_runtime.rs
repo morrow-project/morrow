@@ -124,6 +124,10 @@ impl WalRuntime {
                 record.stream.len() + record.subject.len() + std::mem::size_of::<u64>() * 2
             })
             .sum::<usize>();
+        crate::broker_ensure!(
+            encoded_bytes <= MAX_PARTITION_APPEND_BATCH_BYTES,
+            "partition append batch bytes exceed the supported bound"
+        );
         self.request(|response| WalCommand::PartitionAppendBatch(records, response))
     }
 
