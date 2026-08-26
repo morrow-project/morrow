@@ -1,6 +1,6 @@
 //! Hierarchical, bounded budgets for foreground and background broker work.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum WorkClass {
@@ -33,6 +33,47 @@ pub struct WorkUsage {
 pub struct WorkScheduler {
     budgets: BTreeMap<WorkClass, WorkBudget>,
     usage: BTreeMap<WorkClass, WorkUsage>,
+}
+
+/// A scheduler reservation that releases its usage even when the owning future
+/// is cancelled. Normal completion may drop it explicitly; `Drop` handles the
+/// cancellation and shutdown paths without requiring an async finally block.
+pub struct WorkReservation {
+    scheduler: Arc<tokio::sync::Mutex<WorkScheduler>>,
+    class: WorkClass,
+    records: u64,
+    bytes: u64,
+}
+
+impl WorkReservation {
+    pub async fn try_acquire(
+        scheduler: Arc<tokio::sync::Mutex<WorkScheduler>>,
+        class: WorkClass,
+        records: u64,
+        bytes: u64,
+    ) -> Option<Self> {
+        if !scheduler.lock().await.try_reserve(class, records, bytes) {
+            return None;
+        }
+        Some(Self {
+            scheduler,
+            class,
+            records,
+            bytes,
+        })
+    }
+}
+
+impl Drop for WorkReservation {
+    fn drop(&mut self) {
+        let scheduler = self.scheduler.clone();
+        let class = self.class;
+        let records = self.records;
+        let bytes = self.bytes;
+        tokio::spawn(async move {
+            scheduler.lock().await.release(class, records, bytes);
+        });
+    }
 }
 
 impl WorkScheduler {

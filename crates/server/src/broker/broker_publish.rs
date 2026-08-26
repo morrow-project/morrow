@@ -103,12 +103,15 @@ impl Morrow {
             .published_bytes_total
             .fetch_add(payload.len() as u64, Ordering::Relaxed);
         let payload_bytes = payload.len() as u64;
+        let _foreground_reservation = crate::work_scheduler::WorkReservation::try_acquire(
+            self.work_scheduler.clone(),
+            crate::work_scheduler::WorkClass::Foreground,
+            1,
+            payload_bytes,
+        )
+        .await;
         crate::broker_ensure!(
-            self.work_scheduler.lock().await.try_reserve(
-                crate::work_scheduler::WorkClass::Foreground,
-                1,
-                payload_bytes
-            ),
+            _foreground_reservation.is_some(),
             "foreground publish work budget exhausted"
         );
         let result = self
@@ -124,11 +127,6 @@ impl Morrow {
             )
             .instrument(span)
             .await;
-        self.work_scheduler.lock().await.release(
-            crate::work_scheduler::WorkClass::Foreground,
-            1,
-            payload_bytes,
-        );
         if result.is_err() {
             self.metrics
                 .rejected_operations_total
