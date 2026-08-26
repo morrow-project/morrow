@@ -1737,6 +1737,43 @@ impl Morrow {
         metrics.push_str(&format!(
             "morrow_broker_control_retained_updates {retained_updates}\n"
         ));
+        let [
+            registrations,
+            heartbeats,
+            fenced_sessions,
+            metadata_updates,
+            snapshot_fallbacks,
+        ] = self.broker_control.metrics_snapshot();
+        metrics.push_str(
+            "# HELP morrow_broker_control_registrations_total Broker registration attempts.\n# TYPE morrow_broker_control_registrations_total counter\n",
+        );
+        metrics.push_str(&format!(
+            "morrow_broker_control_registrations_total {registrations}\n"
+        ));
+        metrics.push_str(
+            "# HELP morrow_broker_control_heartbeats_total Broker heartbeat attempts.\n# TYPE morrow_broker_control_heartbeats_total counter\n",
+        );
+        metrics.push_str(&format!(
+            "morrow_broker_control_heartbeats_total {heartbeats}\n"
+        ));
+        metrics.push_str(
+            "# HELP morrow_broker_control_fenced_sessions_total Superseded broker sessions.\n# TYPE morrow_broker_control_fenced_sessions_total counter\n",
+        );
+        metrics.push_str(&format!(
+            "morrow_broker_control_fenced_sessions_total {fenced_sessions}\n"
+        ));
+        metrics.push_str(
+            "# HELP morrow_broker_control_metadata_updates_total Published metadata updates.\n# TYPE morrow_broker_control_metadata_updates_total counter\n",
+        );
+        metrics.push_str(&format!(
+            "morrow_broker_control_metadata_updates_total {metadata_updates}\n"
+        ));
+        metrics.push_str(
+            "# HELP morrow_broker_control_snapshot_fallbacks_total Registrations requiring snapshot fallback.\n# TYPE morrow_broker_control_snapshot_fallbacks_total counter\n",
+        );
+        metrics.push_str(&format!(
+            "morrow_broker_control_snapshot_fallbacks_total {snapshot_fallbacks}\n"
+        ));
         metrics
             .push_str("# HELP morrow_cluster_delta_applications_total Applied cluster deltas.\n");
         metrics.push_str("# TYPE morrow_cluster_delta_applications_total counter\n");
