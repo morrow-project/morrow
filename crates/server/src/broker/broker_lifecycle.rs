@@ -1699,6 +1699,27 @@ impl Morrow {
         metrics.push_str("# HELP morrow_configured_partitions Configured partition count.\n");
         metrics.push_str("# TYPE morrow_configured_partitions gauge\n");
         metrics.push_str(&format!("morrow_configured_partitions {partition_count}\n"));
+        metrics.push_str("# HELP morrow_assigned_partitions Locally assigned partition count.\n");
+        metrics.push_str("# TYPE morrow_assigned_partitions gauge\n");
+        metrics.push_str(&format!(
+            "morrow_assigned_partitions {}\n",
+            streams.recovery.total_partitions
+        ));
+        metrics.push_str("# HELP morrow_active_partitions Locally active partition resources.\n");
+        metrics.push_str("# TYPE morrow_active_partitions gauge\n");
+        metrics.push_str(&format!(
+            "morrow_active_partitions {}\n",
+            streams.recovery.completed_partitions
+        ));
+        metrics.push_str("# HELP morrow_recovering_partitions Partitions still recovering.\n");
+        metrics.push_str("# TYPE morrow_recovering_partitions gauge\n");
+        metrics.push_str(&format!(
+            "morrow_recovering_partitions {}\n",
+            streams
+                .recovery
+                .total_partitions
+                .saturating_sub(streams.recovery.completed_partitions)
+        ));
         metrics.push_str("# HELP morrow_recovered_partitions Recovered partition count.\n");
         metrics.push_str("# TYPE morrow_recovered_partitions gauge\n");
         metrics.push_str(&format!(
