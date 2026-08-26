@@ -200,6 +200,11 @@ impl BrokerControlRegistry {
     pub(super) async fn broker_count(&self) -> usize {
         self.inner.lock().await.brokers.len()
     }
+
+    pub(super) async fn status(&self) -> (usize, u64, usize) {
+        let state = self.inner.lock().await;
+        (state.brokers.len(), state.revision, state.updates.len())
+    }
 }
 
 impl Morrow {
