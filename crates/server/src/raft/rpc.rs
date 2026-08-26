@@ -209,7 +209,7 @@ where
                             == crate::partition_log::committed_envelope_checksum(&request.envelope)
                                 .unwrap_or_default()
                 });
-                if !valid || requests.is_empty() || requests.len() > MAX_DATA_APPEND_BATCH_RECORDS {
+                if !valid || !valid_data_append_batch(&requests) {
                     RaftResponse::Error("invalid partition append batch".to_string())
                 } else {
                     match run_replica_io(io_gate.clone(), partition_data.clone(), move |store| {

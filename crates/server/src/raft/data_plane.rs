@@ -42,6 +42,31 @@ pub(super) fn data_append_envelope_bytes(envelope: &MessageEnvelope) -> usize {
         .saturating_add(envelope.payload.len())
 }
 
+pub(super) fn valid_data_append_batch(requests: &[DataAppendRequest]) -> bool {
+    if requests.is_empty() || requests.len() > MAX_DATA_APPEND_BATCH_RECORDS {
+        return false;
+    }
+    let bytes = requests
+        .iter()
+        .map(|request| data_append_envelope_bytes(&request.envelope))
+        .sum::<usize>();
+    if bytes > MAX_DATA_APPEND_BATCH_BYTES {
+        return false;
+    }
+    let first = &requests[0];
+    let key = (&first.envelope.stream, first.envelope.partition);
+    requests.iter().enumerate().all(|(index, request)| {
+        let expected_predecessor = if index == 0 {
+            first.envelope.offset.checked_sub(1)
+        } else {
+            request.envelope.offset.checked_sub(1)
+        };
+        (&request.envelope.stream, request.envelope.partition) == key
+            && request.envelope.offset == first.envelope.offset.saturating_add(index as u64)
+            && request.predecessor_offset == expected_predecessor
+    })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct PartitionCommitRecord {
     pub(super) stream: String,

@@ -245,6 +245,45 @@ fn partition_batch_size_accounts_for_envelope_metadata() {
 }
 
 #[test]
+fn partition_append_batches_are_single_partition_and_contiguous() {
+    let request = DataAppendRequest {
+        leader_id: 1,
+        leader_epoch: 1,
+        replica_set_generation: 1,
+        fsync: false,
+        committed_high_watermark: None,
+        predecessor_offset: Some(4),
+        predecessor_checksum: None,
+        batch_digest: 0,
+        durability: DurabilityBoundary::Memory,
+        envelope: MessageEnvelope {
+            namespace: "default".into(),
+            stream: StreamId::new("orders").unwrap(),
+            partition: PartitionId(0),
+            offset: 5,
+            subject: "orders.created".into(),
+            key: None,
+            headers: Vec::new(),
+            timestamp_ms: 0,
+            reply_to: None,
+            schema_id: None,
+            payload: vec![1],
+            partitioning_epoch: 1,
+            leader_epoch: 1,
+            legacy_seq: 1,
+        },
+    };
+    let mut next = request.clone();
+    next.envelope.offset = 6;
+    next.predecessor_offset = Some(5);
+    assert!(valid_data_append_batch(&[request.clone(), next]));
+
+    let mut mixed = request.clone();
+    mixed.envelope.partition = PartitionId(1);
+    assert!(!valid_data_append_batch(&[request, mixed]));
+}
+
+#[test]
 fn metadata_bootstrap_and_partition_commit_contain_no_message_data() {
     let mut state = DurableState::new(nodes());
     assert_eq!(
