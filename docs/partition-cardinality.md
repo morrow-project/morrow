@@ -18,3 +18,9 @@ Clustered replica catch-up batches are bounded to 256 records and 8 MiB by
 default. Operators may lower those limits with `MORROW_DATA_APPEND_BATCH_RECORDS`
 and `MORROW_DATA_APPEND_BATCH_BYTES`; values are clamped to safe positive limits
 and apply consistently at both the sender and receiver.
+
+The clustered publish ingress coalescer uses a bounded queue per active
+partition. `MORROW_PARTITION_INGRESS_QUEUE_LIMIT` controls the maximum number of
+partition queues (default 4096, hard maximum 65536); attempts to create more
+queues receive explicit backpressure instead of allocating unbounded runtime
+state.
