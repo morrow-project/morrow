@@ -24,6 +24,7 @@ pub mod tenancy;
 pub mod tls;
 pub mod transaction;
 pub mod wal;
+pub mod work_scheduler;
 
 #[cfg(test)]
 mod partition_batch_tests;
@@ -33,6 +34,9 @@ mod state_shards_tests;
 
 #[cfg(test)]
 mod partition_cache_tests;
+
+#[cfg(test)]
+mod work_scheduler_tests;
 
 pub use broker::Morrow;
 pub use config::Config;
