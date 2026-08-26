@@ -917,19 +917,30 @@ impl Morrow {
     }
 
     pub async fn serve(self) -> Result<()> {
-        let listener = TcpListener::bind(self.config.listen)
-            .await
-            .with_context(|| format!("binding {}", self.config.listen))?;
+        let serves_client_traffic = self
+            .config
+            .cluster
+            .as_ref()
+            .is_none_or(|cluster| cluster.role.serves_client_traffic());
+        let listener = if serves_client_traffic {
+            Some(
+                TcpListener::bind(self.config.listen)
+                    .await
+                    .with_context(|| format!("binding {}", self.config.listen))?,
+            )
+        } else {
+            None
+        };
         self.serve_inner(listener, true).await
     }
 
     pub async fn serve_listener(self, listener: TcpListener) -> Result<()> {
-        self.serve_inner(listener, false).await
+        self.serve_inner(Some(listener), false).await
     }
 
     pub(super) async fn serve_inner(
         self,
-        listener: TcpListener,
+        listener: Option<TcpListener>,
         handle_shutdown: bool,
     ) -> Result<()> {
         #[cfg(unix)]
@@ -1017,6 +1028,8 @@ impl Morrow {
                 }
             }
         }
+
+        let listener = listener.expect("client listener required for client-serving role");
 
         loop {
             if handle_shutdown {
