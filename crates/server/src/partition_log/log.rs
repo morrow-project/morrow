@@ -35,7 +35,7 @@ struct SegmentRange {
 }
 
 #[derive(Debug)]
-pub(super) struct PartitionLog {
+pub(crate) struct PartitionLog {
     dir: PathBuf,
     stream: StreamId,
     partition: PartitionId,

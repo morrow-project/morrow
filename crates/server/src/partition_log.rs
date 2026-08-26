@@ -6,6 +6,7 @@ use std::io::{Cursor, Read};
 use std::{collections::HashMap, path::Path};
 
 mod codec;
+mod dynamic;
 mod log;
 mod set;
 mod subject_index;
@@ -161,6 +162,9 @@ fn stable_hash(bytes: &[u8]) -> u64 {
     })
 }
 
+#[cfg(test)]
+#[path = "partition_log/dynamic_tests.rs"]
+mod dynamic_tests;
 #[cfg(test)]
 #[path = "partition_log/tests.rs"]
 mod tests;

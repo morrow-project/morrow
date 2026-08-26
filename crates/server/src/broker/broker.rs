@@ -161,6 +161,15 @@ impl Morrow {
         let expansion = expansions
             .get_mut(stream)
             .ok_or_else(|| BrokerError::msg("unknown stream"))?;
+        let (current_partitions, _) = expansion.current();
+        let target_partitions = expansion
+            .pending()
+            .map(|plan| plan.to_partitions)
+            .ok_or_else(|| BrokerError::msg("partition expansion is not pending"))?;
+        for partition in current_partitions..target_partitions {
+            self.partition_logs
+                .activate_partition(stream, crate::stream::PartitionId(partition))?;
+        }
         crate::broker_ensure!(
             expansion.activate(),
             "partition expansion is not fully prepared"
