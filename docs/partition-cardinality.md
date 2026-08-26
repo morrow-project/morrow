@@ -11,13 +11,15 @@ LRU bound for decoded envelope metadata. Its capacity is controlled by
 `MORROW_PARTITION_METADATA_CACHE_CAPACITY` (default 4096). Retention and rewrite
 operations invalidate cached records, while cache hits avoid reopening segment
 files. Active segment handles are released after a successful flush and are
-reopened on the next append. Full whole-partition lazy activation and eviction
-of all inactive runtime state remains a follow-up requirement.
+reopened on the next append.
 
 Dynamic partition resources are bounded separately with
 `MORROW_MAX_ACTIVE_DYNAMIC_PARTITIONS` (default 4096, hard maximum 65536).
 Activation fails closed at the limit so a large topic catalog cannot allocate
-unbounded segment handles or per-partition locks.
+unbounded segment handles or per-partition locks. When the bound is reached,
+clean idle dynamic descriptors are evicted before activation fails closed. Their
+durable records and assignment metadata remain on disk and are reopened lazily
+on the next publish or read; dirty or active partitions are never evicted.
 
 Clustered replica catch-up batches are bounded to 256 records and 8 MiB by
 default. Operators may lower those limits with `MORROW_DATA_APPEND_BATCH_RECORDS`
