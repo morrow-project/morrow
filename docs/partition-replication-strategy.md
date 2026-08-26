@@ -32,9 +32,11 @@ Partition replicas use authenticated data-plane RPCs on the cluster listener:
 Simple clients may connect to any broker and continue through the shared raw TCP
 leader-proxy path. TLS is still terminated by the leader. Advanced clients can
 use the authenticated cluster/stream metadata endpoints to discover the current
-leader address and connect directly. The current assignment policy places every
-configured broker in each replica set and co-locates partition leadership with
-the metadata leader; the metadata model permits a later per-partition allocator.
+leader address and connect directly. Initial assignments use deterministic
+rendezvous ordering over `(stream, partition, broker ID)`: only the configured
+replica count is selected, and adding a broker does not re-index every existing
+partition. The first selected broker is the initial partition leader; later
+reassignment can explicitly move replicas or leadership.
 
 ## Failure and recovery rules
 

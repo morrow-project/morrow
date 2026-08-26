@@ -619,3 +619,20 @@ fn initial_partition_leaders_round_robin_across_data_brokers() {
         .collect::<Vec<_>>();
     assert_eq!(leaders, vec![3, 7, 11, 3, 7, 11, 3]);
 }
+
+#[test]
+fn initial_partition_replicas_are_stable_and_bounded_when_brokers_grow() {
+    let original = [3, 7, 11];
+    let expanded = [3, 7, 11, 19];
+    let first = super::runtime::initial_partition_replicas("orders", 4, &original, 2);
+    assert_eq!(
+        first,
+        super::runtime::initial_partition_replicas("orders", 4, &original, 2)
+    );
+    assert_eq!(first.len(), 2);
+    assert!(first.iter().all(|node| original.contains(node)));
+
+    let after_add = super::runtime::initial_partition_replicas("orders", 4, &expanded, 2);
+    assert_eq!(after_add.len(), 2);
+    assert!(after_add.iter().all(|node| expanded.contains(node)));
+}

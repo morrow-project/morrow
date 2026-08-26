@@ -448,17 +448,20 @@ impl RaftRuntime {
             "metadata bootstrap requires at least one data broker"
         );
         let mut assignments = HashMap::new();
-        let mut placement_index = 0usize;
         for stream in &self.configured_streams {
             for partition in 0..stream.partitions {
                 let replica_count = usize::try_from(stream.storage.replicas)
                     .unwrap_or(replica_order.len())
                     .min(replica_order.len())
                     .max(1);
-                let replicas = (0..replica_count)
-                    .map(|offset| replica_order[(placement_index + offset) % replica_order.len()])
-                    .collect::<BTreeSet<_>>();
-                let leader_id = replica_order[placement_index % replica_order.len()];
+                let selected = initial_partition_replicas(
+                    stream.name.as_str(),
+                    partition,
+                    &replica_order,
+                    replica_count,
+                );
+                let replicas = selected.iter().copied().collect::<BTreeSet<_>>();
+                let leader_id = selected[0];
                 let active_count = usize::try_from(stream.storage.min_ack_replicas)
                     .unwrap_or(replica_count)
                     .min(replica_count)
@@ -483,7 +486,6 @@ impl RaftRuntime {
                         leader_epoch: 1,
                     },
                 );
-                placement_index = placement_index.saturating_add(1);
             }
         }
         let response = self
@@ -586,6 +588,48 @@ impl RaftRuntime {
 
 pub(super) fn initial_partition_leader(replica_order: &[u64], partition: u32) -> u64 {
     replica_order[partition as usize % replica_order.len()]
+}
+
+/// Select a stable, bounded replica set for a partition. Rendezvous ordering
+/// avoids shifting every existing partition when a broker is added, while the
+/// deterministic node-id tie-break keeps bootstrap and restart decisions equal.
+pub(super) fn initial_partition_replicas(
+    stream: &str,
+    partition: u32,
+    data_nodes: &[u64],
+    replica_count: usize,
+) -> Vec<u64> {
+    let count = replica_count.min(data_nodes.len()).max(1);
+    let mut scored = data_nodes
+        .iter()
+        .copied()
+        .map(|node_id| (rendezvous_score(stream, partition, node_id), node_id))
+        .collect::<Vec<_>>();
+    scored.sort_by(|(left_score, left_node), (right_score, right_node)| {
+        right_score
+            .cmp(left_score)
+            .then_with(|| left_node.cmp(right_node))
+    });
+    scored
+        .into_iter()
+        .take(count)
+        .map(|(_, node)| node)
+        .collect()
+}
+
+fn rendezvous_score(stream: &str, partition: u32, node_id: u64) -> u64 {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in stream
+        .as_bytes()
+        .iter()
+        .copied()
+        .chain(partition.to_be_bytes())
+        .chain(node_id.to_be_bytes())
+    {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
 }
 
 pub(super) fn data_node_ids_for_role(
