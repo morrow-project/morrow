@@ -685,6 +685,7 @@ impl Morrow {
             shutting_down: Arc::new(AtomicBool::new(false)),
             redelivery_notify: Arc::new(Notify::new()),
             pull_waiters: PullWaiterRegistry::default(),
+            broker_control: BrokerControlRegistry::new(),
             compaction_running: Arc::new(AtomicBool::new(false)),
             route_mesh,
             middleware: hooks.middleware.clone(),

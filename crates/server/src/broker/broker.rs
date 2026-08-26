@@ -75,6 +75,7 @@ pub struct Morrow {
     pub(super) shutting_down: Arc<AtomicBool>,
     pub(super) redelivery_notify: Arc<Notify>,
     pub(super) pull_waiters: PullWaiterRegistry,
+    pub(super) broker_control: BrokerControlRegistry,
     pub(super) compaction_running: Arc<AtomicBool>,
     pub(super) route_mesh: Option<RouteMesh>,
     pub(super) middleware: MiddlewareRuntime,
