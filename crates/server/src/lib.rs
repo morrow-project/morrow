@@ -16,6 +16,7 @@ pub mod raft;
 pub mod reassignment;
 pub mod schema_registry;
 pub(crate) mod security;
+pub mod state_shards;
 pub(crate) mod storage;
 pub mod stream;
 pub mod tenancy;
@@ -25,6 +26,9 @@ pub mod wal;
 
 #[cfg(test)]
 mod partition_batch_tests;
+
+#[cfg(test)]
+mod state_shards_tests;
 
 pub use broker::Morrow;
 pub use config::Config;
