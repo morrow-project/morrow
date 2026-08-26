@@ -79,3 +79,24 @@ async fn registration_status_is_bounded_and_tracks_revision() {
 
     assert_eq!(registry.status().await, (0, 3, 2));
 }
+
+#[tokio::test]
+async fn registration_metrics_track_sessions_and_snapshot_fallbacks() {
+    let registry = BrokerControlRegistry::with_update_window(1);
+    registry.publish_update(b"one".to_vec()).await;
+    registry.publish_update(b"two".to_vec()).await;
+    registry.register(registration(4, 1, 0)).await.unwrap();
+    registry.register(registration(4, 2, 2)).await.unwrap();
+    registry
+        .heartbeat(BrokerHeartbeat {
+            protocol_version: BROKER_CONTROL_PROTOCOL_VERSION,
+            broker_id: 4,
+            incarnation: 2,
+            session_id: 2,
+            capacity: CapacitySummary::default(),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(registry.metrics_snapshot(), [2, 1, 1, 2, 1]);
+}

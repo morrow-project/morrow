@@ -10,6 +10,16 @@ const DEFAULT_UPDATE_WINDOW: usize = 256;
 #[derive(Clone)]
 pub(crate) struct BrokerControlRegistry {
     inner: Arc<Mutex<BrokerControlRegistryState>>,
+    metrics: Arc<BrokerControlMetrics>,
+}
+
+#[derive(Default)]
+struct BrokerControlMetrics {
+    registrations_total: AtomicU64,
+    heartbeats_total: AtomicU64,
+    fenced_sessions_total: AtomicU64,
+    metadata_updates_total: AtomicU64,
+    snapshot_fallbacks_total: AtomicU64,
 }
 
 struct BrokerControlRegistryState {
@@ -78,6 +88,7 @@ impl BrokerControlRegistry {
                 brokers: HashMap::new(),
                 update_window: update_window.max(1),
             })),
+            metrics: Arc::new(BrokerControlMetrics::default()),
         }
     }
 
@@ -94,6 +105,9 @@ impl BrokerControlRegistry {
             return Err(RegistrationError::InvalidIdentity);
         }
         let mut state = self.inner.lock().await;
+        self.metrics
+            .registrations_total
+            .fetch_add(1, Ordering::Relaxed);
         let fenced_session = match state.brokers.get(&registration.broker_id) {
             Some(existing) if registration.incarnation < existing.incarnation => {
                 return Err(RegistrationError::StaleIncarnation);
@@ -101,6 +115,11 @@ impl BrokerControlRegistry {
             Some(existing) => Some(existing.session_id),
             None => None,
         };
+        if fenced_session.is_some() {
+            self.metrics
+                .fenced_sessions_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
         let session_id = state.next_session_id;
         state.next_session_id = state.next_session_id.saturating_add(1);
         state.brokers.insert(
@@ -121,6 +140,9 @@ impl BrokerControlRegistry {
                 .front()
                 .map_or(state.revision.saturating_add(1), |update| update.revision);
         let updates = if snapshot_required {
+            self.metrics
+                .snapshot_fallbacks_total
+                .fetch_add(1, Ordering::Relaxed);
             Vec::new()
         } else {
             state
@@ -154,6 +176,9 @@ impl BrokerControlRegistry {
             ));
         }
         let mut state = self.inner.lock().await;
+        self.metrics
+            .heartbeats_total
+            .fetch_add(1, Ordering::Relaxed);
         let Some(session) = state.brokers.get_mut(&heartbeat.broker_id) else {
             return Err(RegistrationError::UnknownSession);
         };
@@ -170,6 +195,9 @@ impl BrokerControlRegistry {
     pub(super) async fn publish_update(&self, payload: Vec<u8>) -> MetadataUpdate {
         let mut state = self.inner.lock().await;
         state.revision = state.revision.saturating_add(1);
+        self.metrics
+            .metadata_updates_total
+            .fetch_add(1, Ordering::Relaxed);
         let update = MetadataUpdate::new(state.revision, payload);
         state.updates.push_back(update.clone());
         while state.updates.len() > state.update_window {
@@ -204,6 +232,18 @@ impl BrokerControlRegistry {
     pub(super) async fn status(&self) -> (usize, u64, usize) {
         let state = self.inner.lock().await;
         (state.brokers.len(), state.revision, state.updates.len())
+    }
+
+    pub(super) fn metrics_snapshot(&self) -> [u64; 5] {
+        [
+            self.metrics.registrations_total.load(Ordering::Relaxed),
+            self.metrics.heartbeats_total.load(Ordering::Relaxed),
+            self.metrics.fenced_sessions_total.load(Ordering::Relaxed),
+            self.metrics.metadata_updates_total.load(Ordering::Relaxed),
+            self.metrics
+                .snapshot_fallbacks_total
+                .load(Ordering::Relaxed),
+        ]
     }
 }
 
