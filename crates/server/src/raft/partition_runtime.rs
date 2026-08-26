@@ -56,12 +56,49 @@ pub(super) struct PartitionIngressQueue {
     bytes: Arc<tokio::sync::Semaphore>,
 }
 
+#[derive(Default)]
+pub(crate) struct PartitionIngressMetrics {
+    pub(super) queue_records: AtomicU64,
+    pub(super) batches_total: AtomicU64,
+    pub(super) records_total: AtomicU64,
+    pub(super) bytes_total: AtomicU64,
+    pub(super) max_batch_records: AtomicU64,
+    pub(super) max_batch_bytes: AtomicU64,
+    pub(super) batch_wait_us_max: AtomicU64,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct PartitionIngressMetricsSnapshot {
+    pub(crate) queue_records: u64,
+    pub(crate) batches_total: u64,
+    pub(crate) records_total: u64,
+    pub(crate) bytes_total: u64,
+    pub(crate) max_batch_records: u64,
+    pub(crate) max_batch_bytes: u64,
+    pub(crate) batch_wait_us_max: u64,
+}
+
+impl PartitionIngressMetrics {
+    pub(crate) fn snapshot(&self) -> PartitionIngressMetricsSnapshot {
+        PartitionIngressMetricsSnapshot {
+            queue_records: self.queue_records.load(Ordering::Relaxed),
+            batches_total: self.batches_total.load(Ordering::Relaxed),
+            records_total: self.records_total.load(Ordering::Relaxed),
+            bytes_total: self.bytes_total.load(Ordering::Relaxed),
+            max_batch_records: self.max_batch_records.load(Ordering::Relaxed),
+            max_batch_bytes: self.max_batch_bytes.load(Ordering::Relaxed),
+            batch_wait_us_max: self.batch_wait_us_max.load(Ordering::Relaxed),
+        }
+    }
+}
+
 pub(super) struct PartitionIngressItem {
     envelope: crate::partition_log::MessageEnvelope,
     fsync: bool,
     cluster_durable: bool,
     response: tokio::sync::oneshot::Sender<Result<crate::partition_log::MessageEnvelope>>,
     _byte_permit: tokio::sync::OwnedSemaphorePermit,
+    enqueued_at: tokio::time::Instant,
 }
 
 impl RaftRuntime {
@@ -142,12 +179,17 @@ impl RaftRuntime {
             cluster_durable,
             response,
             _byte_permit: byte_permit,
+            enqueued_at: tokio::time::Instant::now(),
         };
-        sender
-            .sender
-            .send(item)
-            .await
-            .map_err(|_| BrokerError::msg("partition ingress queue is unavailable"))?;
+        self.partition_ingress_metrics
+            .queue_records
+            .fetch_add(1, Ordering::Relaxed);
+        if sender.sender.send(item).await.is_err() {
+            self.partition_ingress_metrics
+                .queue_records
+                .fetch_sub(1, Ordering::Relaxed);
+            return Err(BrokerError::msg("partition ingress queue is unavailable"));
+        }
         receiver
             .await
             .map_err(|_| BrokerError::msg("partition ingress response was canceled"))?
@@ -536,6 +578,7 @@ async fn run_partition_ingress_queue(
         let delay = tokio::time::Duration::from_millis(partition_ingress_batch_delay_ms());
         let deadline = tokio::time::Instant::now() + delay;
         let mut bytes = data_append_envelope_bytes(&first.envelope);
+        let enqueued_at = first.enqueued_at;
         let mut items = vec![first];
         while items.len() < max_records {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -560,6 +603,36 @@ async fn run_partition_ingress_queue(
             .iter()
             .map(|item| item.envelope.clone())
             .collect::<Vec<_>>();
+        let batch_bytes = bytes;
+        let batch_wait_us = enqueued_at.elapsed().as_micros() as u64;
+        runtime
+            .partition_ingress_metrics
+            .queue_records
+            .fetch_sub(items.len() as u64, Ordering::Relaxed);
+        runtime
+            .partition_ingress_metrics
+            .batches_total
+            .fetch_add(1, Ordering::Relaxed);
+        runtime
+            .partition_ingress_metrics
+            .records_total
+            .fetch_add(envelopes.len() as u64, Ordering::Relaxed);
+        runtime
+            .partition_ingress_metrics
+            .bytes_total
+            .fetch_add(batch_bytes as u64, Ordering::Relaxed);
+        runtime
+            .partition_ingress_metrics
+            .max_batch_records
+            .fetch_max(envelopes.len() as u64, Ordering::Relaxed);
+        runtime
+            .partition_ingress_metrics
+            .max_batch_bytes
+            .fetch_max(batch_bytes as u64, Ordering::Relaxed);
+        runtime
+            .partition_ingress_metrics
+            .batch_wait_us_max
+            .fetch_max(batch_wait_us, Ordering::Relaxed);
         let result = runtime
             .replicate_partition_batch(envelopes, fsync, cluster_durable)
             .await;

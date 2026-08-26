@@ -1472,6 +1472,11 @@ impl Morrow {
             .map(|usage| usage.memory_bytes)
             .sum::<u64>();
         let cluster = self.cluster_response().await;
+        let partition_ingress = self
+            .cluster_runtime()
+            .await
+            .and_then(|cluster| cluster.partition_ingress_metrics())
+            .unwrap_or_default();
         let streams = self.streams_response().await;
         let retained_messages = streams
             .streams
@@ -1747,6 +1752,62 @@ impl Morrow {
         metrics.push_str(&format!(
             "morrow_wal_partition_append_batch_wait_us_max {}\n",
             wal.partition_append_batch_wait_us
+        ));
+        metrics.push_str(
+            "# HELP morrow_partition_ingress_queue_records Current records waiting in partition ingress queues.\n",
+        );
+        metrics.push_str("# TYPE morrow_partition_ingress_queue_records gauge\n");
+        metrics.push_str(&format!(
+            "morrow_partition_ingress_queue_records {}\n",
+            partition_ingress.queue_records
+        ));
+        metrics.push_str(
+            "# HELP morrow_partition_ingress_batches_total Partition ingress batches replicated.\n",
+        );
+        metrics.push_str("# TYPE morrow_partition_ingress_batches_total counter\n");
+        metrics.push_str(&format!(
+            "morrow_partition_ingress_batches_total {}\n",
+            partition_ingress.batches_total
+        ));
+        metrics.push_str(
+            "# HELP morrow_partition_ingress_records_total Records processed by partition ingress batches.\n",
+        );
+        metrics.push_str("# TYPE morrow_partition_ingress_records_total counter\n");
+        metrics.push_str(&format!(
+            "morrow_partition_ingress_records_total {}\n",
+            partition_ingress.records_total
+        ));
+        metrics.push_str(
+            "# HELP morrow_partition_ingress_bytes_total Bytes processed by partition ingress batches.\n",
+        );
+        metrics.push_str("# TYPE morrow_partition_ingress_bytes_total counter\n");
+        metrics.push_str(&format!(
+            "morrow_partition_ingress_bytes_total {}\n",
+            partition_ingress.bytes_total
+        ));
+        metrics.push_str(
+            "# HELP morrow_partition_ingress_batch_max_records Largest partition ingress batch record count.\n",
+        );
+        metrics.push_str("# TYPE morrow_partition_ingress_batch_max_records gauge\n");
+        metrics.push_str(&format!(
+            "morrow_partition_ingress_batch_max_records {}\n",
+            partition_ingress.max_batch_records
+        ));
+        metrics.push_str(
+            "# HELP morrow_partition_ingress_batch_max_bytes Largest partition ingress batch byte estimate.\n",
+        );
+        metrics.push_str("# TYPE morrow_partition_ingress_batch_max_bytes gauge\n");
+        metrics.push_str(&format!(
+            "morrow_partition_ingress_batch_max_bytes {}\n",
+            partition_ingress.max_batch_bytes
+        ));
+        metrics.push_str(
+            "# HELP morrow_partition_ingress_batch_wait_us_max Maximum partition ingress batch formation wait.\n",
+        );
+        metrics.push_str("# TYPE morrow_partition_ingress_batch_wait_us_max gauge\n");
+        metrics.push_str(&format!(
+            "morrow_partition_ingress_batch_wait_us_max {}\n",
+            partition_ingress.batch_wait_us_max
         ));
         metrics.push_str("# HELP morrow_wal_retained_messages Retained WAL messages.\n");
         metrics.push_str("# TYPE morrow_wal_retained_messages gauge\n");

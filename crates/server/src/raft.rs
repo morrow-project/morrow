@@ -500,7 +500,7 @@ mod data_plane;
 mod data_plane_client;
 mod log_store;
 mod network;
-mod partition_runtime;
+pub(crate) mod partition_runtime;
 mod proxy;
 mod rpc;
 mod runtime;

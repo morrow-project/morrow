@@ -138,6 +138,16 @@ impl ClusterRuntime {
         }
     }
 
+    pub(super) fn partition_ingress_metrics(
+        &self,
+    ) -> Option<crate::raft::partition_runtime::PartitionIngressMetricsSnapshot> {
+        match self {
+            Self::Real(runtime) => Some(runtime.partition_ingress_metrics()),
+            #[cfg(test)]
+            Self::Fake(_) => None,
+        }
+    }
+
     pub(super) async fn is_leader(&self) -> bool {
         match self {
             Self::Real(runtime) => runtime.is_leader().await,
