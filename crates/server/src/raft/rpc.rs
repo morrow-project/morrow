@@ -149,13 +149,11 @@ where
                 );
                 let committed = metadata.partition_commits.get(&key);
                 let assignment = metadata.partition_assignments.get(&key);
-                if raft.current_leader().await != Some(request.leader_id)
-                    || assignment.is_none_or(|assignment| {
-                        assignment.leader_id != request.leader_id
-                            || assignment.leader_epoch != request.leader_epoch
-                            || assignment.replica_set_generation != request.replica_set_generation
-                    })
-                {
+                if assignment.is_none_or(|assignment| {
+                    assignment.leader_id != request.leader_id
+                        || assignment.leader_epoch != request.leader_epoch
+                        || assignment.replica_set_generation != request.replica_set_generation
+                }) {
                     RaftResponse::Error("fenced partition leader epoch".to_string())
                 } else if request.batch_digest
                     != crate::partition_log::committed_envelope_checksum(&request.envelope)
@@ -181,13 +179,11 @@ where
                 let metadata = state_machine.durable_state();
                 let key = partition_key(&request.stream, request.partition.0);
                 let assignment = metadata.partition_assignments.get(&key);
-                if raft.current_leader().await != Some(request.leader_id)
-                    || assignment.is_none_or(|assignment| {
-                        assignment.leader_id != request.leader_id
-                            || assignment.leader_epoch != request.leader_epoch
-                            || assignment.replica_set_generation != request.replica_set_generation
-                    })
-                {
+                if assignment.is_none_or(|assignment| {
+                    assignment.leader_id != request.leader_id
+                        || assignment.leader_epoch != request.leader_epoch
+                        || assignment.replica_set_generation != request.replica_set_generation
+                }) {
                     RaftResponse::Error("fenced partition commit".to_string())
                 } else {
                     match run_replica_io(io_gate.clone(), partition_data.clone(), move |store| {
