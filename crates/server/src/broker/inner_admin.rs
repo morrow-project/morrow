@@ -65,14 +65,20 @@ impl ConnectionState {
         offset: usize,
         limit: usize,
     ) -> ConnectionsResponse {
-        let mut connections = self
-            .clients
-            .iter()
-            .map(|(id, client)| {
-                let subscriptions = durable_counts.get(id).copied().unwrap_or_default();
-                let transient_subscriptions = transient_counts.get(id).copied().unwrap_or_default();
-                ConnectionResponse {
-                    id: *id,
+        let mut ids = self.clients.keys().copied().collect::<Vec<_>>();
+        ids.sort_unstable();
+        let total_count = ids.len();
+        let page = ids
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .filter_map(|id| {
+                let client = self.clients.get(&id)?;
+                let subscriptions = durable_counts.get(&id).copied().unwrap_or_default();
+                let transient_subscriptions =
+                    transient_counts.get(&id).copied().unwrap_or_default();
+                Some(ConnectionResponse {
+                    id,
                     remote_addr: client.remote_addr.map(|addr| addr.to_string()),
                     durable_id: client.durable_id.clone(),
                     authenticated: client.authenticated,
@@ -83,15 +89,8 @@ impl ConnectionState {
                     protocol_version: client.protocol_version,
                     subscriptions,
                     transient_subscriptions,
-                }
+                })
             })
-            .collect::<Vec<_>>();
-        connections.sort_by_key(|connection| connection.id);
-        let total_count = connections.len();
-        let page = connections
-            .into_iter()
-            .skip(offset)
-            .take(limit)
             .collect::<Vec<_>>();
         let next_offset = (offset + page.len() < total_count).then_some(offset + page.len());
         ConnectionsResponse {
@@ -105,25 +104,30 @@ impl ConnectionState {
 
 impl DurableBrokerState {
     pub(super) fn producers_response_page(&self, offset: usize, limit: usize) -> ProducersResponse {
-        let mut producers = self
-            .producer_epochs
-            .iter()
-            .map(|(producer_id, epoch)| ProducerResponse {
-                producer_id: producer_id.clone(),
-                epoch: *epoch,
-                dedup_entries: self
-                    .producer_sequences
-                    .keys()
-                    .filter(|(id, producer_epoch, _)| id == producer_id && producer_epoch == epoch)
-                    .count(),
-            })
-            .collect::<Vec<_>>();
-        producers.sort_by(|left, right| left.producer_id.cmp(&right.producer_id));
-        let total_count = producers.len();
-        let page = producers
+        let mut dedup_counts = HashMap::<(&str, u64), usize>::new();
+        for (producer_id, epoch, _) in self.producer_sequences.keys() {
+            *dedup_counts
+                .entry((producer_id.as_str(), *epoch))
+                .or_default() += 1;
+        }
+        let mut producer_ids = self.producer_epochs.keys().cloned().collect::<Vec<_>>();
+        producer_ids.sort_unstable();
+        let total_count = producer_ids.len();
+        let page = producer_ids
             .into_iter()
             .skip(offset)
             .take(limit)
+            .filter_map(|producer_id| {
+                let epoch = *self.producer_epochs.get(&producer_id)?;
+                Some(ProducerResponse {
+                    dedup_entries: dedup_counts
+                        .get(&(producer_id.as_str(), epoch))
+                        .copied()
+                        .unwrap_or_default(),
+                    producer_id,
+                    epoch,
+                })
+            })
             .collect::<Vec<_>>();
         ProducersResponse {
             count: page.len(),
@@ -194,52 +198,75 @@ impl DurableBrokerState {
         Ok(true)
     }
 
-    pub(super) fn subscriptions_response(&self) -> SubscriptionsResponse {
-        let mut durable_consumers = self
-            .consumers
+    fn durable_consumer_response(
+        consumer_id: &str,
+        consumer: &Consumer,
+    ) -> DurableConsumerResponse {
+        let mut members = consumer
+            .members
             .iter()
-            .map(|(consumer_id, consumer)| {
-                let mut members = consumer
-                    .members
-                    .iter()
-                    .map(|(connection_id, member)| ConsumerMemberResponse {
-                        connection_id: *connection_id,
-                        sid: member.sid.clone(),
-                        remaining_deliveries: member.remaining_deliveries,
-                        credit_messages: member.credit_messages,
-                        credit_bytes: member.credit_bytes,
-                    })
-                    .collect::<Vec<_>>();
-                members.sort_by_key(|member| (member.connection_id, member.sid.clone()));
-                let cursors = consumer
-                    .cursors
-                    .partitions
-                    .values()
-                    .map(|cursor| PartitionCursorResponse {
-                        stream: cursor.stream.clone(),
-                        partition: cursor.partition,
-                        committed_offset: cursor.committed_offset,
-                        delivered_offset: cursor.delivered_offset,
-                        acknowledged_out_of_order: cursor.acknowledged_offsets.len(),
-                        retention_gaps: cursor.retention_gaps,
-                    })
-                    .collect();
-                DurableConsumerResponse {
-                    consumer_id: consumer_id.clone(),
-                    filter_subject: consumer.record.filter_subject.clone(),
-                    queue_group: consumer.record.queue_group.clone(),
-                    members,
-                    pending: consumer.pending.len(),
-                    in_flight: consumer.in_flight.len(),
-                    acked: consumer.acked.len(),
-                    cursors,
-                    delivered: consumer.delivered,
-                    ack_timeout_ms: consumer.record.ack_timeout_ms,
-                    max_in_flight: consumer.record.max_in_flight,
-                }
+            .map(|(connection_id, member)| ConsumerMemberResponse {
+                connection_id: *connection_id,
+                sid: member.sid.clone(),
+                remaining_deliveries: member.remaining_deliveries,
+                credit_messages: member.credit_messages,
+                credit_bytes: member.credit_bytes,
             })
             .collect::<Vec<_>>();
-        durable_consumers.sort_by(|left, right| left.consumer_id.cmp(&right.consumer_id));
+        members.sort_by_key(|member| (member.connection_id, member.sid.clone()));
+        let cursors = consumer
+            .cursors
+            .partitions
+            .values()
+            .map(|cursor| PartitionCursorResponse {
+                stream: cursor.stream.clone(),
+                partition: cursor.partition,
+                committed_offset: cursor.committed_offset,
+                delivered_offset: cursor.delivered_offset,
+                acknowledged_out_of_order: cursor.acknowledged_offsets.len(),
+                retention_gaps: cursor.retention_gaps,
+            })
+            .collect();
+        DurableConsumerResponse {
+            consumer_id: consumer_id.to_string(),
+            filter_subject: consumer.record.filter_subject.clone(),
+            queue_group: consumer.record.queue_group.clone(),
+            members,
+            pending: consumer.pending.len(),
+            in_flight: consumer.in_flight.len(),
+            acked: consumer.acked.len(),
+            cursors,
+            delivered: consumer.delivered,
+            ack_timeout_ms: consumer.record.ack_timeout_ms,
+            max_in_flight: consumer.record.max_in_flight,
+        }
+    }
+
+    pub(super) fn subscriptions_response_page(
+        &self,
+        offset: usize,
+        limit: usize,
+    ) -> (usize, Vec<DurableConsumerResponse>) {
+        let mut consumer_ids = self.consumers.keys().cloned().collect::<Vec<_>>();
+        consumer_ids.sort_unstable();
+        let total_count = consumer_ids.len();
+        let durable_consumers = consumer_ids
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .filter_map(|consumer_id| {
+                self.consumers
+                    .get(&consumer_id)
+                    .map(|consumer| Self::durable_consumer_response(&consumer_id, consumer))
+            })
+            .collect();
+        (total_count, durable_consumers)
+    }
+
+    pub(super) fn subscriptions_response(&self) -> SubscriptionsResponse {
+        let (total_count, durable_consumers) =
+            self.subscriptions_response_page(0, self.consumers.len());
+        debug_assert_eq!(total_count, durable_consumers.len());
         let transient_subscriptions = Vec::new();
         SubscriptionsResponse {
             durable_consumers,
@@ -324,22 +351,35 @@ impl DurableBrokerState {
 }
 
 impl TransientState {
+    pub(super) fn subscriptions_response_page(
+        &self,
+        offset: usize,
+        limit: usize,
+    ) -> (usize, Vec<TransientSubscriptionResponse>) {
+        let mut keys = self.subscriptions.keys().cloned().collect::<Vec<_>>();
+        keys.sort_by_key(|(connection_id, sid)| (*connection_id, sid.clone()));
+        let total_count = keys.len();
+        let subscriptions = keys
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .filter_map(|key| {
+                self.subscriptions
+                    .get(&key)
+                    .map(|subscription| TransientSubscriptionResponse {
+                        connection_id: key.0,
+                        sid: subscription.sid.clone(),
+                        subject: subscription.subject.clone(),
+                        remaining_deliveries: subscription.remaining_deliveries,
+                    })
+            })
+            .collect();
+        (total_count, subscriptions)
+    }
+
     pub(super) fn subscriptions_response(&self) -> Vec<TransientSubscriptionResponse> {
-        let mut subscriptions = self
-            .subscriptions
-            .iter()
-            .map(
-                |((connection_id, _), subscription)| TransientSubscriptionResponse {
-                    connection_id: *connection_id,
-                    sid: subscription.sid.clone(),
-                    subject: subscription.subject.clone(),
-                    remaining_deliveries: subscription.remaining_deliveries,
-                },
-            )
-            .collect::<Vec<_>>();
-        subscriptions
-            .sort_by_key(|subscription| (subscription.connection_id, subscription.sid.clone()));
-        subscriptions
+        self.subscriptions_response_page(0, self.subscriptions.len())
+            .1
     }
 
     pub(super) fn prepare_transient_deliveries(
@@ -515,21 +555,16 @@ impl Morrow {
         offset: usize,
         limit: usize,
     ) -> SubscriptionsPageResponse {
-        let response = self.subscriptions_response().await;
-        let durable_total_count = response.durable_consumers.len();
-        let transient_total_count = response.transient_subscriptions.len();
-        let durable_consumers = response
-            .durable_consumers
-            .into_iter()
-            .skip(offset)
-            .take(limit)
-            .collect::<Vec<_>>();
-        let transient_subscriptions = response
-            .transient_subscriptions
-            .into_iter()
-            .skip(offset)
-            .take(limit)
-            .collect::<Vec<_>>();
+        let (durable_total_count, durable_consumers) = self
+            .inner
+            .lock()
+            .await
+            .subscriptions_response_page(offset, limit);
+        let (transient_total_count, transient_subscriptions) = self
+            .transient
+            .lock()
+            .await
+            .subscriptions_response_page(offset, limit);
         SubscriptionsPageResponse {
             durable_next_offset: (offset + durable_consumers.len() < durable_total_count)
                 .then_some(offset + durable_consumers.len()),
