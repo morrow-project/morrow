@@ -88,12 +88,14 @@ mkdir -p "$output_dir"
 case_index="$output_dir/cases.ndjson"
 : > "$case_index"
 started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+batch_records=${MORROW_DATA_APPEND_BATCH_RECORDS:-256}
+batch_bytes=${MORROW_DATA_APPEND_BATCH_BYTES:-8388608}
 hostname_value=$(hostname 2>/dev/null || true)
 os_name=$(uname -s 2>/dev/null || true)
 os_release=$(uname -r 2>/dev/null || true)
-printf '{"commit":"%s","server":"%s","clients":%s,"duration":"%s","payload_size":%s,"broker_counts":[%s],"topics":[%s],"partitions":[%s],"modes":"%s","ack_levels":"%s","deployment_profile":"%s","controller_voter_count":%s,"roles_share_process":%s,"started_at":"%s","hostname":"%s","os":"%s","kernel":"%s","cpu_cores":%s,"memory_bytes":%s,"cpu_model":"%s","cpu_hz":%s,"uname":"%s"}\n' \
+printf '{"commit":"%s","server":"%s","clients":%s,"duration":"%s","payload_size":%s,"broker_counts":[%s],"topics":[%s],"partitions":[%s],"modes":"%s","ack_levels":"%s","deployment_profile":"%s","controller_voter_count":%s,"roles_share_process":%s,"batch_records":%s,"batch_bytes":%s,"started_at":"%s","hostname":"%s","os":"%s","kernel":"%s","cpu_cores":%s,"memory_bytes":%s,"cpu_model":"%s","cpu_hz":%s,"uname":"%s"}\n' \
   "$(git rev-parse HEAD)" "$server" "$clients" "$duration" "$payload_size" "$broker_counts" "$topics" "$partitions" \
-  "$modes" "$ack_levels" "$deployment_profile" "$controller_voters" "$roles_share_process" "$started_at" "$(json_escape "$hostname_value")" "$(json_escape "$os_name")" "$(json_escape "$os_release")" \
+  "$modes" "$ack_levels" "$deployment_profile" "$controller_voters" "$roles_share_process" "$batch_records" "$batch_bytes" "$started_at" "$(json_escape "$hostname_value")" "$(json_escape "$os_name")" "$(json_escape "$os_release")" \
   "${cpu_cores:-null}" "${memory_bytes:-null}" "$(json_escape "$(cpu_model)")" "${cpu_hz:-null}" "$(json_escape "$(uname -a)")" >"$output_dir/manifest.json"
 old_ifs=$IFS
 IFS=,
@@ -107,8 +109,8 @@ for broker_count in $broker_counts; do
         curl -sSfL "$metrics_url" >"$case_dir/metrics.prom" || die "failed to capture metrics from $metrics_url"
         validate_topology_metrics "$case_dir/metrics.prom"
       fi
-      printf '{"broker_count":%s,"topics":%s,"partitions":%s,"deployment_profile":"%s","controller_voter_count":%s,"roles_share_process":%s,"modes":"%s","ack_levels":"%s","result_dir":"%s"}\n' \
-        "$broker_count" "$topic_count" "$partition_count" "$deployment_profile" "$controller_voters" "$roles_share_process" "$modes" "$ack_levels" \
+      printf '{"broker_count":%s,"topics":%s,"partitions":%s,"deployment_profile":"%s","controller_voter_count":%s,"roles_share_process":%s,"batch_records":%s,"batch_bytes":%s,"modes":"%s","ack_levels":"%s","result_dir":"%s"}\n' \
+        "$broker_count" "$topic_count" "$partition_count" "$deployment_profile" "$controller_voters" "$roles_share_process" "$batch_records" "$batch_bytes" "$modes" "$ack_levels" \
         "$(json_escape "$case_dir")" >> "$case_index"
     done
   done

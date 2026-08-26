@@ -11,6 +11,20 @@ const COMMIT_CHECKPOINT_BYTES: u64 = 8 * 1024 * 1024;
 pub(super) const MAX_DATA_APPEND_BATCH_RECORDS: usize = 256;
 pub(super) const MAX_DATA_APPEND_BATCH_BYTES: usize = 8 * 1024 * 1024;
 
+pub(super) fn data_append_batch_limits() -> (usize, usize) {
+    let records = std::env::var("MORROW_DATA_APPEND_BATCH_RECORDS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(MAX_DATA_APPEND_BATCH_RECORDS)
+        .clamp(1, MAX_DATA_APPEND_BATCH_RECORDS);
+    let bytes = std::env::var("MORROW_DATA_APPEND_BATCH_BYTES")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(MAX_DATA_APPEND_BATCH_BYTES)
+        .clamp(1, MAX_DATA_APPEND_BATCH_BYTES);
+    (records, bytes)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct PartitionCommitRecord {
     pub(super) stream: String,
@@ -325,8 +339,9 @@ impl ReplicaDataStore {
         &mut self,
         requests: &[DataAppendRequest],
     ) -> Result<Vec<DataAppendResponse>> {
+        let (max_records, max_bytes) = data_append_batch_limits();
         crate::broker_ensure!(
-            !requests.is_empty() && requests.len() <= MAX_DATA_APPEND_BATCH_RECORDS,
+            !requests.is_empty() && requests.len() <= max_records,
             "partition append batch size is outside the supported bound"
         );
         let payload_bytes = requests
@@ -334,7 +349,7 @@ impl ReplicaDataStore {
             .map(|request| request.envelope.payload.len())
             .sum::<usize>();
         crate::broker_ensure!(
-            payload_bytes <= MAX_DATA_APPEND_BATCH_BYTES,
+            payload_bytes <= max_bytes,
             "partition append batch bytes exceed the supported bound"
         );
         let mut responses = Vec::with_capacity(requests.len());

@@ -99,10 +99,24 @@ impl RaftRuntime {
                 )
                 .await?;
                 let mut predecessor_checksum = request.predecessor_checksum;
-                let mut append_batch = Vec::with_capacity(MAX_DATA_APPEND_BATCH_RECORDS);
+                let (max_batch_records, max_batch_bytes) = data_append_batch_limits();
+                let mut append_batch = Vec::with_capacity(max_batch_records);
+                let mut append_batch_bytes = 0usize;
                 for record in committed_records {
                     let record_checksum =
                         crate::partition_log::committed_envelope_checksum(&record)?;
+                    let record_bytes = record.payload.len();
+                    if !append_batch.is_empty()
+                        && (append_batch.len() == max_batch_records
+                            || append_batch_bytes.saturating_add(record_bytes) > max_batch_bytes)
+                    {
+                        send_data_append_batch_on_client(
+                            &client,
+                            std::mem::take(&mut append_batch),
+                        )
+                        .await?;
+                        append_batch_bytes = 0;
+                    }
                     append_batch.push(DataAppendRequest {
                         leader_id: request.leader_id,
                         leader_epoch: request.leader_epoch,
@@ -115,13 +129,17 @@ impl RaftRuntime {
                         durability: request.durability,
                         envelope: record,
                     });
+                    append_batch_bytes = append_batch_bytes.saturating_add(record_bytes);
                     predecessor_checksum = Some(record_checksum);
-                    if append_batch.len() == MAX_DATA_APPEND_BATCH_RECORDS {
+                    if append_batch.len() == max_batch_records
+                        || append_batch_bytes >= max_batch_bytes
+                    {
                         send_data_append_batch_on_client(
                             &client,
                             std::mem::take(&mut append_batch),
                         )
                         .await?;
+                        append_batch_bytes = 0;
                     }
                 }
                 append_batch.push(request);

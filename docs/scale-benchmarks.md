@@ -43,3 +43,8 @@ Partition recovery is capped at eight workers by default. Operators can lower
 that concurrency for large catalogs or constrained hosts with
 `MORROW_PARTITION_RECOVERY_WORKERS`; values are clamped to the safe range
 `1..=8`.
+
+For clustered catch-up sensitivity, vary the bounded append batch with
+`MORROW_DATA_APPEND_BATCH_RECORDS` and `MORROW_DATA_APPEND_BATCH_BYTES`. Record
+these values with the benchmark manifest when comparing replication throughput;
+the receiver enforces the same hard maxima.
