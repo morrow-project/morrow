@@ -410,6 +410,20 @@ impl PartitionLog {
         }
     }
 
+    /// Apply a logical retention floor without requiring the broker state to
+    /// materialize the retained window. Obsolete sealed segments are removed
+    /// before the boundary rewrite; the rewrite path remains the recovery-safe
+    /// fallback for a segment that straddles the floor.
+    pub(super) fn advance_retention_floor(&mut self, earliest_offset: u64) -> Result<()> {
+        if earliest_offset > self.next_offset {
+            return Ok(());
+        }
+        let retained = (earliest_offset..self.next_offset)
+            .filter_map(|offset| self.read_offset(offset).transpose())
+            .collect::<Result<Vec<_>>>()?;
+        self.rewrite(&retained, Some(earliest_offset))
+    }
+
     fn earliest_offset(&self) -> u64 {
         self.retention_records
             .front()
