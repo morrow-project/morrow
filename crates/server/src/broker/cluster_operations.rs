@@ -48,15 +48,15 @@ impl Morrow {
         cluster_config: crate::config::ClusterConfig,
     ) {
         let broker_id = cluster_config.node_id;
-        let controller_id = cluster_config
+        let controller_ids = cluster_config
             .controller_voters
             .iter()
             .copied()
-            .find(|id| *id != broker_id)
-            .or_else(|| cluster_config.controller_voters.first().copied());
-        let Some(controller_id) = controller_id else {
+            .filter(|id| *id != broker_id)
+            .collect::<Vec<_>>();
+        if controller_ids.is_empty() {
             return;
-        };
+        }
         let client_addr = self.config.listen.to_string();
         let replication_addr = cluster_config.route_advertise.clone().or_else(|| {
             cluster_config
@@ -67,7 +67,7 @@ impl Morrow {
         let registration_timeout_ms = heartbeat_interval_ms.saturating_mul(5).max(1_000);
         tracing::info!(
             broker_id,
-            controller_id,
+            controller_ids = ?controller_ids,
             "starting broker control registration"
         );
         tokio::spawn(async move {
@@ -78,14 +78,20 @@ impl Morrow {
                 .max(1);
             let mut last_revision = 0;
             let mut session_id = None;
+            let mut controller_index = 0usize;
             let mut interval = tokio::time::interval(Duration::from_millis(heartbeat_interval_ms));
             loop {
                 tracing::trace!(
                     broker_id,
-                    controller_id,
+                    controller_id = ?controller_ids.get(controller_index),
                     registered = session_id.is_some(),
                     "broker control registration tick"
                 );
+                let controller_id = runtime
+                    .current_leader()
+                    .await
+                    .filter(|leader| controller_ids.contains(leader))
+                    .unwrap_or(controller_ids[controller_index % controller_ids.len()]);
                 if let Some(session) = session_id {
                     let heartbeat = protocol::broker_control::BrokerHeartbeat {
                         protocol_version: protocol::broker_control::BROKER_CONTROL_PROTOCOL_VERSION,
@@ -122,6 +128,7 @@ impl Morrow {
                                 "broker heartbeat failed"
                             );
                             session_id = None;
+                            controller_index = (controller_index + 1) % controller_ids.len();
                         }
                         Err(_) => {
                             tracing::debug!(
@@ -131,6 +138,7 @@ impl Morrow {
                                 "broker heartbeat timed out"
                             );
                             session_id = None;
+                            controller_index = (controller_index + 1) % controller_ids.len();
                         }
                     }
                 } else {
@@ -170,6 +178,7 @@ impl Morrow {
                                 ?error,
                                 "broker registration failed"
                             );
+                            controller_index = (controller_index + 1) % controller_ids.len();
                         }
                         Err(_) => {
                             tracing::debug!(
@@ -178,6 +187,7 @@ impl Morrow {
                                 timeout_ms = registration_timeout_ms,
                                 "broker registration timed out"
                             );
+                            controller_index = (controller_index + 1) % controller_ids.len();
                         }
                     }
                 }
