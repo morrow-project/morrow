@@ -1,5 +1,16 @@
 use super::*;
 
+const PARTITION_INGRESS_BATCH_RECORDS: usize = 32;
+const PARTITION_INGRESS_BATCH_BYTES: usize = 1024 * 1024;
+const PARTITION_INGRESS_BATCH_DELAY_MS: u64 = 2;
+
+pub(super) struct PartitionIngressItem {
+    envelope: crate::partition_log::MessageEnvelope,
+    fsync: bool,
+    cluster_durable: bool,
+    response: tokio::sync::oneshot::Sender<Result<crate::partition_log::MessageEnvelope>>,
+}
+
 impl RaftRuntime {
     pub async fn replicate_partition(
         &self,
@@ -7,10 +18,35 @@ impl RaftRuntime {
         fsync: bool,
         cluster_durable: bool,
     ) -> Result<crate::partition_log::MessageEnvelope> {
-        self.replicate_partition_batch(vec![envelope], fsync, cluster_durable)
-            .await?
-            .pop()
-            .ok_or_else(|| BrokerError::msg("partition replication batch was empty"))
+        let key = partition_key(envelope.stream.as_str(), envelope.partition.0);
+        let (response, receiver) = tokio::sync::oneshot::channel();
+        let item = PartitionIngressItem {
+            envelope,
+            fsync,
+            cluster_durable,
+            response,
+        };
+        let sender = {
+            let mut queues = self.partition_ingress_queues.lock().await;
+            if let Some(sender) = queues.get(&key) {
+                sender.clone()
+            } else {
+                let (sender, receiver) = tokio::sync::mpsc::channel(1024);
+                queues.insert(key.clone(), sender.clone());
+                let runtime = self.clone();
+                tokio::spawn(async move {
+                    run_partition_ingress_queue(runtime, key, receiver).await;
+                });
+                sender
+            }
+        };
+        sender
+            .send(item)
+            .await
+            .map_err(|_| BrokerError::msg("partition ingress queue is unavailable"))?;
+        receiver
+            .await
+            .map_err(|_| BrokerError::msg("partition ingress response was canceled"))?
     }
 
     /// Replicate an ordered range of records in one partition batch.
@@ -361,5 +397,66 @@ impl RaftRuntime {
             }
         }
         Ok(envelopes)
+    }
+}
+
+async fn run_partition_ingress_queue(
+    runtime: RaftRuntime,
+    _key: String,
+    mut receiver: tokio::sync::mpsc::Receiver<PartitionIngressItem>,
+) {
+    let mut pending = None;
+    loop {
+        let first = if let Some(item) = pending.take() {
+            item
+        } else if let Some(item) = receiver.recv().await {
+            item
+        } else {
+            return;
+        };
+        let fsync = first.fsync;
+        let cluster_durable = first.cluster_durable;
+        let mut bytes = data_append_envelope_bytes(&first.envelope);
+        let mut items = vec![first];
+        while items.len() < PARTITION_INGRESS_BATCH_RECORDS {
+            let Ok(Some(candidate)) = tokio::time::timeout(
+                tokio::time::Duration::from_millis(PARTITION_INGRESS_BATCH_DELAY_MS),
+                receiver.recv(),
+            )
+            .await
+            else {
+                break;
+            };
+            let candidate_bytes = data_append_envelope_bytes(&candidate.envelope);
+            if candidate.fsync != fsync
+                || candidate.cluster_durable != cluster_durable
+                || bytes.saturating_add(candidate_bytes) > PARTITION_INGRESS_BATCH_BYTES
+            {
+                pending = Some(candidate);
+                break;
+            }
+            bytes = bytes.saturating_add(candidate_bytes);
+            items.push(candidate);
+        }
+        let envelopes = items
+            .iter()
+            .map(|item| item.envelope.clone())
+            .collect::<Vec<_>>();
+        let result = runtime
+            .replicate_partition_batch(envelopes, fsync, cluster_durable)
+            .await;
+        match result {
+            Ok(envelopes) => {
+                for (item, envelope) in items.into_iter().zip(envelopes) {
+                    let _ = item.response.send(Ok(envelope));
+                }
+            }
+            Err(error) => {
+                let message = error.to_string();
+                for item in items {
+                    let _ = item.response.send(Err(BrokerError::msg(&message)));
+                }
+            }
+        }
     }
 }
