@@ -533,7 +533,7 @@ impl RaftRuntime {
     }
 }
 
-fn initial_partition_leader(replica_order: &[u64], partition: u32) -> u64 {
+pub(super) fn initial_partition_leader(replica_order: &[u64], partition: u32) -> u64 {
     replica_order[partition as usize % replica_order.len()]
 }
 
