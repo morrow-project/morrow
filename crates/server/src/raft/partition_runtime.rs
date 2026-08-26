@@ -81,8 +81,11 @@ impl RaftRuntime {
         );
         let write_gate = self
             .partition_write_gates
-            .get(&key)
-            .ok_or_else(|| BrokerError::msg("partition has no write coordinator"))?;
+            .lock()
+            .await
+            .entry(key.clone())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
         let _write_guard = write_gate.lock().await;
         let metadata = self.durable_state();
         crate::broker_ensure!(

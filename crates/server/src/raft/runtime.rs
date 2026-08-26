@@ -10,7 +10,8 @@ pub struct RaftRuntime {
     pub(super) node_id: u64,
     pub(super) tls_enabled: bool,
     pub(super) partition_data: SharedReplicaData,
-    pub(super) partition_write_gates: Arc<HashMap<String, tokio::sync::Mutex<()>>>,
+    pub(super) partition_write_gates:
+        Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
     pub(super) configured_streams: Vec<crate::stream::StreamDefinition>,
     pub(super) heartbeat_interval_ms: u64,
     pub(super) security_references: BTreeSet<String>,
@@ -258,7 +259,12 @@ impl RaftRuntime {
             node_id: config.node_id,
             tls_enabled,
             partition_data,
-            partition_write_gates: Arc::new(partition_write_gates),
+            partition_write_gates: Arc::new(tokio::sync::Mutex::new(
+                partition_write_gates
+                    .into_iter()
+                    .map(|(key, gate)| (key, Arc::new(gate)))
+                    .collect(),
+            )),
             configured_streams: streams.definitions().to_vec(),
             heartbeat_interval_ms: config.heartbeat_interval_ms,
             security_references: ["cluster-auth-token".to_string()].into_iter().collect(),
