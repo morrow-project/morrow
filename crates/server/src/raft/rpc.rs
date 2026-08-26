@@ -10,6 +10,7 @@ pub(super) enum RaftRequest {
         data: Vec<u8>,
     },
     DataAppend(DataAppendRequest),
+    DataAppendBatch(Vec<DataAppendRequest>),
     DataCommit(DataCommitRequest),
     DataProgress(DataProgressRequest),
     DataManifest(DataManifestRequest),
@@ -31,6 +32,7 @@ pub(super) enum RaftResponse {
     Vote(VoteResponse<u64>),
     FullSnapshot(SnapshotResponse<u64>),
     DataAppend(DataAppendResponse),
+    DataAppendBatch(Vec<DataAppendResponse>),
     DataCommit(DataCommitResponse),
     DataProgress(Option<u64>),
     DataManifest(DataManifestResponse),
@@ -183,6 +185,39 @@ where
                     .await
                     {
                         Ok(response) => RaftResponse::DataAppend(response),
+                        Err(err) => RaftResponse::Error(err.to_string()),
+                    }
+                }
+            }
+            RaftRequest::DataAppendBatch(requests) => {
+                let metadata = state_machine.durable_state();
+                let valid = requests.iter().all(|request| {
+                    let key = partition_key(
+                        request.envelope.stream.as_str(),
+                        request.envelope.partition.0,
+                    );
+                    metadata
+                        .partition_assignments
+                        .get(&key)
+                        .is_some_and(|assignment| {
+                            assignment.leader_id == request.leader_id
+                                && assignment.leader_epoch == request.leader_epoch
+                                && assignment.replica_set_generation
+                                    == request.replica_set_generation
+                        })
+                        && request.batch_digest
+                            == crate::partition_log::committed_envelope_checksum(&request.envelope)
+                                .unwrap_or_default()
+                });
+                if !valid || requests.is_empty() || requests.len() > MAX_DATA_APPEND_BATCH_RECORDS {
+                    RaftResponse::Error("invalid partition append batch".to_string())
+                } else {
+                    match run_replica_io(io_gate.clone(), partition_data.clone(), move |store| {
+                        store.append_batch(&requests)
+                    })
+                    .await
+                    {
+                        Ok(response) => RaftResponse::DataAppendBatch(response),
                         Err(err) => RaftResponse::Error(err.to_string()),
                     }
                 }

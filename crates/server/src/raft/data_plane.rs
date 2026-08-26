@@ -8,6 +8,7 @@ use std::sync::Mutex as StdMutex;
 const PARTITION_COMMIT_JOURNAL: &str = "commit-state.journal";
 const COMMIT_CHECKPOINT_RECORDS: u64 = 1_024;
 const COMMIT_CHECKPOINT_BYTES: u64 = 8 * 1024 * 1024;
+pub(super) const MAX_DATA_APPEND_BATCH_RECORDS: usize = 256;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct PartitionCommitRecord {
@@ -294,6 +295,21 @@ impl ReplicaDataStore {
             match_offset: request.envelope.offset,
             flushed_offset: request.fsync.then_some(request.envelope.offset),
         })
+    }
+
+    pub(super) fn append_batch(
+        &mut self,
+        requests: &[DataAppendRequest],
+    ) -> Result<Vec<DataAppendResponse>> {
+        crate::broker_ensure!(
+            !requests.is_empty() && requests.len() <= MAX_DATA_APPEND_BATCH_RECORDS,
+            "partition append batch size is outside the supported bound"
+        );
+        let mut responses = Vec::with_capacity(requests.len());
+        for request in requests {
+            responses.push(self.append(request)?);
+        }
+        Ok(responses)
     }
 
     pub(super) fn commit(&mut self, request: &DataCommitRequest) -> Result<DataCommitResponse> {
