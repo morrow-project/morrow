@@ -593,7 +593,7 @@ pub(super) fn initial_partition_leader(replica_order: &[u64], partition: u32) ->
 /// Select a stable, bounded replica set for a partition. Rendezvous ordering
 /// avoids shifting every existing partition when a broker is added, while the
 /// deterministic node-id tie-break keeps bootstrap and restart decisions equal.
-pub(super) fn initial_partition_replicas(
+pub(crate) fn initial_partition_replicas(
     stream: &str,
     partition: u32,
     data_nodes: &[u64],

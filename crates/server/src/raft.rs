@@ -503,7 +503,7 @@ mod network;
 pub(crate) mod partition_runtime;
 mod proxy;
 mod rpc;
-mod runtime;
+pub(crate) mod runtime;
 mod state_machine;
 mod storage_io;
 
