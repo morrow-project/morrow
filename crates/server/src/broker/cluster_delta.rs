@@ -57,18 +57,6 @@ impl Morrow {
     }
 
     async fn apply_cluster_partition_ordered(&self, envelope: MessageEnvelope) -> Result<()> {
-        let shard = crate::state_shards::shard_for(
-            crate::state_shards::StateShardKey::Partition {
-                stream: envelope.stream.as_str(),
-                partition: envelope.partition.0,
-            },
-            self.state_shard_gates.len(),
-        );
-        let shard_wait_started = Instant::now();
-        let _state_shard_guard = self.state_shard_gates[shard].lock().await;
-        self.metrics
-            .state_shard_wait_us
-            .observe(shard_wait_started.elapsed());
         let _storage_operation = self.storage_gate.read().await;
         if self.partition_logs.is_before_retention_floor(
             envelope.stream.as_str(),
@@ -91,6 +79,20 @@ impl Morrow {
         })
         .await
         .map_err(|err| BrokerError::with_source("cluster partition worker failed", err))??;
+        // Disk and worker-pool waits happen before taking the state shard. The
+        // shard protects only the ordered in-memory index update below.
+        let shard = crate::state_shards::shard_for(
+            crate::state_shards::StateShardKey::Partition {
+                stream: envelope.stream.as_str(),
+                partition: envelope.partition.0,
+            },
+            self.state_shard_gates.len(),
+        );
+        let shard_wait_started = Instant::now();
+        let _state_shard_guard = self.state_shard_gates[shard].lock().await;
+        self.metrics
+            .state_shard_wait_us
+            .observe(shard_wait_started.elapsed());
         let shard_hold_started = Instant::now();
         self.inner
             .lock()
