@@ -6,6 +6,9 @@ pub(super) const SEGMENT_HEADER: &[u8] = b"BROKERLOG\x01\n";
 pub(super) const SEGMENT_HEADER_LEN: u64 = SEGMENT_HEADER.len() as u64;
 pub(super) const BATCH_PREFIX_LEN: u64 = 8;
 pub(super) const ENCRYPTED_BODY_MAGIC: &[u8] = b"MORROW-PLOG-ENC1\n";
+/// Versioned on-disk envelope body. The outer length and CRC remain unchanged
+/// so old segments stay readable while new records carry byte strings directly.
+const BINARY_BODY_MAGIC: &[u8] = b"MORROW-PLOG-BIN1\n";
 const MAX_BATCH_BYTES: usize = 64 * 1024 * 1024;
 
 pub(super) struct EncodedBatch {
@@ -18,7 +21,7 @@ pub(super) fn encode_batch(envelope: &MessageEnvelope) -> Result<Vec<u8>> {
 }
 
 pub(super) fn encode_batch_with_len(envelope: &MessageEnvelope) -> Result<EncodedBatch> {
-    let body = serde_json::to_vec(envelope).context("encoding partition-log envelope")?;
+    let body = encode_binary_envelope(envelope)?;
     crate::broker_ensure!(
         body.len() <= u32::MAX as usize,
         "partition-log envelope is too large"
@@ -37,7 +40,7 @@ pub(super) fn encode_encrypted_batch_with_len(
     envelope: &MessageEnvelope,
     encryption: &std::sync::Arc<crate::encryption::KeyRing>,
 ) -> Result<EncodedBatch> {
-    let body = serde_json::to_vec(envelope).context("encoding partition-log envelope")?;
+    let body = encode_binary_envelope(envelope)?;
     let encrypted = encryption.encrypt(&body, b"partition-log")?;
     let mut protected = ENCRYPTED_BODY_MAGIC.to_vec();
     protected.extend(
@@ -59,9 +62,176 @@ pub(super) fn encode_encrypted_batch_with_len(
 }
 
 pub(super) fn envelope_checksum(envelope: &MessageEnvelope) -> Result<u32> {
-    Ok(crc32fast::hash(
-        &serde_json::to_vec(envelope).context("encoding partition-log envelope")?,
-    ))
+    Ok(crc32fast::hash(&encode_binary_envelope(envelope)?))
+}
+
+fn encode_binary_envelope(envelope: &MessageEnvelope) -> Result<Vec<u8>> {
+    let mut out = BINARY_BODY_MAGIC.to_vec();
+    put_string(&mut out, &envelope.namespace)?;
+    put_string(&mut out, envelope.stream.as_str())?;
+    out.extend_from_slice(&envelope.partition.0.to_le_bytes());
+    out.extend_from_slice(&envelope.offset.to_le_bytes());
+    put_string(&mut out, &envelope.subject)?;
+    put_optional_bytes(&mut out, envelope.key.as_deref())?;
+    crate::broker_ensure!(
+        envelope.headers.len() <= u32::MAX as usize,
+        "too many headers"
+    );
+    out.extend_from_slice(&(envelope.headers.len() as u32).to_le_bytes());
+    for header in &envelope.headers {
+        put_string(&mut out, &header.name)?;
+        put_string(&mut out, &header.value)?;
+    }
+    out.extend_from_slice(&envelope.timestamp_ms.to_le_bytes());
+    put_optional_string(&mut out, envelope.reply_to.as_deref())?;
+    match envelope.schema_id {
+        Some(schema_id) => {
+            out.push(1);
+            out.extend_from_slice(&schema_id.to_le_bytes());
+        }
+        None => out.push(0),
+    }
+    put_bytes(&mut out, &envelope.payload)?;
+    out.extend_from_slice(&envelope.partitioning_epoch.to_le_bytes());
+    out.extend_from_slice(&envelope.leader_epoch.to_le_bytes());
+    out.extend_from_slice(&envelope.legacy_seq.to_le_bytes());
+    Ok(out)
+}
+
+fn put_bytes(out: &mut Vec<u8>, bytes: &[u8]) -> Result<()> {
+    crate::broker_ensure!(
+        bytes.len() <= u32::MAX as usize,
+        "partition-log field is too large"
+    );
+    out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+    out.extend_from_slice(bytes);
+    Ok(())
+}
+
+fn put_string(out: &mut Vec<u8>, value: &str) -> Result<()> {
+    put_bytes(out, value.as_bytes())
+}
+
+fn put_optional_bytes(out: &mut Vec<u8>, value: Option<&[u8]>) -> Result<()> {
+    match value {
+        Some(value) => {
+            out.push(1);
+            put_bytes(out, value)
+        }
+        None => {
+            out.push(0);
+            Ok(())
+        }
+    }
+}
+
+fn put_optional_string(out: &mut Vec<u8>, value: Option<&str>) -> Result<()> {
+    match value {
+        Some(value) => {
+            out.push(1);
+            put_string(out, value)
+        }
+        None => {
+            out.push(0);
+            Ok(())
+        }
+    }
+}
+
+struct BinaryReader<'a> {
+    bytes: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> BinaryReader<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, offset: 0 }
+    }
+
+    fn take(&mut self, len: usize) -> io::Result<&'a [u8]> {
+        let end = self
+            .offset
+            .checked_add(len)
+            .ok_or_else(|| invalid("field length overflow"))?;
+        let value = self
+            .bytes
+            .get(self.offset..end)
+            .ok_or_else(|| invalid("truncated binary envelope"))?;
+        self.offset = end;
+        Ok(value)
+    }
+
+    fn u8(&mut self) -> io::Result<u8> {
+        Ok(self.take(1)?[0])
+    }
+    fn u32(&mut self) -> io::Result<u32> {
+        Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()))
+    }
+    fn u64(&mut self) -> io::Result<u64> {
+        Ok(u64::from_le_bytes(self.take(8)?.try_into().unwrap()))
+    }
+    fn bytes(&mut self) -> io::Result<Vec<u8>> {
+        let len = self.u32()? as usize;
+        Ok(self.take(len)?.to_vec())
+    }
+    fn string(&mut self) -> io::Result<String> {
+        String::from_utf8(self.bytes()?).map_err(|_| invalid("binary envelope string is not UTF-8"))
+    }
+    fn optional_bytes(&mut self) -> io::Result<Option<Vec<u8>>> {
+        Ok((self.u8()? == 1).then(|| self.bytes()).transpose()?)
+    }
+    fn optional_string(&mut self) -> io::Result<Option<String>> {
+        Ok((self.u8()? == 1).then(|| self.string()).transpose()?)
+    }
+}
+
+fn invalid(message: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message)
+}
+
+fn decode_binary_envelope(body: &[u8]) -> io::Result<MessageEnvelope> {
+    let mut reader = BinaryReader::new(&body[BINARY_BODY_MAGIC.len()..]);
+    let namespace = reader.string()?;
+    let stream =
+        crate::stream::StreamId::new(reader.string()?).map_err(|err| invalid(&err.to_string()))?;
+    let partition = crate::stream::PartitionId(reader.u32()?);
+    let offset = reader.u64()?;
+    let subject = reader.string()?;
+    let key = reader.optional_bytes()?;
+    let header_count = reader.u32()? as usize;
+    let mut headers = Vec::with_capacity(header_count);
+    for _ in 0..header_count {
+        headers.push(crate::partition_log::MessageHeader {
+            name: reader.string()?,
+            value: reader.string()?,
+        });
+    }
+    let timestamp_ms = reader.u64()?;
+    let reply_to = reader.optional_string()?;
+    let schema_id = (reader.u8()? == 1).then(|| reader.u64()).transpose()?;
+    let payload = reader.bytes()?;
+    let partitioning_epoch = reader.u64()?;
+    let leader_epoch = reader.u64()?;
+    let legacy_seq = reader.u64()?;
+    if reader.offset != reader.bytes.len() {
+        return Err(invalid("trailing bytes in binary envelope"));
+    }
+    Ok(MessageEnvelope {
+        namespace,
+        stream,
+        partition,
+        offset,
+        subject,
+        key,
+        headers,
+        timestamp_ms,
+        reply_to,
+        schema_id,
+        payload,
+        partitioning_epoch,
+        leader_epoch,
+        legacy_seq,
+    })
 }
 
 pub(super) fn read_batch<R: Read>(file: &mut R) -> io::Result<Option<(MessageEnvelope, u64)>> {
@@ -116,12 +286,16 @@ pub(super) fn read_batch_with_key<R: Read>(
     } else {
         body
     };
-    let envelope = serde_json::from_slice(&body).map_err(|err| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("invalid partition-log envelope: {err}"),
-        )
-    })?;
+    let envelope = if body.starts_with(BINARY_BODY_MAGIC) {
+        decode_binary_envelope(&body)?
+    } else {
+        serde_json::from_slice(&body).map_err(|err| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("invalid partition-log envelope: {err}"),
+            )
+        })?
+    };
     Ok(Some((envelope, BATCH_PREFIX_LEN + body_len as u64)))
 }
 
