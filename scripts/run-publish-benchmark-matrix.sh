@@ -313,6 +313,7 @@ output_dir=$(CDPATH= cd -- "$output_dir" && pwd)
 
 work_dir=$(mktemp -d "${TMPDIR:-/tmp}/morrow-publish-bench.XXXXXX")
 server_pids=
+resource_sampler_pid=
 failed_cases=
 
 stop_servers() {
@@ -325,7 +326,43 @@ stop_servers() {
   server_pids=
 }
 
+stop_resource_sampler() {
+  if test -n "$resource_sampler_pid"; then
+    kill "$resource_sampler_pid" 2>/dev/null || true
+    wait "$resource_sampler_pid" 2>/dev/null || true
+    resource_sampler_pid=
+  fi
+}
+
+resource_sample() {
+  path=$1
+  timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  printf 'timestamp=%s\n' "$timestamp"
+  printf 'disk_free_kb='; df -k "$repo_dir" | awk 'NR==2 {print $4}'
+  if command -v vm_stat >/dev/null 2>&1; then
+    vm_stat | awk -F: '/Pages free|Pages active|Pages inactive|Pages wired down/ {gsub(/^ +|\\.$/, "", $2); printf "vm_%s=%s\\n", $1, $2}'
+  elif test -r /proc/meminfo; then
+    awk '/^(MemTotal|MemAvailable|SwapFree):/ {printf "mem_%s_kb=%s\\n", tolower($1), $2}' /proc/meminfo
+  fi
+  for pid in $server_pids; do
+    ps -p "$pid" -o pid=,pcpu=,rss=,etime=,state= 2>/dev/null || true
+  done
+}
+
+start_resource_sampler() {
+  path=$1
+  : > "$path"
+  (
+    while :; do
+      resource_sample "$path" >> "$path"
+      sleep 1
+    done
+  ) &
+  resource_sampler_pid=$!
+}
+
 cleanup() {
+  stop_resource_sampler
   stop_servers
   rm -rf "$work_dir"
 }
@@ -501,6 +538,8 @@ run_case() {
   if test "$topology" != external; then
     start_fixture "$case_name"
   fi
+  resource_path=$output_dir/$case_name.resources.txt
+  start_resource_sampler "$resource_path"
   result_json=$output_dir/$case_name.json
   result_csv=$output_dir/$case_name.csv
   result_stderr=$output_dir/$case_name.stderr.txt
@@ -545,6 +584,7 @@ run_case() {
     echo "case failed: $case_name" >&2
     cat "$result_stderr" >&2
     failed_cases="$failed_cases $case_name"
+    stop_resource_sampler
     if test "$topology" != external; then
       stop_servers
     fi
@@ -554,6 +594,7 @@ run_case() {
   if test "$quiet" = false; then
     cat "$result_json"
   fi
+  stop_resource_sampler
   if test "$topology" != external; then
     stop_servers
   fi

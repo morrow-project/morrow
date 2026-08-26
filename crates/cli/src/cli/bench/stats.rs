@@ -62,6 +62,23 @@ pub(crate) struct LatencyDistribution {
     pub max: f64,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub(super) struct PhaseMetrics {
+    pub warmup_ms: u64,
+    pub active_ms: u64,
+    pub drain_ms: u64,
+    pub warmup_operations: u64,
+    pub measured_operations: u64,
+    pub total_operations: u64,
+    pub offered_messages_per_second: f64,
+    pub achieved_messages_per_second: f64,
+    pub steady_state: bool,
+}
+
+pub(crate) fn steady_state_eligible(active: Duration, operations: u64) -> bool {
+    active >= Duration::from_secs(1) && operations > 0
+}
+
 pub(crate) fn distribution(values: &mut [u64]) -> LatencyDistribution {
     values.sort_unstable();
     let samples = values.len();

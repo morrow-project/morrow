@@ -117,6 +117,16 @@ Human, JSON, and CSV results carry the same workload identity and include:
 - latency min, mean, standard deviation, p50, p90, p95, p99, p99.9, and max;
 - endpoint and local/remote classification, CLI and protocol versions, optional
   build revision, OS, architecture, CPU core count, effective seed, and config.
+- explicit `phases` metrics: warm-up operations, measured operations, active
+  duration, post-generation drain duration, total operations, offered rate,
+  achieved rate, and a `steady_state` validity flag. A duration run is marked
+  steady-state only when it lasts at least one second and records operations.
+
+The publish matrix fixture also writes a bounded `*.resources.txt` sample stream
+alongside each case. Samples are taken once per second and include timestamp,
+free disk, host memory counters, and managed server CPU/RSS when available.
+These sidecars make storage pressure and process resource usage visible without
+changing the benchmark's measured client path.
 
 Latency means the timed operation boundary for each mode. Fire-and-forget is
 client enqueue/write latency; acknowledged publish is acknowledgement latency;

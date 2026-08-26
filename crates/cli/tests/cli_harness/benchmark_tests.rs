@@ -35,6 +35,10 @@ async fn cli_bench_pubsub_reports_json_results() {
     assert_eq!(result["acknowledgement"]["requested_level"], "durable");
     assert_eq!(result["acknowledgement"]["observed_level"], "durable");
     assert_eq!(result["acknowledgement"]["observed_contract_version"], 1);
+    assert_eq!(result["phases"]["warmup_operations"], 0);
+    assert_eq!(result["phases"]["measured_operations"], 20);
+    assert_eq!(result["phases"]["total_operations"], 20);
+    assert_eq!(result["phases"]["steady_state"], false);
     harness.shutdown().await;
 }
 
@@ -87,6 +91,7 @@ async fn cli_bench_publish_modes_support_parallel_clients() {
         let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(result["aggregate"]["operations"], 20, "{mode}");
         assert_eq!(result["valid"], true, "{mode}");
+        assert_eq!(result["phases"]["measured_operations"], 20, "{mode}");
         let csv = fs::read_to_string(csv_path).unwrap();
         assert!(csv.starts_with("mode,target,endpoint,network"));
         assert!(csv.lines().count() >= 4);
