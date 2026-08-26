@@ -38,9 +38,46 @@ pub(crate) fn startup_assigned_partitions(config: &Config) -> Option<BTreeSet<(S
                     }
                 }
             }
-            Some(assigned)
+            if startup_has_unassigned_partition_data(config, &assigned) {
+                None
+            } else {
+                Some(assigned)
+            }
         }
     }
+}
+
+fn startup_has_unassigned_partition_data(
+    config: &Config,
+    assigned: &BTreeSet<(String, u32)>,
+) -> bool {
+    let streams_root = config.wal_dir.join("streams");
+    let Ok(streams) = std::fs::read_dir(streams_root) else {
+        return false;
+    };
+    for stream_entry in streams.flatten() {
+        let Ok(stream_name) = stream_entry.file_name().into_string() else {
+            return true;
+        };
+        let Ok(partitions) = std::fs::read_dir(stream_entry.path()) else {
+            return true;
+        };
+        for partition_entry in partitions.flatten() {
+            let Ok(name) = partition_entry.file_name().into_string() else {
+                return true;
+            };
+            let Some(partition) = name
+                .strip_prefix("partition-")
+                .and_then(|value| value.parse::<u32>().ok())
+            else {
+                continue;
+            };
+            if !assigned.contains(&(stream_name.clone(), partition)) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 impl Morrow {
