@@ -4,7 +4,7 @@
 use crate::error::{BrokerError, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::PathBuf;
 
@@ -61,6 +61,7 @@ pub struct SchemaRegistry {
     path: Option<PathBuf>,
     compatibility: BTreeMap<String, Compatibility>,
     state: RegistryState,
+    id_index: HashMap<u64, (String, u32)>,
 }
 
 impl SchemaRegistry {
@@ -72,6 +73,7 @@ impl SchemaRegistry {
                 next_id: 1,
                 ..Default::default()
             },
+            id_index: HashMap::new(),
         }
     }
 
@@ -86,10 +88,12 @@ impl SchemaRegistry {
                 ..Default::default()
             }
         };
+        let id_index = build_id_index(&state)?;
         Ok(Self {
             path: Some(path),
             compatibility: BTreeMap::new(),
             state,
+            id_index,
         })
     }
 
@@ -151,6 +155,8 @@ impl SchemaRegistry {
         self.state.next_id = self.state.next_id.saturating_add(1);
         versions.push(version.clone());
         self.persist()?;
+        self.id_index
+            .insert(version.id, (subject_key, version.version));
         Ok(version)
     }
 
@@ -163,11 +169,12 @@ impl SchemaRegistry {
     }
 
     pub fn by_id(&self, id: u64) -> Option<&SchemaVersion> {
+        let (subject_key, version) = self.id_index.get(&id)?;
         self.state
             .subjects
-            .values()
-            .flat_map(|versions| versions.iter())
-            .find(|schema| schema.id == id && !schema.deleted)
+            .get(subject_key)?
+            .iter()
+            .find(|schema| schema.version == *version && !schema.deleted)
     }
 
     pub fn validate_message_metadata(
@@ -194,8 +201,11 @@ impl SchemaRegistry {
             .get_mut(&key(tenant, subject))
             .and_then(|versions| versions.iter_mut().find(|schema| schema.version == version))
             .ok_or_else(|| BrokerError::msg("schema version not found"))?;
+        let id = schema.id;
         schema.deleted = true;
-        self.persist()
+        self.persist()?;
+        self.id_index.remove(&id);
+        Ok(())
     }
 
     pub fn rollback(&mut self, tenant: &str, subject: &str, version: u32) -> Result<SchemaVersion> {
@@ -208,6 +218,8 @@ impl SchemaRegistry {
         schema.deleted = false;
         let schema = schema.clone();
         self.persist()?;
+        self.id_index
+            .insert(schema.id, (key(tenant, subject), schema.version));
         Ok(schema)
     }
 
@@ -250,6 +262,23 @@ impl SchemaRegistry {
         fs::rename(temporary, path)?;
         Ok(())
     }
+}
+
+fn build_id_index(state: &RegistryState) -> Result<HashMap<u64, (String, u32)>> {
+    let mut index = HashMap::new();
+    for (subject_key, versions) in &state.subjects {
+        for schema in versions {
+            crate::broker_ensure!(
+                !index.contains_key(&schema.id),
+                "schema registry contains duplicate schema ID {}",
+                schema.id
+            );
+            if !schema.deleted {
+                index.insert(schema.id, (subject_key.clone(), schema.version));
+            }
+        }
+    }
+    Ok(index)
 }
 
 impl Default for SchemaRegistry {
