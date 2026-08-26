@@ -47,6 +47,17 @@ pub(super) fn producer_fingerprint(
 }
 
 impl DurableBrokerState {
+    pub(super) fn ready_connection_ids(&self) -> HashSet<u64> {
+        self.ready_consumers
+            .iter()
+            .flat_map(|consumer_id| {
+                self.consumers
+                    .get(consumer_id)
+                    .into_iter()
+                    .flat_map(|consumer| consumer.members.keys().copied())
+            })
+            .collect()
+    }
     pub(super) fn begin_producer_sequence(
         &mut self,
         producer: &protocol::ProducerSequence,

@@ -755,8 +755,17 @@ impl Morrow {
         let span = tracing::info_span!("morrow.delivery.prepare");
         let started = Instant::now();
         let deliveries = async {
+            let connection_ids = self.inner.lock().await.ready_connection_ids();
             let connections = ConnectionState {
-                clients: self.connections.lock().await.clients.clone(),
+                clients: self
+                    .connections
+                    .lock()
+                    .await
+                    .clients
+                    .iter()
+                    .filter(|(connection_id, _)| connection_ids.contains(connection_id))
+                    .map(|(connection_id, client)| (*connection_id, client.clone()))
+                    .collect(),
             };
             let mut inner = self.inner.lock().await;
             Ok::<_, BrokerError>(inner.prepare_durable_deliveries(
