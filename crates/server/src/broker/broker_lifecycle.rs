@@ -707,6 +707,54 @@ impl Morrow {
             work_scheduler: Arc::new(tokio::sync::Mutex::new(
                 crate::work_scheduler::WorkScheduler::new([
                     (
+                        crate::work_scheduler::WorkClass::Control,
+                        crate::work_scheduler::WorkBudget {
+                            max_records: u64::MAX,
+                            max_bytes: u64::MAX,
+                            max_concurrency: 64,
+                        },
+                    ),
+                    (
+                        crate::work_scheduler::WorkClass::Foreground,
+                        crate::work_scheduler::WorkBudget {
+                            max_records: u64::MAX,
+                            max_bytes: u64::MAX,
+                            max_concurrency: 256,
+                        },
+                    ),
+                    (
+                        crate::work_scheduler::WorkClass::Observer,
+                        crate::work_scheduler::WorkBudget {
+                            max_records: u64::MAX,
+                            max_bytes: u64::MAX,
+                            max_concurrency: 8,
+                        },
+                    ),
+                    (
+                        crate::work_scheduler::WorkClass::CatchUp,
+                        crate::work_scheduler::WorkBudget {
+                            max_records: u64::MAX,
+                            max_bytes: u64::MAX,
+                            max_concurrency: 4,
+                        },
+                    ),
+                    (
+                        crate::work_scheduler::WorkClass::Snapshot,
+                        crate::work_scheduler::WorkBudget {
+                            max_records: u64::MAX,
+                            max_bytes: u64::MAX,
+                            max_concurrency: 2,
+                        },
+                    ),
+                    (
+                        crate::work_scheduler::WorkClass::Reassignment,
+                        crate::work_scheduler::WorkBudget {
+                            max_records: u64::MAX,
+                            max_bytes: u64::MAX,
+                            max_concurrency: 2,
+                        },
+                    ),
+                    (
                         crate::work_scheduler::WorkClass::Compaction,
                         crate::work_scheduler::WorkBudget {
                             max_records: u64::MAX,
