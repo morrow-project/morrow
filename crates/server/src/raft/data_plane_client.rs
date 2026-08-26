@@ -34,6 +34,23 @@ pub(super) async fn send_data_append_on_client(
     }
 }
 
+pub(super) async fn send_data_append_batch_on_client(
+    client: &NetworkClient,
+    requests: Vec<DataAppendRequest>,
+) -> Result<Vec<DataAppendResponse>> {
+    match client
+        .request(RaftRequest::DataAppendBatch(requests))
+        .await
+        .map_err(|err| BrokerError::msg(err.to_string()))?
+    {
+        RaftResponse::DataAppendBatch(responses) => Ok(responses),
+        RaftResponse::Error(message) => Err(BrokerError::msg(message)),
+        _ => Err(BrokerError::msg(
+            "unexpected partition append batch response",
+        )),
+    }
+}
+
 pub(super) async fn send_data_commit_on_client(
     client: &NetworkClient,
     request: DataCommitRequest,

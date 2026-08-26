@@ -99,28 +99,30 @@ impl RaftRuntime {
                 )
                 .await?;
                 let mut predecessor_checksum = request.predecessor_checksum;
+                let mut append_batch = Vec::with_capacity(committed_records.len() + 1);
                 for record in committed_records {
                     let record_checksum =
                         crate::partition_log::committed_envelope_checksum(&record)?;
-                    send_data_append_on_client(
-                        &client,
-                        DataAppendRequest {
-                            leader_id: request.leader_id,
-                            leader_epoch: request.leader_epoch,
-                            replica_set_generation: request.replica_set_generation,
-                            fsync: request.fsync,
-                            committed_high_watermark: request.committed_high_watermark,
-                            predecessor_offset: record.offset.checked_sub(1),
-                            predecessor_checksum,
-                            batch_digest: record_checksum,
-                            durability: request.durability,
-                            envelope: record,
-                        },
-                    )
-                    .await?;
+                    append_batch.push(DataAppendRequest {
+                        leader_id: request.leader_id,
+                        leader_epoch: request.leader_epoch,
+                        replica_set_generation: request.replica_set_generation,
+                        fsync: request.fsync,
+                        committed_high_watermark: request.committed_high_watermark,
+                        predecessor_offset: record.offset.checked_sub(1),
+                        predecessor_checksum,
+                        batch_digest: record_checksum,
+                        durability: request.durability,
+                        envelope: record,
+                    });
                     predecessor_checksum = Some(record_checksum);
                 }
-                send_data_append_on_client(&client, request).await
+                append_batch.push(request);
+                let responses = send_data_append_batch_on_client(&client, append_batch).await?;
+                responses
+                    .into_iter()
+                    .last()
+                    .ok_or_else(|| BrokerError::msg("partition append batch was empty"))
             };
             if required {
                 let node_id = *node_id;

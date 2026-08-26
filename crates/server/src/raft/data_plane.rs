@@ -296,6 +296,17 @@ impl ReplicaDataStore {
         })
     }
 
+    pub(super) fn append_batch(
+        &mut self,
+        requests: &[DataAppendRequest],
+    ) -> Result<Vec<DataAppendResponse>> {
+        let mut responses = Vec::with_capacity(requests.len());
+        for request in requests {
+            responses.push(self.append(request)?);
+        }
+        Ok(responses)
+    }
+
     pub(super) fn commit(&mut self, request: &DataCommitRequest) -> Result<DataCommitResponse> {
         let key = (request.stream.clone(), request.partition);
         let record = self
