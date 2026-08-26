@@ -66,7 +66,6 @@ fn cache_applies_versioned_server_metadata_and_rejects_unknown_versions() {
             .is_err()
     );
 }
-
 #[test]
 fn routed_client_requires_positive_cache_and_connection_limits() {
     let options = crate::ClientOptions {
