@@ -185,6 +185,14 @@ pub(super) struct ReplicaDataStore {
 }
 
 impl ReplicaDataStore {
+    pub(super) fn activate_partition(
+        &mut self,
+        stream: &str,
+        partition: PartitionId,
+    ) -> Result<()> {
+        self.logs.activate_partition(stream, partition)
+    }
+
     pub(super) fn open(root: &Path, streams: &StreamCatalog, segment_bytes: u64) -> Result<Self> {
         Self::open_for_partitions(root, streams, segment_bytes, None)
     }

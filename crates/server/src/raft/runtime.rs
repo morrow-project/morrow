@@ -369,6 +369,23 @@ impl RaftRuntime {
         let metadata: crate::raft::MetadataSnapshot = serde_json::from_slice(payload)
             .map_err(|err| BrokerError::with_source("decoding controller metadata", err))?;
         self.state_machine.install_metadata(metadata);
+        let metadata = self.state_machine.durable_state();
+        let mut partition_data = self
+            .partition_data
+            .lock()
+            .map_err(|_| BrokerError::msg("partition data lock poisoned"))?;
+        for (key, assignment) in metadata.partition_assignments {
+            if !assignment.replicas.contains(&self.node_id) {
+                continue;
+            }
+            let Some((stream, partition)) = key.rsplit_once(':') else {
+                continue;
+            };
+            let partition = partition
+                .parse::<u32>()
+                .map_err(|_| BrokerError::msg("invalid metadata partition key"))?;
+            partition_data.activate_partition(stream, crate::stream::PartitionId(partition))?;
+        }
         Ok(())
     }
 
