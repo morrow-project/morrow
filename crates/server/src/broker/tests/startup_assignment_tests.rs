@@ -40,3 +40,22 @@ fn startup_assignment_filter_falls_back_when_unassigned_data_exists() {
         "existing data outside the deterministic assignment must trigger safe full recovery"
     );
 }
+
+#[test]
+fn startup_assignment_balances_partition_order_across_streams() {
+    let dir = TempDir::new().unwrap();
+    let mut config = test_config(dir.path());
+    let mut second = config.streams.definitions()[0].clone();
+    second.name = crate::stream::StreamId::new("payments").unwrap();
+    second.subjects = vec!["payments/**".into()];
+    config.streams =
+        crate::stream::StreamCatalog::new(vec![config.streams.definitions()[0].clone(), second])
+            .unwrap();
+    config.cluster = Some(fake_cluster_config(dir.path(), 4, 4));
+    config.cluster.as_mut().unwrap().role = crate::config::ClusterRole::Broker;
+    config.cluster.as_mut().unwrap().controller_voters = vec![1, 2];
+
+    let assigned = crate::broker::broker_lifecycle::startup_assigned_partitions(&config).unwrap();
+    assert!(assigned.contains(&("payments".to_string(), 0)));
+    assert!(!assigned.contains(&("orders".to_string(), 0)));
+}
