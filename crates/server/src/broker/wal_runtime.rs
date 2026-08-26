@@ -532,14 +532,34 @@ fn wal_worker(mut wal: Wal, receiver: mpsc::Receiver<WalCommand>) {
                     };
                     outcomes.push(outcome);
                 }
+                let successful_records = outcomes.iter().filter(|outcome| outcome.is_ok()).count();
+                let successful_bytes = records
+                    .iter()
+                    .zip(outcomes.iter())
+                    .filter_map(|(record, outcome)| {
+                        outcome
+                            .is_ok()
+                            .then_some(partition_append_estimated_bytes(record) as u64)
+                    })
+                    .sum();
+                wal.note_partition_append_batch(successful_records as u64, successful_bytes);
                 for (response, outcome) in responses.into_iter().zip(outcomes) {
                     let _ = response.send(outcome);
                 }
             }
             WalCommand::PartitionAppendBatch(records, response) => {
-                let result = records
-                    .iter()
-                    .try_for_each(|record| wal.append_partition_append(record));
+                let mut successful_records = 0u64;
+                let mut successful_bytes = 0u64;
+                let result = records.iter().try_for_each(|record| {
+                    let result = wal.append_partition_append(record);
+                    if result.is_ok() {
+                        successful_records = successful_records.saturating_add(1);
+                        successful_bytes = successful_bytes
+                            .saturating_add(partition_append_estimated_bytes(record) as u64);
+                    }
+                    result
+                });
+                wal.note_partition_append_batch(successful_records, successful_bytes);
                 let _ = response.send(result);
             }
             WalCommand::ConsumerUpsert(record, response) => {
