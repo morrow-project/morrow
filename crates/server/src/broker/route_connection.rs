@@ -167,7 +167,7 @@ const ROUTE_WIRE_VERSION: u8 = 1;
 struct RouteWireFrame {
     version: u8,
     auth_token: Option<String>,
-    frame: RouteFrame,
+    frame: serde_json::Value,
 }
 
 async fn read_route_wire_frame<R>(reader: &mut R) -> Result<Option<RouteWireFrame>>
@@ -195,8 +195,10 @@ where
     )
     .await
     .map_err(|_| BrokerError::msg("route frame read timed out"))??;
-    let wire: RouteWireFrame =
-        ciborium::de::from_reader(payload.as_slice()).context("decoding binary route frame")?;
+    let wire: RouteWireFrame = match ciborium::de::from_reader(payload.as_slice()) {
+        Ok(wire) => wire,
+        Err(err) => return Err(BrokerError::with_source("decoding binary route frame", err)),
+    };
     crate::broker_ensure!(
         wire.version == ROUTE_WIRE_VERSION,
         "unsupported route frame version"
@@ -219,7 +221,7 @@ where
         "invalid route auth token"
     );
     crate::broker_ensure!(
-        matches!(wire.frame, RouteFrame::Ping),
+        matches!(route_frame_from_value(wire.frame)?, RouteFrame::Ping),
         "invalid route handshake"
     );
     Ok(())
@@ -236,7 +238,15 @@ where
         wire.auth_token.is_none(),
         "route auth repeated after handshake"
     );
-    Ok(Some(wire.frame))
+    Ok(Some(route_frame_from_value(wire.frame)?))
+}
+
+fn route_frame_to_value(frame: &RouteFrame) -> Result<serde_json::Value> {
+    serde_json::to_value(frame).context("encoding route frame payload")
+}
+
+fn route_frame_from_value(value: serde_json::Value) -> Result<RouteFrame> {
+    serde_json::from_value(value).context("decoding route frame payload")
 }
 
 async fn write_route_wire_frame<W>(writer: &mut W, wire: &RouteWireFrame) -> Result<()>
@@ -262,7 +272,7 @@ where
         &RouteWireFrame {
             version: ROUTE_WIRE_VERSION,
             auth_token: Some(auth_token.to_string()),
-            frame: RouteFrame::Ping,
+            frame: route_frame_to_value(&RouteFrame::Ping)?,
         },
     )
     .await
@@ -277,7 +287,7 @@ where
         &RouteWireFrame {
             version: ROUTE_WIRE_VERSION,
             auth_token: None,
-            frame: frame.clone(),
+            frame: route_frame_to_value(frame)?,
         },
     )
     .await
