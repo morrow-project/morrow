@@ -409,9 +409,17 @@ impl Morrow {
             let retention_result = cluster.enforce_retention(self.hooks.clock.now_ms());
             self.release_retention_work().await;
             retention_result?;
+            let shard_wait_started = Instant::now();
             let state_shard_guard = self.state_shard_gates[shard].lock().await;
+            self.metrics
+                .state_shard_wait_us
+                .observe(shard_wait_started.elapsed());
+            let shard_hold_started = Instant::now();
             self.apply_cluster_partition(envelope.clone()).await?;
             drop(state_shard_guard);
+            self.metrics
+                .state_shard_hold_us
+                .observe(shard_hold_started.elapsed());
             let _storage_operation = self.storage_gate.read().await;
             let tenants = self.config.tenant_quotas.keys().cloned().collect();
             crate::broker_ensure!(
@@ -524,32 +532,44 @@ impl Morrow {
                 }
             };
             disk_reservation.commit();
+            let reference = PartitionAppendRecord::from(&envelope);
+            self.wal.append_partition_append_async(reference).await?;
+            let shard_wait_started = Instant::now();
             let _state_shard_guard = self.state_shard_gates[shard].lock().await;
+            self.metrics
+                .state_shard_wait_us
+                .observe(shard_wait_started.elapsed());
+            let shard_hold_started = Instant::now();
             self.metrics
                 .partition_writes_total
                 .fetch_add(1, Ordering::Relaxed);
-            let reference = PartitionAppendRecord::from(&envelope);
-            let mut inner = self.inner.lock().await;
-            inner.wal.append_partition_append(&reference)?;
-            let record = PublishRecord::from(envelope);
-            if let (Some(stream), Some(partition), Some(offset)) =
-                (record.stream.clone(), record.partition, record.offset)
-            {
+            let record = {
+                let mut inner = self.inner.lock().await;
+                let record = PublishRecord::from(envelope);
+                if let (Some(stream), Some(partition), Some(offset)) =
+                    (record.stream.clone(), record.partition, record.offset)
+                {
+                    inner
+                        .partition_sequences
+                        .insert((stream, partition, offset), record.seq);
+                }
                 inner
-                    .partition_sequences
-                    .insert((stream, partition, offset), record.seq);
-            }
-            inner
-                .messages
-                .insert(record.seq, record.clone().into_resident_metadata());
-            inner.observe_published_record(&record);
-            inner.mark_subject_ready(&record.subject);
+                    .messages
+                    .insert(record.seq, record.clone().into_resident_metadata());
+                inner.observe_published_record(&record);
+                inner.mark_subject_ready(&record.subject);
+                record
+            };
+            drop(_state_shard_guard);
+            self.metrics
+                .state_shard_hold_us
+                .observe(shard_hold_started.elapsed());
             let tenants = self.config.tenant_quotas.keys().cloned().collect();
             crate::broker_ensure!(
                 self.reserve_retention_work().await,
                 "retention work budget exhausted"
             );
-            let released_result = inner.enforce_stream_retention(
+            let released_result = self.inner.lock().await.enforce_stream_retention(
                 &self.partition_logs,
                 &self.config.streams,
                 self.hooks.clock.now_ms(),
@@ -557,7 +577,10 @@ impl Morrow {
             );
             self.release_retention_work().await;
             let released = released_result?;
-            inner.apply_record_compaction(record.seq, &self.config.streams);
+            self.inner
+                .lock()
+                .await
+                .apply_record_compaction(record.seq, &self.config.streams);
             (record, released)
         };
         for (tenant, bytes) in released {

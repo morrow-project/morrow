@@ -1569,6 +1569,16 @@ impl Morrow {
             "morrow_delivery_latency_us",
             &self.metrics.delivery_latency_us,
         );
+        append_latency_histogram(
+            &mut metrics,
+            "morrow_state_shard_wait_us",
+            &self.metrics.state_shard_wait_us,
+        );
+        append_latency_histogram(
+            &mut metrics,
+            "morrow_state_shard_hold_us",
+            &self.metrics.state_shard_hold_us,
+        );
         metrics.push_str("# HELP morrow_wal_bytes Total WAL bytes.\n");
         metrics.push_str("# TYPE morrow_wal_bytes gauge\n");
         metrics.push_str(&format!("morrow_wal_bytes {}\n", wal.total_wal_bytes));

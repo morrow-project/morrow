@@ -454,6 +454,8 @@ pub(super) struct BrokerMetrics {
     pub(super) dead_letter_replay_outcomes_total: AtomicU64,
     pub(super) publish_latency_us: LatencyHistogram,
     pub(super) delivery_latency_us: LatencyHistogram,
+    pub(super) state_shard_wait_us: LatencyHistogram,
+    pub(super) state_shard_hold_us: LatencyHistogram,
 }
 
 #[derive(Debug)]
