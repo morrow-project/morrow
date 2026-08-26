@@ -101,15 +101,35 @@ impl RoutedClient {
         payload: &[u8],
         key: Option<&str>,
     ) -> super::error::Result<()> {
+        self.publish_to_stream_with_headers(stream, subject, payload, key, &[])
+            .await
+    }
+
+    /// Publish directly to the selected partition leader while preserving
+    /// application headers. The metadata cache and bounded connection pool are
+    /// shared with the headerless convenience method above.
+    pub async fn publish_to_stream_with_headers(
+        &mut self,
+        stream: &str,
+        subject: &str,
+        payload: &[u8],
+        key: Option<&str>,
+        headers: &[(String, String)],
+    ) -> super::error::Result<()> {
         let address = self.route_address(stream, subject, key);
         let mut client = self.take_client(address).await?;
         let result = match key {
             Some(key) => {
                 client
-                    .publish_with_key_and_headers(subject, None, payload, key, &[])
+                    .publish_with_key_and_headers(subject, None, payload, key, headers)
                     .await
             }
-            None => client.publish(subject, payload).await,
+            None if headers.is_empty() => client.publish(subject, payload).await,
+            None => {
+                client
+                    .publish_with_headers(subject, None, payload, headers)
+                    .await
+            }
         };
         self.return_client(address, client);
         result
@@ -124,9 +144,33 @@ impl RoutedClient {
         msg_id: &str,
         key: Option<&str>,
     ) -> super::error::Result<ProducerAck> {
+        self.publish_to_stream_with_qos_and_headers(
+            stream,
+            subject,
+            payload,
+            level,
+            msg_id,
+            key,
+            &[],
+        )
+        .await
+    }
+
+    /// Acknowledged direct publish with application headers. A stable message
+    /// ID still makes the bounded stale-route retry idempotent.
+    pub async fn publish_to_stream_with_qos_and_headers(
+        &mut self,
+        stream: &str,
+        subject: &str,
+        payload: &[u8],
+        level: protocol::AckLevel,
+        msg_id: &str,
+        key: Option<&str>,
+        headers: &[(String, String)],
+    ) -> super::error::Result<ProducerAck> {
         let address = self.route_address(stream, subject, key);
         let result = self
-            .publish_qos_once(address, subject, payload, level, msg_id, key)
+            .publish_qos_once(address, subject, payload, level, msg_id, key, headers)
             .await;
         match result {
             Ok(ack) => Ok(ack),
@@ -139,7 +183,15 @@ impl RoutedClient {
                 self.clients.remove(&address);
                 self.cache.invalidate(stream, u64::MAX);
                 let retry_address = self.route_address(stream, subject, key);
-                self.publish_qos_once(retry_address, subject, payload, level, msg_id, key)
+                self.publish_qos_once(
+                    retry_address,
+                    subject,
+                    payload,
+                    level,
+                    msg_id,
+                    key,
+                    headers,
+                )
                     .await
                     .map_err(|retry_error| {
                         super::error::ClientError::msg(format!(
@@ -158,10 +210,11 @@ impl RoutedClient {
         level: protocol::AckLevel,
         msg_id: &str,
         key: Option<&str>,
+        headers: &[(String, String)],
     ) -> super::error::Result<ProducerAck> {
         let mut client = self.take_client(address).await?;
         let result = client
-            .publish_with_qos_and_key(subject, None, payload, level, msg_id, key)
+            .publish_with_qos_key_and_headers(subject, None, payload, level, msg_id, key, headers)
             .await;
         if result.is_ok() {
             self.return_client(address, client);
