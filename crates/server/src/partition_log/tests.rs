@@ -97,6 +97,29 @@ fn encrypted_partition_logs_replay_and_load_payloads_after_restart() {
     );
 }
 
+#[test]
+fn decoded_metadata_cache_is_populated_by_appends_and_reads() {
+    let dir = TempDir::new().unwrap();
+    let catalog = catalog(1);
+    let logs = PartitionLogSet::open(dir.path(), &catalog, 4096).unwrap().0;
+    let stream = &catalog.definitions()[0];
+    let envelope = logs
+        .append(AppendRequest {
+            partition_hint: Some(PartitionId(0)),
+            ..request(stream, None, &[])
+        })
+        .unwrap();
+    assert_eq!(logs.metadata_cache_stats(), (1, 0));
+    assert_eq!(
+        logs.load_envelope("orders", PartitionId(0), envelope.offset)
+            .unwrap()
+            .unwrap()
+            .payload,
+        b"hello"
+    );
+    assert_eq!(logs.metadata_cache_stats(), (1, 0));
+}
+
 fn request_for_subject<'a>(stream: &'a StreamDefinition, subject: &'a str) -> AppendRequest<'a> {
     let mut request = request(stream, None, &[]);
     request.subject = subject;

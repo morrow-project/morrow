@@ -58,6 +58,11 @@ impl<K: Clone + Eq + Hash, V> PartitionResourceCache<K, V> {
         self.evictions
     }
 
+    pub fn clear(&mut self) {
+        self.values.clear();
+        self.lru.clear();
+    }
+
     fn touch(&mut self, key: &K) {
         self.lru.retain(|entry| entry != key);
         self.lru.push_back(key.clone());
