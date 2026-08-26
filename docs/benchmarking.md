@@ -18,6 +18,35 @@ For `request`, start `serve` separately. For `sub`, start `pub` separately.
 `consume` and `fetch` use an existing durable consumer named by the positional
 argument; they do not create or reset it.
 
+## Reproducible publish matrix
+
+The repository includes a fixture that runs publish modes and acknowledgement
+levels as an isolated matrix and retains JSON, CSV, logs, and effective server
+configuration for each case:
+
+```bash
+scripts/run-publish-benchmark-matrix.sh --clients 5 --duration 10s
+scripts/run-publish-benchmark-matrix.sh --topology cluster --clients 1 --duration 10s
+```
+
+It can also use an existing server and an installed CLI without managing the
+deployment:
+
+```bash
+scripts/run-publish-benchmark-matrix.sh \
+  --topology external \
+  --no-build \
+  --cli-bin "$(command -v morrow-cli)" \
+  --client-config ./client.json \
+  --server 192.0.2.10:4222 \
+  --ack-levels accepted,durable,high-durability,cluster-durable
+```
+
+Run the script with `--help` for workload controls. The recorded local results,
+methodology, latency interpretation, and observed concurrent cluster failures
+are in
+[`benchmark-results/2026-08-26-publish-mode-ack-matrix.md`](benchmark-results/2026-08-26-publish-mode-ack-matrix.md).
+
 ## Publishing behavior
 
 `--mode` separates different client costs:
