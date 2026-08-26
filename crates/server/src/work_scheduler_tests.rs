@@ -44,3 +44,20 @@ fn retention_budget_saturates_and_releases() {
     scheduler.release(WorkClass::Retention, 0, 0);
     assert!(scheduler.try_reserve(WorkClass::Retention, 0, 0));
 }
+
+#[test]
+fn catch_up_budget_limits_concurrent_recovery() {
+    let mut scheduler = WorkScheduler::new([(
+        WorkClass::CatchUp,
+        WorkBudget {
+            max_records: 4,
+            max_bytes: 256,
+            max_concurrency: 1,
+        },
+    )]);
+    assert!(scheduler.try_reserve(WorkClass::CatchUp, 4, 128));
+    assert!(!scheduler.try_reserve(WorkClass::CatchUp, 1, 1));
+    assert_eq!(scheduler.usage(WorkClass::CatchUp).rejected, 1);
+    scheduler.release(WorkClass::CatchUp, 4, 128);
+    assert!(scheduler.try_reserve(WorkClass::CatchUp, 2, 64));
+}
