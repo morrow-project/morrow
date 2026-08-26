@@ -23,6 +23,7 @@ pub(crate) fn startup_assigned_partitions(config: &Config) -> Option<BTreeSet<(S
                 return Some(BTreeSet::new());
             };
             let mut assigned = BTreeSet::new();
+            let mut placement_index = 0usize;
             for stream in config.streams.definitions() {
                 let replicas = usize::try_from(stream.storage.replicas)
                     .unwrap_or(data_nodes.len())
@@ -30,12 +31,13 @@ pub(crate) fn startup_assigned_partitions(config: &Config) -> Option<BTreeSet<(S
                     .max(1);
                 for partition in 0..stream.partitions {
                     let owns_partition = (0..replicas).any(|offset| {
-                        data_nodes[(partition as usize + offset) % data_nodes.len()]
+                        data_nodes[(placement_index + offset) % data_nodes.len()]
                             == data_nodes[local_index]
                     });
                     if owns_partition {
                         assigned.insert((stream.name.as_str().to_string(), partition));
                     }
+                    placement_index = placement_index.saturating_add(1);
                 }
             }
             if startup_has_unassigned_partition_data(config, &assigned) {
