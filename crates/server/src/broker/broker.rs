@@ -78,6 +78,7 @@ pub struct Morrow {
     pub(super) pull_waiters: PullWaiterRegistry,
     pub(super) broker_control: BrokerControlRegistry,
     pub(super) compaction_running: Arc<AtomicBool>,
+    pub(super) work_scheduler: Arc<tokio::sync::Mutex<crate::work_scheduler::WorkScheduler>>,
     pub(super) route_mesh: Option<RouteMesh>,
     pub(super) middleware: MiddlewareRuntime,
     pub(super) hooks: BrokerHooks,

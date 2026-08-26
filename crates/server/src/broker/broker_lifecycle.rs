@@ -692,6 +692,16 @@ impl Morrow {
             pull_waiters: PullWaiterRegistry::default(),
             broker_control: BrokerControlRegistry::new(),
             compaction_running: Arc::new(AtomicBool::new(false)),
+            work_scheduler: Arc::new(tokio::sync::Mutex::new(
+                crate::work_scheduler::WorkScheduler::new([(
+                    crate::work_scheduler::WorkClass::Compaction,
+                    crate::work_scheduler::WorkBudget {
+                        max_records: u64::MAX,
+                        max_bytes: u64::MAX,
+                        max_concurrency: 1,
+                    },
+                )]),
+            )),
             route_mesh,
             middleware: hooks.middleware.clone(),
             hooks,

@@ -219,6 +219,12 @@ impl Morrow {
     }
 
     async fn compact_stream_segments(&self) -> Result<()> {
+        let reserved = self.work_scheduler.lock().await.try_reserve(
+            crate::work_scheduler::WorkClass::Compaction,
+            0,
+            0,
+        );
+        crate::broker_ensure!(reserved, "compaction work budget is exhausted");
         let _storage_operation = self.storage_gate.write().await;
         let visible_offsets = {
             let inner = self.inner.lock().await;
@@ -238,18 +244,36 @@ impl Morrow {
         };
         let logs = self.partition_logs.clone();
         let catalog = self.config.streams.clone();
-        let permit = self
-            .storage_permits
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(|_| BrokerError::msg("storage worker pool closed"))?;
-        tokio::task::spawn_blocking(move || {
+        let permit = self.storage_permits.clone().acquire_owned().await;
+        let permit = match permit {
+            Ok(permit) => permit,
+            Err(_) => {
+                self.work_scheduler.lock().await.release(
+                    crate::work_scheduler::WorkClass::Compaction,
+                    0,
+                    0,
+                );
+                return Err(BrokerError::msg("storage worker pool closed"));
+            }
+        };
+        let result = match tokio::task::spawn_blocking(move || {
             let _permit = permit;
             logs.compact_visible_offsets(&visible_offsets, &catalog)
         })
         .await
-        .map_err(|err| BrokerError::with_source("stream compaction worker failed", err))?
+        {
+            Ok(result) => result,
+            Err(err) => Err(BrokerError::with_source(
+                "stream compaction worker failed",
+                err,
+            )),
+        };
+        self.work_scheduler.lock().await.release(
+            crate::work_scheduler::WorkClass::Compaction,
+            0,
+            0,
+        );
+        result
     }
 
     #[cfg(test)]
