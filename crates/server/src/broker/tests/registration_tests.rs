@@ -79,7 +79,6 @@ async fn registration_status_is_bounded_and_tracks_revision() {
 
     assert_eq!(registry.status().await, (0, 3, 2));
 }
-
 #[tokio::test]
 async fn registration_metrics_track_sessions_and_snapshot_fallbacks() {
     let registry = BrokerControlRegistry::with_update_window(1);

@@ -233,8 +233,7 @@ impl BrokerControlRegistry {
         let state = self.inner.lock().await;
         (state.brokers.len(), state.revision, state.updates.len())
     }
-
-    pub(super) fn metrics_snapshot(&self) -> [u64; 5] {
+        pub(super) fn metrics_snapshot(&self) -> [u64; 5] {
         [
             self.metrics.registrations_total.load(Ordering::Relaxed),
             self.metrics.heartbeats_total.load(Ordering::Relaxed),
