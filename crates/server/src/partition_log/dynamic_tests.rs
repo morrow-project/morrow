@@ -2,6 +2,7 @@ use super::*;
 use crate::stream::{
     PartitionFallback, PartitioningPolicy, PartitioningStrategy, RetentionPolicy, StoragePolicy,
 };
+use std::collections::BTreeSet;
 use tempfile::TempDir;
 
 #[test]
@@ -49,4 +50,32 @@ fn activated_partition_can_append_and_reload_without_startup_recovery() {
             .payload,
         b"hello"
     );
+}
+
+#[test]
+fn recovery_status_distinguishes_configured_and_assigned_partitions() {
+    let dir = TempDir::new().unwrap();
+    let stream = StreamDefinition {
+        name: StreamId::new("orders").unwrap(),
+        subjects: vec!["orders/**".into()],
+        partitions: 3,
+        partitioning: PartitioningPolicy::default(),
+        storage: StoragePolicy::default(),
+        retention: RetentionPolicy::default(),
+    };
+    let catalog = StreamCatalog::new(vec![stream]).unwrap();
+    let assigned = BTreeSet::from([("orders".to_string(), 1)]);
+    let (logs, _) = PartitionLogSet::open_with_encryption_for_partitions(
+        dir.path(),
+        &catalog,
+        64 * 1024,
+        None,
+        Some(&assigned),
+    )
+    .unwrap();
+    let status = logs.recovery_status();
+    assert_eq!(status.configured_partitions, 3);
+    assert_eq!(status.assigned_partitions, 1);
+    assert_eq!(status.completed_partitions, 1);
+    assert_eq!(status.active_partitions, 1);
 }
