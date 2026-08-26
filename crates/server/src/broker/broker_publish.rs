@@ -76,32 +76,6 @@ impl Morrow {
         .map_err(|err| BrokerError::with_source("partition read worker failed", err))?
     }
 
-    async fn flush_partition(&self, record: &PublishRecord) -> Result<()> {
-        let stream = record
-            .stream
-            .clone()
-            .ok_or_else(|| BrokerError::msg("durable record has no stream"))?;
-        let partition = crate::stream::PartitionId(
-            record
-                .partition
-                .ok_or_else(|| BrokerError::msg("durable record has no partition"))?,
-        );
-        let partition_logs = self.partition_logs.clone();
-        let permit = self
-            .storage_permits
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(|_| BrokerError::msg("storage worker pool closed"))?;
-        tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            partition_logs.flush_partition(&stream, partition)
-        })
-        .instrument(tracing::info_span!("morrow.partition.flush"))
-        .await
-        .map_err(|err| BrokerError::with_source("partition flush worker failed", err))?
-    }
-
     pub(super) async fn publish(
         &self,
         publisher_id: u64,
@@ -620,12 +594,19 @@ impl Morrow {
         if ack.is_none_or(|ack| ack.level == protocol::AckLevel::HighDurability) {
             match self.hooks.durable_publish_flush_mode {
                 DurablePublishFlushMode::SleepThenFlush => {
-                    self.flush_partition(&record).await?;
+                    self.wal
+                        .flush_partitions_grouped(
+                            self.partition_logs.clone(),
+                            self.config.fsync_interval(),
+                        )
+                        .await?;
                     self.wal.flush_grouped(self.config.fsync_interval()).await?;
                 }
                 #[cfg(test)]
                 DurablePublishFlushMode::FlushImmediately => {
-                    self.flush_partition(&record).await?;
+                    self.wal
+                        .flush_partitions_grouped(self.partition_logs.clone(), Duration::ZERO)
+                        .await?;
                     self.wal.flush_grouped(Duration::ZERO).await?;
                 }
             }

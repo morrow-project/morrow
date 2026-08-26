@@ -9,6 +9,7 @@ pub(super) struct WalRuntime {
     sender: SyncSender<WalCommand>,
     next_publish_seq: Arc<AtomicU64>,
     flush_coordinator: Arc<FlushCoordinator>,
+    partition_flush_coordinator: Arc<FlushCoordinator>,
 }
 
 struct FlushCoordinator {
@@ -90,6 +91,12 @@ impl WalRuntime {
             sender,
             next_publish_seq: Arc::new(AtomicU64::new(next_publish_seq)),
             flush_coordinator: Arc::new(FlushCoordinator {
+                state: tokio::sync::Mutex::new(FlushState {
+                    running: false,
+                    waiters: Vec::new(),
+                }),
+            }),
+            partition_flush_coordinator: Arc::new(FlushCoordinator {
                 state: tokio::sync::Mutex::new(FlushState {
                     running: false,
                     waiters: Vec::new(),
@@ -357,6 +364,49 @@ impl WalRuntime {
         receiver
             .await
             .map_err(|_| BrokerError::msg("WAL group-commit coordinator stopped"))?
+    }
+
+    /// Join concurrent high-durability partition flushes into one physical
+    /// barrier. The whole partition log set is flushed once for the group;
+    /// callers still await the same durability boundary individually.
+    pub(super) async fn flush_partitions_grouped(
+        &self,
+        partition_logs: Arc<crate::partition_log::PartitionLogSet>,
+        interval: Duration,
+    ) -> Result<()> {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let start_worker = {
+            let mut state = self.partition_flush_coordinator.state.lock().await;
+            state.waiters.push(sender);
+            if state.running {
+                false
+            } else {
+                state.running = true;
+                true
+            }
+        };
+        if start_worker {
+            let coordinator = self.partition_flush_coordinator.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(interval).await;
+                let result = tokio::task::spawn_blocking(move || partition_logs.flush())
+                    .await
+                    .map_err(|err| BrokerError::with_source("partition flush worker failed", err))
+                    .and_then(|result| result);
+                let mut state = coordinator.state.lock().await;
+                state.running = false;
+                for waiter in state.waiters.drain(..) {
+                    let outcome = match &result {
+                        Ok(()) => Ok(()),
+                        Err(error) => Err(BrokerError::msg(error.to_string())),
+                    };
+                    let _ = waiter.send(outcome);
+                }
+            });
+        }
+        receiver
+            .await
+            .map_err(|_| BrokerError::msg("partition group-commit coordinator stopped"))?
     }
 
     pub(super) async fn checkpoint(
