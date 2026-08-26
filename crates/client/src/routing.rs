@@ -186,7 +186,7 @@ impl RoutedClient {
                 self.clients.remove(&address);
                 self.cache.invalidate(stream, u64::MAX);
                 let (retry_address, retry_epoch) = self.route_target(stream, subject, key);
-                let retry_headers = routed_headers(headers, retry_epoch);
+                let retry_headers = routed_headers(&headers, retry_epoch);
                 self.publish_qos_once(
                     retry_address,
                     subject,
@@ -245,7 +245,7 @@ impl RoutedClient {
                     ))
                 })?;
                 let (retry_address, retry_epoch) = self.route_target(stream, subject, key);
-                let retry_headers = routed_headers(headers, retry_epoch);
+                let retry_headers = routed_headers(&headers, retry_epoch);
                 self.publish_qos_once(
                     retry_address,
                     subject,
@@ -293,6 +293,11 @@ impl RoutedClient {
     ) -> (SocketAddr, Option<u64>) {
         let sticky = self.sticky;
         self.sticky = self.sticky.wrapping_add(1);
+        let partitioning_epoch = self
+            .cache
+            .streams
+            .get(stream)
+            .map(|metadata| metadata.partitioning_epoch);
         let leader = self
             .cache
             .route(stream, subject, key.map(str::as_bytes), sticky)
@@ -302,7 +307,7 @@ impl RoutedClient {
                 .as_ref()
                 .and_then(|leader| leader.address.parse().ok())
                 .unwrap_or(self.options.addr),
-            leader.map(|leader| leader.partitioning_epoch),
+            leader.and(partitioning_epoch),
         )
     }
 
