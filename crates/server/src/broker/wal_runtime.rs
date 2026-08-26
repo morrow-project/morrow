@@ -4,6 +4,8 @@ use std::collections::HashMap;
 use std::sync::mpsc::{self, SyncSender};
 
 const WAL_QUEUE_CAPACITY: usize = 128;
+const MAX_PARTITION_APPEND_BATCH_RECORDS: usize = 256;
+const MAX_PARTITION_APPEND_BATCH_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Clone)]
 pub(super) struct WalRuntime {
@@ -113,9 +115,8 @@ impl WalRuntime {
         &self,
         records: Vec<PartitionAppendRecord>,
     ) -> Result<()> {
-        const MAX_PARTITION_APPEND_BATCH_BYTES: usize = 8 * 1024 * 1024;
         crate::broker_ensure!(
-            !records.is_empty() && records.len() <= 256,
+            !records.is_empty() && records.len() <= MAX_PARTITION_APPEND_BATCH_RECORDS,
             "partition append batch is outside the supported bound"
         );
         let encoded_bytes = records
@@ -492,9 +493,21 @@ fn wal_worker(mut wal: Wal, receiver: mpsc::Receiver<WalCommand>) {
             WalCommand::PartitionAppend(record, response) => {
                 let mut records = vec![record];
                 let mut responses = vec![response];
-                while records.len() < 256 {
+                let mut estimated_bytes = records
+                    .iter()
+                    .map(partition_append_estimated_bytes)
+                    .sum::<usize>();
+                while records.len() < MAX_PARTITION_APPEND_BATCH_RECORDS {
                     match receiver.try_recv() {
                         Ok(WalCommand::PartitionAppend(record, response)) => {
+                            let record_bytes = partition_append_estimated_bytes(&record);
+                            if estimated_bytes.saturating_add(record_bytes)
+                                > MAX_PARTITION_APPEND_BATCH_BYTES
+                            {
+                                pending = Some(WalCommand::PartitionAppend(record, response));
+                                break;
+                            }
+                            estimated_bytes = estimated_bytes.saturating_add(record_bytes);
                             records.push(record);
                             responses.push(response);
                         }
@@ -505,14 +518,21 @@ fn wal_worker(mut wal: Wal, receiver: mpsc::Receiver<WalCommand>) {
                         Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => break,
                     }
                 }
-                let result = records
-                    .iter()
-                    .try_for_each(|record| wal.append_partition_append(record));
-                for response in responses {
-                    let outcome = match &result {
-                        Ok(()) => Ok(()),
-                        Err(error) => Err(BrokerError::msg(error.to_string())),
+                let mut outcomes = Vec::with_capacity(records.len());
+                let mut failed: Option<String> = None;
+                for record in &records {
+                    let outcome = match (&failed, wal.append_partition_append(record)) {
+                        (Some(error), _) => Err(BrokerError::msg(error.clone())),
+                        (None, Ok(())) => Ok(()),
+                        (None, Err(error)) => {
+                            let message = error.to_string();
+                            failed = Some(message.clone());
+                            Err(BrokerError::msg(message))
+                        }
                     };
+                    outcomes.push(outcome);
+                }
+                for (response, outcome) in responses.into_iter().zip(outcomes) {
                     let _ = response.send(outcome);
                 }
             }
@@ -619,6 +639,10 @@ fn wal_worker(mut wal: Wal, receiver: mpsc::Receiver<WalCommand>) {
             }
         }
     }
+}
+
+fn partition_append_estimated_bytes(record: &PartitionAppendRecord) -> usize {
+    record.stream.len() + record.subject.len() + std::mem::size_of::<u64>() * 2
 }
 
 #[cfg(test)]
