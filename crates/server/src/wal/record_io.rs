@@ -132,6 +132,20 @@ pub(super) fn write_record_to(file: &mut File, kind: u8, body: &[u8]) -> Result<
     Ok(())
 }
 
+pub(super) fn encode_record(kind: u8, body: &[u8]) -> Result<Vec<u8>> {
+    let len = body.len() + 1;
+    let len: u32 = len.try_into().context("WAL record too large")?;
+    let mut encoded = Vec::with_capacity(4 + len as usize + 4);
+    encoded.extend_from_slice(&len.to_le_bytes());
+    encoded.push(kind);
+    encoded.extend_from_slice(body);
+    let mut hasher = crc32fast::Hasher::new();
+    hasher.update(&[kind]);
+    hasher.update(body);
+    encoded.extend_from_slice(&hasher.finalize().to_le_bytes());
+    Ok(encoded)
+}
+
 pub(super) fn protect_body(
     kind: u8,
     body: &[u8],

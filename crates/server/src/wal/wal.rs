@@ -134,6 +134,50 @@ impl Wal {
         self.append_record(KIND_PARTITION_APPEND, &partition_append_body(record)?)
     }
 
+    /// Append a bounded partition batch with one contiguous write per segment.
+    /// Rotation is still checked record-by-record so segment limits and replay
+    /// framing remain identical to unbatched appends.
+    pub fn append_partition_append_batch(
+        &mut self,
+        records: &[PartitionAppendRecord],
+    ) -> Result<()> {
+        let mut encoded = Vec::with_capacity(records.len());
+        for record in records {
+            self.next_seq = self.next_seq.max(record.seq.saturating_add(1));
+            let body = partition_append_body(record)?;
+            let protected = protect_body(KIND_PARTITION_APPEND, &body, self.encryption.as_ref())?;
+            let bytes = record_size(&protected)?;
+            encoded.push((protected, bytes));
+        }
+        let mut pending = Vec::new();
+        let mut pending_bytes = 0u64;
+        for (protected, bytes) in encoded {
+            if self.active_bytes > SEGMENT_HEADER_LEN
+                && self.active_bytes + bytes > self.segment_bytes
+            {
+                if !pending.is_empty() {
+                    self.file.write_all(&pending).with_context(|| {
+                        format!("appending WAL batch to {}", self.active_path.display())
+                    })?;
+                    self.active_bytes += pending_bytes;
+                    pending.clear();
+                    pending_bytes = 0;
+                }
+                self.rotate_if_needed(bytes)?;
+            }
+            let record_bytes = encode_record(KIND_PARTITION_APPEND, &protected)?;
+            pending_bytes = pending_bytes.saturating_add(bytes);
+            pending.extend_from_slice(&record_bytes);
+        }
+        if !pending.is_empty() {
+            self.file.write_all(&pending).with_context(|| {
+                format!("appending WAL batch to {}", self.active_path.display())
+            })?;
+            self.active_bytes += pending_bytes;
+        }
+        Ok(())
+    }
+
     pub(crate) fn note_partition_append_batch(&mut self, records: u64, bytes: u64) {
         self.note_partition_append_batch_timing(records, bytes, 0);
     }
