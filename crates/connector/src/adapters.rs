@@ -91,7 +91,9 @@ pub struct AppendDatabaseSink {
     generation: u64,
     path: PathBuf,
     index_path: PathBuf,
+    delta_path: PathBuf,
     committed: BTreeSet<(String, u32, u64)>,
+    delta_entries: usize,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -108,16 +110,18 @@ impl AppendDatabaseSink {
     ) -> Result<Self, String> {
         let path = path.into();
         let index_path = path.with_extension("idx");
-        let (committed, log_len) = recover_append_state(&path, &index_path)?;
-        if path.exists() {
-            persist_append_index(&index_path, log_len, &committed)?;
-        }
+        let delta_path = path.with_extension("idx.log");
+        let (committed, _log_len) = recover_append_state(&path, &index_path)?;
+        let mut committed = committed;
+        let delta_entries = read_index_deltas(&delta_path, &mut committed)?;
         Ok(Self {
             name: name.into(),
             generation,
             path,
             index_path,
+            delta_path,
             committed,
+            delta_entries,
         })
     }
 }
@@ -156,9 +160,18 @@ impl SinkTask for AppendDatabaseSink {
         }
         file.flush().map_err(display)?;
         file.sync_data().map_err(display)?;
-        self.committed.extend(pending);
+        if !pending.is_empty() {
+            let pending_count = pending.len();
+            append_index_deltas(&self.delta_path, &pending)?;
+            self.committed.extend(pending);
+            self.delta_entries += pending_count;
+        }
         let log_len = file.metadata().map_err(display)?.len();
-        persist_append_index(&self.index_path, log_len, &self.committed)?;
+        if self.delta_entries >= 1024 {
+            persist_append_index(&self.index_path, log_len, &self.committed)?;
+            truncate_index_deltas(&self.delta_path)?;
+            self.delta_entries = 0;
+        }
         Ok(SinkCompletion { offsets })
     }
 
@@ -258,6 +271,55 @@ fn persist_append_index(
         .map_err(display)?;
     crate::storage::replace_file(&temporary, path).map_err(display)?;
     Ok(())
+}
+
+fn append_index_deltas(
+    path: &PathBuf,
+    identities: &BTreeSet<(String, u32, u64)>,
+) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(display)?;
+    }
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(display)?;
+    for identity in identities {
+        let body = serde_json::to_vec(identity).map_err(display)?;
+        file.write_all(&body).map_err(display)?;
+        file.write_all(b"\n").map_err(display)?;
+    }
+    file.sync_data().map_err(display)
+}
+
+fn read_index_deltas(
+    path: &PathBuf,
+    committed: &mut BTreeSet<(String, u32, u64)>,
+) -> Result<usize, String> {
+    if !path.exists() {
+        return Ok(0);
+    }
+    let bytes = std::fs::read(path).map_err(display)?;
+    let mut entries = 0;
+    for line in bytes.split(|byte| *byte == b'\n') {
+        if line.is_empty() {
+            continue;
+        }
+        let identity = serde_json::from_slice::<(String, u32, u64)>(line).map_err(display)?;
+        committed.insert(identity);
+        entries += 1;
+    }
+    Ok(entries)
+}
+
+fn truncate_index_deltas(path: &PathBuf) -> Result<(), String> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let file = OpenOptions::new().write(true).open(path).map_err(display)?;
+    file.set_len(0).map_err(display)?;
+    file.sync_data().map_err(display)
 }
 
 fn fence(expected: u64, actual: u64) -> Result<(), String> {
