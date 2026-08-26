@@ -1,6 +1,7 @@
 use super::*;
 
 const SAMPLES: usize = 250;
+const HISTORY_LEVELS: &[usize] = &[0, 1_000, 10_000];
 
 #[tokio::test]
 #[ignore = "release-mode standalone durability baseline"]
@@ -43,6 +44,62 @@ async fn benchmark_standalone_durable_publish_latency() {
         percentile(99).as_micros(),
     );
     harness.shutdown().await;
+}
+
+#[tokio::test]
+#[ignore = "release-mode history scaling benchmark"]
+async fn benchmark_standalone_durable_publish_latency_with_history() {
+    for &history in HISTORY_LEVELS {
+        let harness = Harness::start().await;
+        let mut publisher = Client::connect(harness.addr, harness.max_payload)
+            .await
+            .unwrap();
+        publisher.read_info().await.unwrap();
+        let durable_id = format!("history-{history}-publisher");
+        publisher
+            .connect_durable(&durable_id, false, 5_000, 16)
+            .await
+            .unwrap();
+        for sample in 0..history {
+            publisher
+                .publish_with_qos(
+                    "orders/created",
+                    None,
+                    b"history-payload",
+                    client::protocol::AckLevel::Durable,
+                    &format!("history-{history}-{sample}"),
+                )
+                .await
+                .unwrap();
+        }
+        let started = std::time::Instant::now();
+        let mut latencies = Vec::with_capacity(SAMPLES);
+        for sample in 0..SAMPLES {
+            let before = std::time::Instant::now();
+            publisher
+                .publish_with_qos(
+                    "orders/created",
+                    None,
+                    b"benchmark-payload",
+                    client::protocol::AckLevel::Durable,
+                    &format!("measure-{history}-{sample}"),
+                )
+                .await
+                .unwrap();
+            latencies.push(before.elapsed());
+        }
+        let elapsed = started.elapsed();
+        latencies.sort_unstable();
+        let percentile = |percent: usize| latencies[(SAMPLES * percent / 100).min(SAMPLES - 1)];
+        eprintln!(
+            "standalone_durable_history history={history} samples={SAMPLES} throughput={:.1}/s p50_us={} p95_us={} p99_us={}",
+            SAMPLES as f64 / elapsed.as_secs_f64(),
+            percentile(50).as_micros(),
+            percentile(95).as_micros(),
+            percentile(99).as_micros(),
+        );
+        harness.shutdown().await;
+    }
 }
 
 #[tokio::test]
