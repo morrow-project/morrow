@@ -264,6 +264,10 @@ impl PartitionLog {
         Ok(())
     }
 
+    pub(super) fn has_active_resource(&self) -> bool {
+        self.file.is_some()
+    }
+
     pub(super) fn rewrite(
         &mut self,
         records: &[MessageEnvelope],

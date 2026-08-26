@@ -1446,6 +1446,7 @@ impl Morrow {
             .sum::<usize>();
         let (partition_metadata_cache_entries, partition_metadata_cache_evictions) =
             self.partition_logs.metadata_cache_stats();
+        let active_partition_resources = self.partition_logs.active_resource_count();
         let audit = self.audit_status();
         let mut metrics = String::new();
         metrics
@@ -1710,8 +1711,7 @@ impl Morrow {
         metrics.push_str("# HELP morrow_active_partitions Locally active partition resources.\n");
         metrics.push_str("# TYPE morrow_active_partitions gauge\n");
         metrics.push_str(&format!(
-            "morrow_active_partitions {}\n",
-            streams.recovery.completed_partitions
+            "morrow_active_partitions {active_partition_resources}\n"
         ));
         metrics.push_str(
             "# HELP morrow_partition_metadata_cache_entries Cached decoded partition records.\n",

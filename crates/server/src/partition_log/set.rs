@@ -482,6 +482,17 @@ impl PartitionLogSet {
         (cache.len(), cache.evictions())
     }
 
+    pub(crate) fn active_resource_count(&self) -> usize {
+        self.logs
+            .values()
+            .filter(|log| {
+                log.lock()
+                    .expect("partition log lock poisoned")
+                    .has_active_resource()
+            })
+            .count()
+    }
+
     fn cache_envelope(&self, envelope: &MessageEnvelope) {
         self.metadata_cache
             .lock()
