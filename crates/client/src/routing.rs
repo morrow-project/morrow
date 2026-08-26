@@ -1,7 +1,12 @@
 //! Client-side partition leader metadata and deterministic routing.
 
 use serde::Deserialize;
-use std::collections::{HashMap, VecDeque};
+use std::{
+    collections::{HashMap, VecDeque},
+    net::SocketAddr,
+};
+
+use super::{Client, ClientOptions, ProducerAck};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Partitioning {
@@ -54,6 +59,103 @@ pub struct PartitionLeaderCache {
     max_streams: usize,
     streams: HashMap<String, StreamMetadata>,
     order: VecDeque<String>,
+}
+
+/// A bounded pool of direct connections selected from partition metadata.
+/// The regular [`Client`] remains unchanged for proxy-compatible callers.
+pub struct RoutedClient {
+    options: ClientOptions,
+    cache: PartitionLeaderCache,
+    clients: HashMap<SocketAddr, Client>,
+    max_connections: usize,
+    sticky: u64,
+}
+
+impl RoutedClient {
+    pub fn new(options: ClientOptions, max_streams: usize, max_connections: usize) -> Option<Self> {
+        Some(Self {
+            options,
+            cache: PartitionLeaderCache::new(max_streams)?,
+            clients: HashMap::new(),
+            max_connections: max_connections.max(1),
+            sticky: 0,
+        })
+    }
+
+    pub fn apply_metadata_json(&mut self, payload: &[u8]) -> Result<usize, String> {
+        self.cache.apply_metadata_json(payload)
+    }
+
+    pub fn invalidate(&mut self, stream: &str, epoch: u64) {
+        self.cache.invalidate(stream, epoch);
+    }
+
+    pub fn cached_connections(&self) -> usize {
+        self.clients.len()
+    }
+
+    pub async fn publish_to_stream(
+        &mut self,
+        stream: &str,
+        subject: &str,
+        payload: &[u8],
+        key: Option<&str>,
+    ) -> super::error::Result<()> {
+        let address = self.route_address(stream, subject, key);
+        let mut client = self.take_client(address).await?;
+        let result = match key {
+            Some(key) => {
+                client
+                    .publish_with_key_and_headers(subject, None, payload, key, &[])
+                    .await
+            }
+            None => client.publish(subject, payload).await,
+        };
+        self.return_client(address, client);
+        result
+    }
+
+    pub async fn publish_to_stream_with_qos(
+        &mut self,
+        stream: &str,
+        subject: &str,
+        payload: &[u8],
+        level: protocol::AckLevel,
+        msg_id: &str,
+        key: Option<&str>,
+    ) -> super::error::Result<ProducerAck> {
+        let address = self.route_address(stream, subject, key);
+        let mut client = self.take_client(address).await?;
+        let result = client
+            .publish_with_qos_and_key(subject, None, payload, level, msg_id, key)
+            .await;
+        self.return_client(address, client);
+        result
+    }
+
+    fn route_address(&mut self, stream: &str, subject: &str, key: Option<&str>) -> SocketAddr {
+        let sticky = self.sticky;
+        self.sticky = self.sticky.wrapping_add(1);
+        self.cache
+            .route(stream, subject, key.map(str::as_bytes), sticky)
+            .and_then(|leader| leader.address.parse().ok())
+            .unwrap_or(self.options.addr)
+    }
+
+    async fn take_client(&mut self, address: SocketAddr) -> super::error::Result<Client> {
+        if let Some(client) = self.clients.remove(&address) {
+            return Ok(client);
+        }
+        let mut options = self.options.clone();
+        options.addr = address;
+        Client::connect_with_options(&options).await
+    }
+
+    fn return_client(&mut self, address: SocketAddr, client: Client) {
+        if self.clients.len() < self.max_connections {
+            self.clients.insert(address, client);
+        }
+    }
 }
 
 impl PartitionLeaderCache {

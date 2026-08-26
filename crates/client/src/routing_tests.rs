@@ -63,3 +63,38 @@ fn cache_applies_versioned_server_metadata_and_rejects_unknown_versions() {
             .is_err()
     );
 }
+
+#[test]
+fn routed_client_requires_positive_cache_and_connection_limits() {
+    let options = crate::ClientOptions {
+        addr: "127.0.0.1:4222".parse().unwrap(),
+        max_payload: 1024,
+        tls: None,
+        auth: None,
+        durable_id: Some("bench".to_string()),
+        verbose: false,
+        ack_timeout_ms: 1_000,
+        max_in_flight: 1,
+        ack_contract_version: None,
+    };
+    let routed = RoutedClient::new(options, 2, 0).unwrap();
+    assert_eq!(routed.cached_connections(), 0);
+    assert!(
+        RoutedClient::new(
+            crate::ClientOptions {
+                addr: "127.0.0.1:4222".parse().unwrap(),
+                max_payload: 1024,
+                tls: None,
+                auth: None,
+                durable_id: Some("bench".to_string()),
+                verbose: false,
+                ack_timeout_ms: 1_000,
+                max_in_flight: 1,
+                ack_contract_version: None,
+            },
+            0,
+            1,
+        )
+        .is_none()
+    );
+}
