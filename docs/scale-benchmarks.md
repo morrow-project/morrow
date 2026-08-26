@@ -44,6 +44,9 @@ activity and broker queue/replication counters available beside the benchmark
 result instead of requiring a second, unsynchronised scrape.
 When supplied, the fixture also fails a case if the endpoint reports a different
 controller-voter count or process role than the selected topology profile.
+For a real broker-fleet gate, also pass `--expected-brokers N`. Each metrics
+snapshot must then report exactly `N` registered brokers; broker-count labels are
+otherwise descriptive only and do not change cluster membership.
 
 Pass `--server-pid PID` to capture `resources-before.json` and
 `resources-after.json` in every case directory. These snapshots report resident
