@@ -80,6 +80,7 @@ mod pull_consumer;
 mod pull_delivery;
 mod pull_waiters;
 mod redelivery;
+mod registration;
 mod retention;
 mod route_connection;
 mod route_interests;
@@ -96,8 +97,9 @@ pub use self::broker::Morrow;
 use self::{
     cluster_runtime::*, compaction::*, consumer::*, consumer_group_commands::*, fake_cluster::*,
     fake_cluster_types::*, hooks::*, http::*, inner_admin::*, inner_delivery::*, manual_clock::*,
-    pull_consumer::*, pull_waiters::*, retention::*, route_connection::*, route_interests::*,
-    route_mesh::*, route_state::*, route_tls::*, state::*, subject_helpers::*, wal_runtime::*,
+    pull_consumer::*, pull_waiters::*, registration::*, retention::*, route_connection::*,
+    route_interests::*, route_mesh::*, route_state::*, route_tls::*, state::*, subject_helpers::*,
+    wal_runtime::*,
 };
 
 #[cfg(test)]
