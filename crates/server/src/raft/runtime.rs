@@ -232,6 +232,22 @@ impl RaftRuntime {
 
     pub fn durable_state(&self) -> DurableState {
         let mut state = self.state_machine.durable_state();
+        if let Ok(local_commits) = self.local_commits.lock() {
+            for (key, commit) in local_commits.iter() {
+                state
+                    .partition_commits
+                    .entry(key.clone())
+                    .and_modify(|current| {
+                        if commit.leader_epoch > current.leader_epoch
+                            || (commit.leader_epoch == current.leader_epoch
+                                && commit.high_watermark > current.high_watermark)
+                        {
+                            *current = *commit;
+                        }
+                    })
+                    .or_insert(*commit);
+            }
+        }
         if let Ok(records) = self
             .partition_data
             .lock()
