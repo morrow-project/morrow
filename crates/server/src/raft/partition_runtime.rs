@@ -3,6 +3,9 @@ use super::*;
 const PARTITION_INGRESS_BATCH_RECORDS: usize = 32;
 const PARTITION_INGRESS_BATCH_BYTES: usize = 1024 * 1024;
 const PARTITION_INGRESS_BATCH_DELAY_MS: u64 = 2;
+const MAX_PARTITION_INGRESS_BATCH_RECORDS: usize = 256;
+const MAX_PARTITION_INGRESS_BATCH_BYTES: usize = 8 * 1024 * 1024;
+const MAX_PARTITION_INGRESS_BATCH_DELAY_MS: u64 = 100;
 const MAX_PARTITION_INGRESS_QUEUES: usize = 4096;
 const MAX_CONFIGURED_PARTITION_INGRESS_QUEUES: usize = 65_536;
 
@@ -12,6 +15,30 @@ fn partition_ingress_queue_limit() -> usize {
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(MAX_PARTITION_INGRESS_QUEUES)
         .clamp(1, MAX_CONFIGURED_PARTITION_INGRESS_QUEUES)
+}
+
+fn partition_ingress_batch_records() -> usize {
+    std::env::var("MORROW_PARTITION_INGRESS_BATCH_RECORDS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(PARTITION_INGRESS_BATCH_RECORDS)
+        .clamp(1, MAX_PARTITION_INGRESS_BATCH_RECORDS)
+}
+
+fn partition_ingress_batch_bytes() -> usize {
+    std::env::var("MORROW_PARTITION_INGRESS_BATCH_BYTES")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(PARTITION_INGRESS_BATCH_BYTES)
+        .clamp(1, MAX_PARTITION_INGRESS_BATCH_BYTES)
+}
+
+fn partition_ingress_batch_delay_ms() -> u64 {
+    std::env::var("MORROW_PARTITION_INGRESS_BATCH_DELAY_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(PARTITION_INGRESS_BATCH_DELAY_MS)
+        .clamp(1, MAX_PARTITION_INGRESS_BATCH_DELAY_MS)
 }
 
 pub(super) struct PartitionIngressItem {
@@ -433,21 +460,19 @@ async fn run_partition_ingress_queue(
         };
         let fsync = first.fsync;
         let cluster_durable = first.cluster_durable;
+        let max_records = partition_ingress_batch_records();
+        let max_bytes = partition_ingress_batch_bytes();
+        let delay = tokio::time::Duration::from_millis(partition_ingress_batch_delay_ms());
         let mut bytes = data_append_envelope_bytes(&first.envelope);
         let mut items = vec![first];
-        while items.len() < PARTITION_INGRESS_BATCH_RECORDS {
-            let Ok(Some(candidate)) = tokio::time::timeout(
-                tokio::time::Duration::from_millis(PARTITION_INGRESS_BATCH_DELAY_MS),
-                receiver.recv(),
-            )
-            .await
-            else {
+        while items.len() < max_records {
+            let Ok(Some(candidate)) = tokio::time::timeout(delay, receiver.recv()).await else {
                 break;
             };
             let candidate_bytes = data_append_envelope_bytes(&candidate.envelope);
             if candidate.fsync != fsync
                 || candidate.cluster_durable != cluster_durable
-                || bytes.saturating_add(candidate_bytes) > PARTITION_INGRESS_BATCH_BYTES
+                || bytes.saturating_add(candidate_bytes) > max_bytes
             {
                 pending = Some(candidate);
                 break;
