@@ -421,12 +421,22 @@ impl Morrow {
             cluster.enforce_retention(self.hooks.clock.now_ms())?;
             self.apply_cluster_partition(envelope.clone()).await?;
             let _storage_operation = self.storage_gate.read().await;
-            self.inner.lock().await.enforce_stream_retention(
+            let tenants = self.config.tenant_quotas.keys().cloned().collect();
+            let released = self.inner.lock().await.enforce_stream_retention(
                 &self.partition_logs,
                 &self.config.streams,
                 self.hooks.clock.now_ms(),
+                &tenants,
             )?;
-            self.rebuild_tenant_disk_usage().await?;
+            for (tenant, bytes) in released {
+                self.tenant_quotas.release(
+                    &tenant,
+                    crate::quota::TenantQuotaUsage {
+                        disk_bytes: bytes,
+                        ..Default::default()
+                    },
+                );
+            }
             let committed_record = PublishRecord::from(envelope.clone());
             self.apply_materialized_views(&committed_record).await?;
             if let (Some(producer), Some(fingerprint)) =
@@ -484,7 +494,7 @@ impl Morrow {
             leader_epoch: 0,
             legacy_seq: seq,
         };
-        let record = {
+        let (record, released) = {
             let partition_logs = self.partition_logs.clone();
             let permit = self
                 .storage_permits
@@ -528,15 +538,25 @@ impl Morrow {
                 .insert(record.seq, record.clone().into_resident_metadata());
             inner.observe_published_record(&record);
             inner.mark_subject_ready(&record.subject);
-            inner.enforce_stream_retention(
+            let tenants = self.config.tenant_quotas.keys().cloned().collect();
+            let released = inner.enforce_stream_retention(
                 &self.partition_logs,
                 &self.config.streams,
                 self.hooks.clock.now_ms(),
+                &tenants,
             )?;
             inner.apply_record_compaction(record.seq, &self.config.streams);
-            record
+            (record, released)
         };
-        self.rebuild_tenant_disk_usage().await?;
+        for (tenant, bytes) in released {
+            self.tenant_quotas.release(
+                &tenant,
+                crate::quota::TenantQuotaUsage {
+                    disk_bytes: bytes,
+                    ..Default::default()
+                },
+            );
+        }
 
         if let (Some(producer), Some(fingerprint)) =
             (producer_sequence.as_ref(), producer_fingerprint)

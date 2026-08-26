@@ -7,19 +7,25 @@ impl DurableBrokerState {
         partition_logs: &PartitionLogSet,
         catalog: &crate::stream::StreamCatalog,
         now_ms: u64,
-    ) -> Result<()> {
+        tenants: &std::collections::BTreeSet<String>,
+    ) -> Result<HashMap<String, u64>> {
+        let mut released = HashMap::new();
         let changes = partition_logs.retention_changes(catalog.definitions(), now_ms);
         for change in &changes {
-            self.apply_retention_change(partition_logs, change)?;
+            for (tenant, bytes) in self.apply_retention_change(partition_logs, change, tenants)? {
+                *released.entry(tenant).or_default() += bytes;
+            }
         }
-        Ok(())
+        Ok(released)
     }
 
     fn apply_retention_change(
         &mut self,
         partition_logs: &PartitionLogSet,
         change: &RetentionChange,
-    ) -> Result<()> {
+        tenants: &std::collections::BTreeSet<String>,
+    ) -> Result<HashMap<String, u64>> {
+        let mut released = HashMap::new();
         let removed = self
             .messages
             .iter()
@@ -31,6 +37,19 @@ impl DurableBrokerState {
             })
             .map(|(seq, _)| *seq)
             .collect::<HashSet<_>>();
+        for record in self
+            .messages
+            .values()
+            .filter(|record| removed.contains(&record.seq))
+        {
+            let tenant = tenants
+                .iter()
+                .find(|tenant| record.subject.starts_with(&format!("{tenant}.")))
+                .cloned()
+                .unwrap_or_else(|| crate::quota::DEFAULT_TENANT.to_string());
+            *released.entry(tenant).or_default() +=
+                crate::quota::persistent_publish_record_bytes(record);
+        }
         // The partition log owns physical retention. Keep the broker state
         // update bounded to the records that actually leave the window; the
         // log can discard obsolete sealed segments without cloning the whole
@@ -54,7 +73,7 @@ impl DurableBrokerState {
             );
         }
         self.ready_consumers.extend(self.consumers.keys().cloned());
-        Ok(())
+        Ok(released)
     }
 }
 

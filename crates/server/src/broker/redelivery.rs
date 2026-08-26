@@ -34,16 +34,34 @@ impl Morrow {
             cluster.enforce_retention(now)?;
             self.sync_cluster_deltas(&cluster).await?;
         }
-        let (expired, dead_letter_writes) = {
+        let (expired, dead_letter_writes, released) = {
             let _storage_operation = self.storage_gate.read().await;
             let mut inner = self.inner.lock().await;
             inner.activate_due_scheduled(now, MAX_EXPIRED_LEASES_PER_TICK);
-            inner.enforce_stream_retention(&self.partition_logs, &self.config.streams, now)?;
+            let tenants = self.config.tenant_quotas.keys().cloned().collect();
+            let released = inner.enforce_stream_retention(
+                &self.partition_logs,
+                &self.config.streams,
+                now,
+                &tenants,
+            )?;
             let before = inner.dead_letters.len();
             let expired = inner.expire_due_leases(now, MAX_EXPIRED_LEASES_PER_TICK)?;
-            (expired, inner.dead_letters.len().saturating_sub(before))
+            (
+                expired,
+                inner.dead_letters.len().saturating_sub(before),
+                released,
+            )
         };
-        self.rebuild_tenant_disk_usage().await?;
+        for (tenant, bytes) in released {
+            self.tenant_quotas.release(
+                &tenant,
+                crate::quota::TenantQuotaUsage {
+                    disk_bytes: bytes,
+                    ..Default::default()
+                },
+            );
+        }
         self.metrics
             .dead_letter_writes_total
             .fetch_add(dead_letter_writes as u64, Ordering::Relaxed);
