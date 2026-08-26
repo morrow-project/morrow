@@ -208,6 +208,14 @@ impl ReplicaDataStore {
     }
 
     pub(super) fn append(&mut self, request: &DataAppendRequest) -> Result<DataAppendResponse> {
+        self.append_inner(request, true)
+    }
+
+    fn append_inner(
+        &mut self,
+        request: &DataAppendRequest,
+        flush: bool,
+    ) -> Result<DataAppendResponse> {
         crate::broker_ensure!(
             request.envelope.leader_epoch <= request.leader_epoch,
             "data append is from a stale leader epoch"
@@ -288,12 +296,12 @@ impl ReplicaDataStore {
                 request.envelope.clone().into_resident_metadata(),
             );
         }
-        if request.fsync {
+        if request.fsync && flush {
             self.logs.flush()?;
         }
         Ok(DataAppendResponse {
             match_offset: request.envelope.offset,
-            flushed_offset: request.fsync.then_some(request.envelope.offset),
+            flushed_offset: (request.fsync && flush).then_some(request.envelope.offset),
         })
     }
 
@@ -306,8 +314,17 @@ impl ReplicaDataStore {
             "partition append batch size is outside the supported bound"
         );
         let mut responses = Vec::with_capacity(requests.len());
+        let should_flush = requests.iter().any(|request| request.fsync);
         for request in requests {
-            responses.push(self.append(request)?);
+            responses.push(self.append_inner(request, false)?);
+        }
+        if should_flush {
+            self.logs.flush()?;
+            for (response, request) in responses.iter_mut().zip(requests) {
+                if request.fsync {
+                    response.flushed_offset = Some(request.envelope.offset);
+                }
+            }
         }
         Ok(responses)
     }

@@ -380,6 +380,14 @@ impl Morrow {
 
         if let Some(cluster) = self.cluster_runtime().await {
             let partition = select_partition(&stream, &subject_name, key.as_deref(), publisher_id);
+            let shard = crate::state_shards::shard_for(
+                crate::state_shards::StateShardKey::Partition {
+                    stream: stream.name.as_str(),
+                    partition: partition.0,
+                },
+                self.state_shard_gates.len(),
+            );
+            let state_shard_guard = self.state_shard_gates[shard].lock().await;
             let stored_headers = headers
                 .iter()
                 .map(|(name, value)| MessageHeader {
@@ -423,6 +431,7 @@ impl Morrow {
             disk_reservation.commit();
             cluster.enforce_retention(self.hooks.clock.now_ms())?;
             self.apply_cluster_partition(envelope.clone()).await?;
+            drop(state_shard_guard);
             let _storage_operation = self.storage_gate.read().await;
             let tenants = self.config.tenant_quotas.keys().cloned().collect();
             let released = self.inner.lock().await.enforce_stream_retention(
@@ -481,6 +490,14 @@ impl Morrow {
             })
             .collect::<Vec<_>>();
         let partition = select_partition(&stream, &subject_name, key.as_deref(), publisher_id);
+        let shard = crate::state_shards::shard_for(
+            crate::state_shards::StateShardKey::Partition {
+                stream: stream.name.as_str(),
+                partition: partition.0,
+            },
+            self.state_shard_gates.len(),
+        );
+        let state_shard_guard = self.state_shard_gates[shard].lock().await;
         let pending_envelope = MessageEnvelope {
             namespace,
             stream: stream.name.clone(),
@@ -551,6 +568,7 @@ impl Morrow {
             inner.apply_record_compaction(record.seq, &self.config.streams);
             (record, released)
         };
+        drop(state_shard_guard);
         for (tenant, bytes) in released {
             self.tenant_quotas.release(
                 &tenant,

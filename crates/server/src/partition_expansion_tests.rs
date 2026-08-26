@@ -22,3 +22,16 @@ fn expansion_rejects_non_monotonic_or_overlapping_plans() {
     assert!(expansion.begin(4).is_none());
     assert!(!expansion.mark_prepared(5));
 }
+
+#[test]
+fn expansion_begin_is_idempotent_and_preparation_is_monotonic() {
+    let mut expansion = PartitionExpansion::new(2, 9).unwrap();
+    let first = expansion.begin(5).cloned().unwrap();
+    assert_eq!(expansion.begin(5), Some(&first));
+    assert!(expansion.mark_prepared(3));
+    assert!(expansion.mark_prepared(1));
+    assert_eq!(expansion.pending().unwrap().prepared_partitions, 3);
+    assert!(expansion.mark_prepared(5));
+    assert!(expansion.activate());
+    assert_eq!(expansion.current(), (5, 10));
+}

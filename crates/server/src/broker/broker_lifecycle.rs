@@ -630,6 +630,18 @@ impl Morrow {
             },
         )?;
         let wal = WalRuntime::new(wal);
+        let partition_expansions = config
+            .streams
+            .definitions()
+            .iter()
+            .filter_map(|stream| {
+                crate::partition_expansion::PartitionExpansion::new(
+                    stream.partitions,
+                    stream.partitioning.epoch,
+                )
+                .map(|expansion| (stream.name.as_str().to_string(), expansion))
+            })
+            .collect();
         Ok(Self {
             inner: Arc::new(Mutex::new(DurableBrokerState {
                 wal: wal.clone(),
@@ -652,6 +664,11 @@ impl Morrow {
             partition_logs: Arc::new(partition_logs),
             storage_permits: Arc::new(tokio::sync::Semaphore::new(MAX_BLOCKING_STORAGE_OPS)),
             storage_gate: Arc::new(tokio::sync::RwLock::new(())),
+            state_shard_gates: Arc::new(
+                (0..STATE_SHARD_COUNT)
+                    .map(|_| tokio::sync::Mutex::new(()))
+                    .collect(),
+            ),
             connections: Arc::new(Mutex::new(ConnectionState {
                 clients: HashMap::new(),
             })),
@@ -687,6 +704,16 @@ impl Morrow {
             pull_waiters: PullWaiterRegistry::default(),
             broker_control: BrokerControlRegistry::new(),
             compaction_running: Arc::new(AtomicBool::new(false)),
+            work_scheduler: Arc::new(tokio::sync::Mutex::new(
+                crate::work_scheduler::WorkScheduler::new([(
+                    crate::work_scheduler::WorkClass::Compaction,
+                    crate::work_scheduler::WorkBudget {
+                        max_records: u64::MAX,
+                        max_bytes: u64::MAX,
+                        max_concurrency: 1,
+                    },
+                )]),
+            )),
             route_mesh,
             middleware: hooks.middleware.clone(),
             hooks,
@@ -694,6 +721,7 @@ impl Morrow {
             views: Arc::new(Mutex::new(views)),
             reassignment: Arc::new(Mutex::new(reassignment)),
             cross_region: Arc::new(Mutex::new(cross_region)),
+            partition_expansions: Arc::new(Mutex::new(partition_expansions)),
         })
     }
 
@@ -1538,6 +1566,25 @@ impl Morrow {
         metrics.push_str(&format!(
             "morrow_partition_active_commit_members {active_commit_members}\n"
         ));
+        let compaction_usage = self
+            .work_scheduler
+            .lock()
+            .await
+            .usage(crate::work_scheduler::WorkClass::Compaction);
+        metrics.push_str(
+            "# HELP morrow_work_compaction_rejections_total Compaction jobs rejected by the work budget.\n",
+        );
+        metrics.push_str("# TYPE morrow_work_compaction_rejections_total counter\n");
+        metrics.push_str(&format!(
+            "morrow_work_compaction_rejections_total {}\n",
+            compaction_usage.rejected
+        ));
+        metrics.push_str("# HELP morrow_work_compaction_active Active compaction jobs.\n");
+        metrics.push_str("# TYPE morrow_work_compaction_active gauge\n");
+        metrics.push_str(&format!(
+            "morrow_work_compaction_active {}\n",
+            compaction_usage.concurrency
+        ));
         metrics.push_str("# HELP morrow_cluster_peers Current configured cluster peers.\n");
         metrics.push_str("# TYPE morrow_cluster_peers gauge\n");
         metrics.push_str(&format!("morrow_cluster_peers {}\n", cluster.peers.len()));
@@ -1784,6 +1831,14 @@ impl Morrow {
                             leader_id: assignment.leader_id,
                             leader_client_addr,
                             leader_epoch: assignment.leader_epoch,
+                            partitioning_epoch: self
+                                .config
+                                .streams
+                                .definitions()
+                                .iter()
+                                .find(|definition| definition.name.as_str() == stream)
+                                .map(|definition| definition.partitioning.epoch)
+                                .unwrap_or_default(),
                             high_watermark,
                         })
                     })
@@ -1818,6 +1873,26 @@ impl Morrow {
                     .full_reconciliations
                     .load(Ordering::Relaxed),
             },
+        }
+    }
+
+    pub(super) async fn partition_metadata_response(
+        &self,
+        stream_filter: Option<&str>,
+    ) -> PartitionMetadataResponse {
+        const MAX_ENTRIES: usize = 10_000;
+        let mut partitions = self
+            .cluster_response()
+            .await
+            .partitions
+            .into_iter()
+            .filter(|partition| stream_filter.is_none_or(|stream| partition.stream == stream))
+            .take(MAX_ENTRIES)
+            .collect::<Vec<_>>();
+        partitions.sort_by_key(|partition| (partition.stream.clone(), partition.partition));
+        PartitionMetadataResponse {
+            version: 1,
+            partitions,
         }
     }
 

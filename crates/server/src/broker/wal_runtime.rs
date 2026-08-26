@@ -22,6 +22,7 @@ struct FlushState {
 
 enum WalCommand {
     PartitionAppend(PartitionAppendRecord, mpsc::Sender<Result<()>>),
+    PartitionAppendBatch(Vec<PartitionAppendRecord>, mpsc::Sender<Result<()>>),
     ConsumerUpsert(ConsumerRecord, mpsc::Sender<Result<()>>),
     ConsumerCursor(ConsumerCursorRecord, mpsc::Sender<Result<()>>),
     ConsumerCursorDelta(ConsumerCursorDeltaRecord, mpsc::Sender<Result<()>>),
@@ -103,6 +104,17 @@ impl WalRuntime {
 
     pub(super) fn append_partition_append(&self, record: &PartitionAppendRecord) -> Result<()> {
         self.request(|response| WalCommand::PartitionAppend(record.clone(), response))
+    }
+
+    pub(super) fn append_partition_append_batch(
+        &self,
+        records: Vec<PartitionAppendRecord>,
+    ) -> Result<()> {
+        crate::broker_ensure!(
+            !records.is_empty() && records.len() <= 256,
+            "partition append batch is outside the supported bound"
+        );
+        self.request(|response| WalCommand::PartitionAppendBatch(records, response))
     }
 
     /// Async callers use these adapters so bounded queue backpressure and WAL
@@ -395,6 +407,12 @@ fn wal_worker(mut wal: Wal, receiver: mpsc::Receiver<WalCommand>) {
         match command {
             WalCommand::PartitionAppend(record, response) => {
                 let _ = response.send(wal.append_partition_append(&record));
+            }
+            WalCommand::PartitionAppendBatch(records, response) => {
+                let result = records
+                    .iter()
+                    .try_for_each(|record| wal.append_partition_append(record));
+                let _ = response.send(result);
             }
             WalCommand::ConsumerUpsert(record, response) => {
                 let _ = response.send(wal.append_consumer_upsert(&record));

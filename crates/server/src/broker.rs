@@ -53,6 +53,7 @@ const UNAUTHENTICATED_READ_TIMEOUT_MS: u64 = 5_000;
 const ROUTE_FRAME_READ_TIMEOUT_MS: u64 = 5_000;
 const MAX_ROUTE_FRAME: usize = 2 * 1024 * 1024;
 const MAX_BLOCKING_STORAGE_OPS: usize = 64;
+const STATE_SHARD_COUNT: usize = 64;
 
 mod broker;
 mod broker_authorization;
