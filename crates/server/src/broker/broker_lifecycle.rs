@@ -1566,6 +1566,25 @@ impl Morrow {
         metrics.push_str(&format!(
             "morrow_partition_active_commit_members {active_commit_members}\n"
         ));
+        let compaction_usage = self
+            .work_scheduler
+            .lock()
+            .await
+            .usage(crate::work_scheduler::WorkClass::Compaction);
+        metrics.push_str(
+            "# HELP morrow_work_compaction_rejections_total Compaction jobs rejected by the work budget.\n",
+        );
+        metrics.push_str("# TYPE morrow_work_compaction_rejections_total counter\n");
+        metrics.push_str(&format!(
+            "morrow_work_compaction_rejections_total {}\n",
+            compaction_usage.rejected
+        ));
+        metrics.push_str("# HELP morrow_work_compaction_active Active compaction jobs.\n");
+        metrics.push_str("# TYPE morrow_work_compaction_active gauge\n");
+        metrics.push_str(&format!(
+            "morrow_work_compaction_active {}\n",
+            compaction_usage.concurrency
+        ));
         metrics.push_str("# HELP morrow_cluster_peers Current configured cluster peers.\n");
         metrics.push_str("# TYPE morrow_cluster_peers gauge\n");
         metrics.push_str(&format!("morrow_cluster_peers {}\n", cluster.peers.len()));
