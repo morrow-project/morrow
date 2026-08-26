@@ -617,6 +617,7 @@ impl Morrow {
 
     pub(super) async fn streams_response(&self) -> StreamsResponse {
         let partition_logs = &self.partition_logs;
+        let expansions = self.partition_expansions.lock().await;
         let streams = self
             .config
             .streams
@@ -631,6 +632,15 @@ impl Morrow {
                         )
                     })
                     .collect::<Result<Vec<_>>>()?;
+                let partition_expansion =
+                    expansions.get(definition.name.as_str()).map(|expansion| {
+                        let (current_partitions, current_epoch) = expansion.current();
+                        crate::broker::state::PartitionExpansionResponse {
+                            current_partitions,
+                            current_epoch,
+                            pending: expansion.pending().cloned(),
+                        }
+                    });
                 Ok(StreamResponse {
                     retained_messages: partitions
                         .iter()
@@ -642,6 +652,7 @@ impl Morrow {
                         .sum(),
                     definition: definition.clone(),
                     partition_status: partitions,
+                    partition_expansion,
                 })
             })
             .collect::<Result<Vec<_>>>()

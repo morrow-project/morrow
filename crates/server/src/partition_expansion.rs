@@ -1,6 +1,6 @@
 //! Epoch-fenced online partition expansion state machine.
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ExpansionPlan {
     pub from_partitions: u32,
     pub to_partitions: u32,

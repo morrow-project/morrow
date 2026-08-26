@@ -635,6 +635,14 @@ pub(super) struct StreamResponse {
     pub(super) retained_messages: usize,
     pub(super) retained_bytes: u64,
     pub(super) partition_status: Vec<crate::partition_log::PartitionRetentionStatus>,
+    pub(super) partition_expansion: Option<PartitionExpansionResponse>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub(super) struct PartitionExpansionResponse {
+    pub(super) current_partitions: u32,
+    pub(super) current_epoch: u64,
+    pub(super) pending: Option<crate::partition_expansion::ExpansionPlan>,
 }
 
 #[derive(Debug, serde::Serialize)]
