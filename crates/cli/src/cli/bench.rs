@@ -132,11 +132,18 @@ pub(super) async fn run_benchmark(
         || "generated".to_string(),
         |path| path.display().to_string(),
     );
+    let partition_metadata = options
+        .partition_metadata
+        .as_ref()
+        .map(|path| fs::read(path).map(Arc::new))
+        .transpose()
+        .map_err(|error| CliError::with_source("reading benchmark partition metadata", error))?;
     let workload = PreparedWorkload {
         target: target.clone(),
         payload: Arc::new(payload),
         options: options.clone(),
         measure_delivery: mode == BenchmarkMode::PubSub,
+        partition_metadata,
     };
     let mut warmup_operations = 0;
     if options.warmup_ms > 0 {

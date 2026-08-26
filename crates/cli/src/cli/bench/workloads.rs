@@ -13,6 +13,7 @@ pub(super) struct PreparedWorkload {
     pub payload: Arc<Vec<u8>>,
     pub options: BenchmarkOptions,
     pub measure_delivery: bool,
+    pub partition_metadata: Option<Arc<Vec<u8>>>,
 }
 
 pub(super) async fn run_workload(
@@ -62,6 +63,21 @@ async fn publish_worker(
         client_options.ack_contract_version = Some(client::protocol::model::ACK_CONTRACT_VERSION);
     }
     let mut client = Client::connect_with_options(&client_options).await?;
+    let mut routed = if let Some(metadata) = workload.partition_metadata.as_deref() {
+        let mut routed = client::routing::RoutedClient::new(client_options.clone(), 256, 16)
+            .ok_or_else(|| CliError::msg("invalid routed-client cache limits"))?;
+        let applied = routed
+            .apply_metadata_json(metadata)
+            .map_err(|error| CliError::msg(format!("invalid partition metadata: {error}")))?;
+        if applied == 0 {
+            return Err(CliError::msg(
+                "partition metadata contained no routable streams",
+            ));
+        }
+        Some(routed)
+    } else {
+        None
+    };
     ready
         .send(())
         .await
@@ -124,6 +140,7 @@ async fn publish_worker(
         } else {
             publish_one(
                 &mut client,
+                routed.as_mut(),
                 &workload,
                 index,
                 first_sequence,
@@ -144,6 +161,7 @@ async fn publish_worker(
 
 async fn publish_one(
     client: &mut Client,
+    routed: Option<&mut client::routing::RoutedClient>,
     workload: &PreparedWorkload,
     worker: usize,
     sequence: usize,
@@ -155,18 +173,44 @@ async fn publish_one(
     let headers = measurement_headers(workload, sequence, measured_start);
     let started = Instant::now();
     if let Some(level) = workload.options.ack_level {
-        let ack = client
-            .publish_with_qos_key_and_headers(
+        let msg_id = format!("bench-{worker}-{sequence}");
+        let ack = if let (Some(stream), Some(routed)) = (workload.options.stream.as_deref(), routed)
+        {
+            routed
+                .publish_to_stream_with_qos_and_headers(
+                    stream,
+                    &subject,
+                    &workload.payload,
+                    level,
+                    &msg_id,
+                    key.as_deref(),
+                    &headers,
+                )
+                .await?
+        } else {
+            client
+                .publish_with_qos_key_and_headers(
+                    &subject,
+                    None,
+                    &workload.payload,
+                    level,
+                    &msg_id,
+                    key.as_deref(),
+                    &headers,
+                )
+                .await?
+        };
+        stats.observe_ack(&ack);
+    } else if let (Some(stream), Some(routed)) = (workload.options.stream.as_deref(), routed) {
+        routed
+            .publish_to_stream_with_headers(
+                stream,
                 &subject,
-                None,
                 &workload.payload,
-                level,
-                &format!("bench-{worker}-{sequence}"),
                 key.as_deref(),
                 &headers,
             )
             .await?;
-        stats.observe_ack(&ack);
     } else if let Some(key) = key {
         client
             .publish_with_key_and_headers(&subject, None, &workload.payload, &key, &headers)
