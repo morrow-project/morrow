@@ -125,11 +125,47 @@ impl RoutedClient {
         key: Option<&str>,
     ) -> super::error::Result<ProducerAck> {
         let address = self.route_address(stream, subject, key);
+        let result = self
+            .publish_qos_once(address, subject, payload, level, msg_id, key)
+            .await;
+        match result {
+            Ok(ack) => Ok(ack),
+            Err(first_error) => {
+                // A direct leader may have moved after metadata was cached.
+                // Retry once through the bootstrap/proxy path. The stable
+                // producer message ID makes an uncertain first attempt safe
+                // to deduplicate; fire-and-forget publishes intentionally do
+                // not have this retry behavior.
+                self.clients.remove(&address);
+                self.cache.invalidate(stream, u64::MAX);
+                let retry_address = self.route_address(stream, subject, key);
+                self.publish_qos_once(retry_address, subject, payload, level, msg_id, key)
+                    .await
+                    .map_err(|retry_error| {
+                        super::error::ClientError::msg(format!(
+                            "publish failed after one metadata refresh retry: {first_error}; retry: {retry_error}"
+                        ))
+                    })
+            }
+        }
+    }
+
+    async fn publish_qos_once(
+        &mut self,
+        address: SocketAddr,
+        subject: &str,
+        payload: &[u8],
+        level: protocol::AckLevel,
+        msg_id: &str,
+        key: Option<&str>,
+    ) -> super::error::Result<ProducerAck> {
         let mut client = self.take_client(address).await?;
         let result = client
             .publish_with_qos_and_key(subject, None, payload, level, msg_id, key)
             .await;
-        self.return_client(address, client);
+        if result.is_ok() {
+            self.return_client(address, client);
+        }
         result
     }
 
