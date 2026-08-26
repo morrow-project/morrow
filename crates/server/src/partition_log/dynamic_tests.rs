@@ -85,3 +85,8 @@ fn recovery_status_distinguishes_configured_and_assigned_partitions() {
     assert_eq!(status.completed_partitions, 1);
     assert_eq!(status.active_partitions, 1);
 }
+
+#[test]
+fn dynamic_partition_limit_is_bounded() {
+    assert_eq!(super::dynamic::max_dynamic_partitions(), 4_096);
+}

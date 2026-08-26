@@ -14,6 +14,11 @@ files. Active segment handles are released after a successful flush and are
 reopened on the next append. Full whole-partition lazy activation and eviction
 of all inactive runtime state remains a follow-up requirement.
 
+Dynamic partition resources are bounded separately with
+`MORROW_MAX_ACTIVE_DYNAMIC_PARTITIONS` (default 4096, hard maximum 65536).
+Activation fails closed at the limit so a large topic catalog cannot allocate
+unbounded segment handles or per-partition locks.
+
 Clustered replica catch-up batches are bounded to 256 records and 8 MiB by
 default. Operators may lower those limits with `MORROW_DATA_APPEND_BATCH_RECORDS`
 and `MORROW_DATA_APPEND_BATCH_BYTES`; values are clamped to safe positive limits

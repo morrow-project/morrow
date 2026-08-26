@@ -25,7 +25,9 @@ pub struct PartitionLogSet {
     recovery: PartitionRecoveryStatus,
     pub(crate) metadata_cache:
         Mutex<PartitionResourceCache<(String, PartitionId, u64), MessageEnvelope>>,
-    pub(crate) dynamic_logs: Mutex<HashMap<(String, PartitionId), Mutex<PartitionLog>>>,
+    pub(crate) dynamic_logs:
+        Mutex<HashMap<(String, PartitionId), std::sync::Arc<Mutex<PartitionLog>>>>,
+    pub(crate) dynamic_partition_count: AtomicU64,
     pub(crate) root: PathBuf,
     pub(crate) segment_bytes: u64,
     pub(crate) encryption: Option<std::sync::Arc<crate::encryption::KeyRing>>,
@@ -168,6 +170,7 @@ impl PartitionLogSet {
                         .expect("metadata cache capacity is clamped above zero"),
                 ),
                 dynamic_logs: Mutex::new(HashMap::new()),
+                dynamic_partition_count: AtomicU64::new(0),
                 root,
                 segment_bytes,
                 encryption,
