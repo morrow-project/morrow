@@ -120,8 +120,14 @@ pub(crate) struct PartitionRetentionStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct PartitionRecoveryStatus {
+    pub(crate) configured_partitions: usize,
+    pub(crate) assigned_partitions: usize,
     pub(crate) total_partitions: usize,
     pub(crate) completed_partitions: usize,
+    pub(crate) active_partitions: usize,
+    pub(crate) evicted_partitions: u64,
+    pub(crate) recovering_partitions: usize,
+    pub(crate) blocked_partitions: usize,
     pub(crate) records_scanned: usize,
     pub(crate) resident_metadata_bytes: usize,
     pub(crate) elapsed_ms: u64,

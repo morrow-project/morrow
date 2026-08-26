@@ -75,6 +75,11 @@ impl PartitionLogSet {
                     .map(|partition| (stream.name.clone(), PartitionId(partition)))
             })
             .collect::<Vec<_>>();
+        let configured_partitions = catalog
+            .definitions()
+            .iter()
+            .map(|stream| stream.partitions as usize)
+            .sum();
         let configured_workers = std::env::var("MORROW_PARTITION_RECOVERY_WORKERS")
             .ok()
             .and_then(|value| value.parse::<usize>().ok())
@@ -145,8 +150,14 @@ impl PartitionLogSet {
                 next_legacy_seq: AtomicU64::new(next_legacy_seq),
                 truncations,
                 recovery: PartitionRecoveryStatus {
+                    configured_partitions,
+                    assigned_partitions: work.len(),
                     total_partitions: work.len(),
                     completed_partitions: work.len(),
+                    active_partitions: work.len(),
+                    evicted_partitions: 0,
+                    recovering_partitions: 0,
+                    blocked_partitions: 0,
                     records_scanned: envelopes.len(),
                     resident_metadata_bytes,
                     elapsed_ms: started.elapsed().as_millis() as u64,
@@ -434,7 +445,14 @@ impl PartitionLogSet {
     }
 
     pub(crate) fn recovery_status(&self) -> PartitionRecoveryStatus {
-        self.recovery.clone()
+        let mut status = self.recovery.clone();
+        status.active_partitions = self.active_resource_count();
+        status.evicted_partitions = self
+            .metadata_cache
+            .lock()
+            .expect("metadata cache lock poisoned")
+            .evictions();
+        status
     }
 
     pub(crate) fn is_before_retention_floor(
