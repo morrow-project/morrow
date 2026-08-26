@@ -13,11 +13,6 @@ impl RaftRuntime {
             .get(&key)
             .ok_or_else(|| BrokerError::msg("partition has no write coordinator"))?;
         let _write_guard = write_gate.lock().await;
-        crate::broker_ensure!(
-            self.raft.current_leader().await == Some(self.node_id),
-            "not partition leader"
-        );
-        self.ensure_metadata_ready().await?;
         let metadata = self.durable_state();
         crate::broker_ensure!(
             self.partition_data

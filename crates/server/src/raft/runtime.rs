@@ -318,9 +318,14 @@ impl RaftRuntime {
             return self.validate_metadata_configuration(&metadata);
         }
         let replicas = self.nodes.keys().copied().collect::<BTreeSet<_>>();
+        let replica_order = replicas.iter().copied().collect::<Vec<_>>();
         let mut assignments = HashMap::new();
         for stream in &self.configured_streams {
             for partition in 0..stream.partitions {
+                let leader_id = replica_order
+                    .get(partition as usize % replica_order.len())
+                    .copied()
+                    .unwrap_or(self.node_id);
                 assignments.insert(
                     partition_key(stream.name.as_str(), partition),
                     PartitionAssignmentMetadata {
@@ -328,7 +333,7 @@ impl RaftRuntime {
                         active_commit_set: replicas.clone(),
                         replica_set_generation: 1,
                         phase: PartitionReconfigurationPhase::Stable,
-                        leader_id: self.node_id,
+                        leader_id,
                         leader_epoch: 1,
                     },
                 );
@@ -364,40 +369,6 @@ impl RaftRuntime {
             "not metadata leader"
         );
         self.ensure_metadata_bootstrap().await?;
-        let assignments = self
-            .state_machine
-            .durable_state()
-            .partition_assignments
-            .into_iter()
-            .filter(|(_, assignment)| assignment.leader_id != self.node_id)
-            .collect::<Vec<_>>();
-        for (key, assignment) in assignments {
-            let (stream, partition) = key
-                .rsplit_once(':')
-                .ok_or_else(|| BrokerError::msg("invalid partition assignment key"))?;
-            let partition = partition
-                .parse::<u32>()
-                .map_err(|_| BrokerError::msg("invalid partition assignment number"))?;
-            let leader_epoch = assignment.leader_epoch.saturating_add(1);
-            let response = self
-                .client_write(BrokerCommand::PartitionLeaderUpdate {
-                    stream: stream.to_string(),
-                    partition,
-                    leader_id: self.node_id,
-                    leader_epoch,
-                })
-                .await?;
-            crate::broker_ensure!(
-                matches!(
-                    response,
-                    BrokerResponse::PartitionLeaderUpdate {
-                        leader_id,
-                        leader_epoch: committed_epoch,
-                    } if leader_id == self.node_id && committed_epoch == leader_epoch
-                ),
-                "partition leader epoch update rejected"
-            );
-        }
         Ok(())
     }
 
