@@ -26,6 +26,9 @@ fn cache_routes_keys_and_rejects_stale_metadata() {
     let mut cache = PartitionLeaderCache::new(1).unwrap();
     assert!(cache.insert(metadata(2)));
     assert!(!cache.insert(metadata(1)));
+    let mut stale_leader = metadata(2);
+    stale_leader.leaders[0].leader_epoch = 0;
+    assert!(!cache.insert(stale_leader));
     let route = cache
         .route("orders", "orders.created", Some(b"key"), 0)
         .unwrap();
