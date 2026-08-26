@@ -1,6 +1,8 @@
 use super::delivery_index::scheduled_at_ms;
 use super::*;
 
+const MAX_DURABLE_DELIVERIES_PER_TURN: usize = 64;
+
 impl DurableBrokerState {
     pub(super) fn prepare_durable_deliveries(
         &mut self,
@@ -11,8 +13,17 @@ impl DurableBrokerState {
     ) -> Result<Vec<Delivery>> {
         let mut deliveries = Vec::new();
         let consumer_ids = std::mem::take(&mut self.ready_consumers);
+        let mut processed = 0;
         for consumer_id in consumer_ids {
+            if processed >= MAX_DURABLE_DELIVERIES_PER_TURN {
+                self.ready_consumers.insert(consumer_id);
+                continue;
+            }
             loop {
+                if processed >= MAX_DURABLE_DELIVERIES_PER_TURN {
+                    self.ready_consumers.insert(consumer_id.clone());
+                    break;
+                }
                 let Some((seq, connection_id, sid, attempt, deadline_ms, message)) =
                     self.next_delivery_for(&consumer_id, connections, partition_logs, now)?
                 else {
@@ -147,6 +158,7 @@ impl DurableBrokerState {
                         delivery_message.payload.len(),
                     );
                 }
+                processed += 1;
             }
         }
         Ok(deliveries)
