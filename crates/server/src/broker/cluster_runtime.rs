@@ -111,6 +111,33 @@ impl ClusterRuntime {
         }
     }
 
+    pub(super) async fn replicate_partition_batch(
+        &self,
+        envelopes: Vec<MessageEnvelope>,
+        fsync: bool,
+        cluster_durable: bool,
+    ) -> Result<Vec<MessageEnvelope>> {
+        match self {
+            Self::Real(runtime) => {
+                runtime
+                    .replicate_partition_batch(envelopes, fsync, cluster_durable)
+                    .await
+            }
+            #[cfg(test)]
+            Self::Fake(runtime) => {
+                let mut replicated = Vec::with_capacity(envelopes.len());
+                for envelope in envelopes {
+                    replicated.push(
+                        runtime
+                            .replicate_partition(envelope, fsync, cluster_durable)
+                            .await?,
+                    );
+                }
+                Ok(replicated)
+            }
+        }
+    }
+
     pub(super) async fn is_leader(&self) -> bool {
         match self {
             Self::Real(runtime) => runtime.is_leader().await,
