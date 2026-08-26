@@ -10,6 +10,7 @@ pub mod materialized_view;
 pub mod middleware;
 pub mod partition_batch;
 pub mod partition_cache;
+pub mod partition_expansion;
 pub mod partition_log;
 pub mod partition_replication;
 pub(crate) mod quota;
@@ -37,6 +38,9 @@ mod partition_cache_tests;
 
 #[cfg(test)]
 mod work_scheduler_tests;
+
+#[cfg(test)]
+mod partition_expansion_tests;
 
 pub use broker::Morrow;
 pub use config::Config;
