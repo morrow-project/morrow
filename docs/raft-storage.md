@@ -39,9 +39,21 @@ cargo test -p integration --release benchmark_cluster_durable_publish_latency \
 
 Both benchmarks print a machine-readable baseline line containing
 `samples`, `history`, `topology`, `ack_level`, `throughput`, `p50_us`,
-`p95_us`, and `p99_us`. The baseline intentionally uses `DURABLE` under the
-current acknowledgement contract; the full ADR-001 level matrix, history
-scaling, follower lag, failure, and overload scenarios remain open in #163.
+`p95_us`, and `p99_us`. The final ADR-001 matrix adds retained-history levels
+0/1K/10K/100K, a healthy-versus-follower-loss quorum run, and all four
+acknowledgement levels:
+
+```bash
+cargo test -p integration --release --test client_server \
+  benchmark_standalone_durable_publish_latency_with_history -- --ignored --nocapture
+cargo test -p integration --release --test client_server \
+  benchmark_cluster_durable_publish_with_slow_follower -- --ignored --nocapture
+cargo test -p integration --release --test client_server \
+  benchmark_cluster_publish_ack_level_matrix -- --ignored --nocapture
+```
+
+The CLI benchmark reports `sample_cap` and bounds latency samples at 100,000
+per stream, so duration runs do not retain one vector entry per message.
 
 Results recorded on 2026-08-22 on the same development machine and release
 profile:
