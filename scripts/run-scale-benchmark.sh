@@ -6,6 +6,7 @@ usage() {
   echo "  --controller-voters N                    (default: 3)"
   echo "  --roles-share-process true|false         (default follows profile)"
   echo "  --metrics-url URL                        (optional endpoint captured per case)"
+  echo "  --metrics-token TOKEN                    (optional bearer token for metrics)"
   echo "  --expected-brokers N                     (optional registered-broker count check)"
   echo "  --server-pid PID                         (optional per-case resource snapshots)"
   echo "  --throughput N                           (default: 0, unlimited)"
@@ -84,6 +85,7 @@ clients=5; duration=10s; payload_size=128
 throughput=0; fire_throughput=
 deployment_profile=combined; controller_voters=3; roles_share_process=true
 metrics_url=
+metrics_token=
 expected_brokers=
 server_pid=
 modes=fire-and-forget,sync,async,batch
@@ -103,6 +105,7 @@ while test "$#" -gt 0; do
     --controller-voters) test "$#" -ge 2 || die "$1 requires a value"; controller_voters=$2; shift 2 ;;
     --roles-share-process) test "$#" -ge 2 || die "$1 requires a value"; roles_share_process=$2; shift 2 ;;
     --metrics-url) test "$#" -ge 2 || die "$1 requires a value"; metrics_url=$2; shift 2 ;;
+    --metrics-token) test "$#" -ge 2 || die "$1 requires a value"; metrics_token=$2; shift 2 ;;
     --expected-brokers) test "$#" -ge 2 || die "$1 requires a value"; expected_brokers=$2; shift 2 ;;
     --server-pid) test "$#" -ge 2 || die "$1 requires a value"; server_pid=$2; shift 2 ;;
     --throughput) test "$#" -ge 2 || die "$1 requires a value"; throughput=$2; shift 2 ;;
@@ -187,7 +190,11 @@ for broker_count in $broker_counts; do
       scripts/run-publish-benchmark-matrix.sh --topology external --client-config "$client_config" --server "$server" --clients "$clients" --duration "$duration" --payload-size "$payload_size" --throughput "$throughput" --fire-throughput "$fire_throughput" --subjects "$topic_count" --partitions "$partition_count" --modes "$modes" --ack-levels "$ack_levels" --output-dir "$case_dir/results" --quiet --no-build
       capture_resources "$case_dir/resources-after.json"
       if test -n "$metrics_url"; then
-        curl -sSfL "$metrics_url" >"$case_dir/metrics.prom" || die "failed to capture metrics from $metrics_url"
+        if test -n "$metrics_token"; then
+          curl -sSfL -H "Authorization: Bearer $metrics_token" "$metrics_url" >"$case_dir/metrics.prom" || die "failed to capture metrics from $metrics_url"
+        else
+          curl -sSfL "$metrics_url" >"$case_dir/metrics.prom" || die "failed to capture metrics from $metrics_url"
+        fi
         validate_topology_metrics "$case_dir/metrics.prom"
       fi
       printf '{"broker_count":%s,"topics":%s,"partitions":%s,"deployment_profile":"%s","controller_voter_count":%s,"roles_share_process":%s,"batch_records":%s,"batch_bytes":%s,"metadata_cache_capacity":%s,"modes":"%s","ack_levels":"%s","result_dir":"%s"}\n' \

@@ -57,7 +57,9 @@ these artifacts with the release commit when comparing throughput, p95 latency,
 resource use, and controller activity across topology sizes.
 
 Pass `--metrics-url http://host:admin-port/metrics` to capture a Prometheus
-snapshot as `metrics.prom` inside every case directory. This makes controller
+snapshot as `metrics.prom` inside every case directory. If the endpoint is
+protected, add `--metrics-token ADMIN_TOKEN`; the value is sent only as a
+bearer header and is not written to the manifest. This makes controller
 activity and broker queue/replication counters available beside the benchmark
 result instead of requiring a second, unsynchronised scrape.
 When supplied, the fixture also fails a case if the endpoint reports a different
