@@ -801,6 +801,7 @@ impl Morrow {
             cluster_applied_index: Arc::new(AtomicU64::new(0)),
             local_partition_applied: Arc::new(Mutex::new(HashMap::new())),
             cluster_delta_gate: Arc::new(Mutex::new(())),
+            cluster_partition_apply_gates: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             cluster_application_metrics: Arc::new(ClusterApplicationMetrics::default()),
             metrics: Arc::new(BrokerMetrics::default()),
             metrics_snapshot: Arc::new(tokio::sync::RwLock::new(None)),

@@ -8,6 +8,7 @@ pub struct RaftRuntime {
     pub(super) data_node_ids: BTreeSet<u64>,
     pub(super) auth_token: String,
     pub(super) node_id: u64,
+    pub(super) role: crate::config::ClusterRole,
     pub(super) tls_enabled: bool,
     pub(super) partition_data: SharedReplicaData,
     pub(super) partition_write_gates:
@@ -257,6 +258,7 @@ impl RaftRuntime {
             data_node_ids,
             auth_token: config.auth_token.clone(),
             node_id: config.node_id,
+            role: config.role,
             tls_enabled,
             partition_data,
             partition_write_gates: Arc::new(tokio::sync::Mutex::new(
@@ -461,7 +463,13 @@ impl RaftRuntime {
                     replica_count,
                 );
                 let replicas = selected.iter().copied().collect::<BTreeSet<_>>();
-                let leader_id = selected[0];
+                let leader_id = if self.role == crate::config::ClusterRole::Combined
+                    && selected.contains(&self.node_id)
+                {
+                    self.node_id
+                } else {
+                    selected[0]
+                };
                 let active_count = usize::try_from(stream.storage.min_ack_replicas)
                     .unwrap_or(replica_count)
                     .min(replica_count)

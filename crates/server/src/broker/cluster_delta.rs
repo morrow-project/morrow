@@ -57,6 +57,15 @@ impl Morrow {
     }
 
     async fn apply_cluster_partition_ordered(&self, envelope: MessageEnvelope) -> Result<()> {
+        let key = crate::raft::partition_key(envelope.stream.as_str(), envelope.partition.0);
+        let partition_gate = {
+            let mut gates = self.cluster_partition_apply_gates.lock().await;
+            gates
+                .entry(key)
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone()
+        };
+        let _partition_apply_guard = partition_gate.lock().await;
         let _storage_operation = self.storage_gate.read().await;
         if self.partition_logs.is_before_retention_floor(
             envelope.stream.as_str(),

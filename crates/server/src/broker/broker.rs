@@ -67,6 +67,8 @@ pub struct Morrow {
     pub(super) cluster_applied_index: Arc<AtomicU64>,
     pub(super) local_partition_applied: Arc<Mutex<HashMap<String, u64>>>,
     pub(super) cluster_delta_gate: Arc<Mutex<()>>,
+    pub(super) cluster_partition_apply_gates:
+        Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
     pub(super) cluster_application_metrics: Arc<ClusterApplicationMetrics>,
     pub(super) metrics: Arc<BrokerMetrics>,
     pub(super) metrics_snapshot: Arc<tokio::sync::RwLock<Option<(std::time::Instant, Arc<str>)>>>,
