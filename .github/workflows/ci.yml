@@ -35,7 +35,7 @@ jobs:
         run: |
           sh -n scripts/run-scale-benchmark.sh
           sh -n scripts/run-publish-benchmark-matrix.sh
-          python3 -m unittest packaging/tests/scale-benchmark-test.py
+          python3 packaging/tests/scale-benchmark-test.py
 
   test:
     name: Test and build (${{ matrix.name }})
