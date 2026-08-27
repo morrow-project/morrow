@@ -15,13 +15,17 @@ For a local separated topology, generate and start dedicated processes with
 `scripts/start-local-cluster.sh`. It clones a normal server JSON template,
 creates three controller voters and two brokers by default, assigns unique
 client/Raft/route ports and storage directories, and keeps the controller voter
-set fixed while the broker count changes:
+set fixed while the broker count changes. Use the port-base options when more
+than one local campaign runs at once:
 
 ```sh
 scripts/start-local-cluster.sh \
   --base-config crates/integration/tests/fixtures/cluster-node-1.json \
   --controllers 3 --brokers 2
 ```
+
+For example, `--client-port 18001 --raft-port 19001 --route-port 20001
+--http-port 21001` moves the entire generated fleet away from the defaults.
 
 The command prints the generated config directory, log directory, and process
 IDs. Stop it with Ctrl-C; add `--keep-running` when another shell will manage
@@ -67,6 +71,15 @@ controller-voter count or process role than the selected topology profile.
 For a real broker-fleet gate, also pass `--expected-brokers N`. Each metrics
 snapshot must then report exactly `N` registered brokers; broker-count labels are
 otherwise descriptive only and do not change cluster membership.
+
+In a separated deployment, scrape a controller when checking registration
+counts, while sending benchmark traffic to a broker:
+
+```sh
+--metrics-url http://127.0.0.1:11001/metrics \
+--metrics-role controller --metrics-token test-admin-token \
+--expected-brokers 2
+```
 
 Pass `--server-pid PID` to capture `resources-before.json` and
 `resources-after.json` in every case directory. These snapshots report resident

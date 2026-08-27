@@ -1,5 +1,6 @@
 #!/bin/sh
 set -eu
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 usage() {
   echo "Usage: $0 --server ADDRESS --client-config FILE [options]"
   echo "  --deployment-profile combined|separated (default: combined)"
@@ -7,6 +8,7 @@ usage() {
   echo "  --roles-share-process true|false         (default follows profile)"
   echo "  --metrics-url URL                        (optional endpoint captured per case)"
   echo "  --metrics-token TOKEN                    (optional bearer token for metrics)"
+  echo "  --metrics-role ROLE                      broker|controller|combined (default follows profile)"
   echo "  --expected-brokers N                     (optional registered-broker count check)"
   echo "  --server-pid PID                         (optional per-case resource snapshots)"
   echo "  --throughput N                           (default: 0, unlimited)"
@@ -44,8 +46,7 @@ json_escape() {
 }
 validate_topology_metrics() {
   metrics_file=$1
-  expected_role=broker
-  test "$deployment_profile" = combined && expected_role=combined
+  expected_role=$2
   actual_voters=$(awk '/^morrow_controller_voters / { print $2; exit }' "$metrics_file")
   test "$actual_voters" = "$controller_voters" || die "topology metrics report $actual_voters controller voters; expected $controller_voters"
   grep -Fq "morrow_node_role{role=\"$expected_role\"} 1" "$metrics_file" || die "topology metrics do not identify the endpoint as role $expected_role"
@@ -86,6 +87,7 @@ throughput=0; fire_throughput=
 deployment_profile=combined; controller_voters=3; roles_share_process=true
 metrics_url=
 metrics_token=
+metrics_role=
 expected_brokers=
 server_pid=
 modes=fire-and-forget,sync,async,batch
@@ -106,6 +108,7 @@ while test "$#" -gt 0; do
     --roles-share-process) test "$#" -ge 2 || die "$1 requires a value"; roles_share_process=$2; shift 2 ;;
     --metrics-url) test "$#" -ge 2 || die "$1 requires a value"; metrics_url=$2; shift 2 ;;
     --metrics-token) test "$#" -ge 2 || die "$1 requires a value"; metrics_token=$2; shift 2 ;;
+    --metrics-role) test "$#" -ge 2 || die "$1 requires a value"; metrics_role=$2; shift 2 ;;
     --expected-brokers) test "$#" -ge 2 || die "$1 requires a value"; expected_brokers=$2; shift 2 ;;
     --server-pid) test "$#" -ge 2 || die "$1 requires a value"; server_pid=$2; shift 2 ;;
     --throughput) test "$#" -ge 2 || die "$1 requires a value"; throughput=$2; shift 2 ;;
@@ -138,6 +141,13 @@ if test -n "$server_pid"; then
 fi
 case "$deployment_profile" in combined|separated) ;; *) die "--deployment-profile must be combined or separated" ;; esac
 case "$roles_share_process" in true|false) ;; *) die "--roles-share-process must be true or false" ;; esac
+if test -n "$metrics_role"; then
+  case "$metrics_role" in broker|controller|combined) ;; *) die "--metrics-role must be broker, controller, or combined" ;; esac
+fi
+if test -z "$metrics_role"; then
+  metrics_role=broker
+  test "$deployment_profile" = combined && metrics_role=combined
+fi
 case "$controller_voters" in ''|*[!0-9]*|0) die "--controller-voters must be a positive integer" ;; esac
 if test -n "$expected_brokers"; then
   case "$expected_brokers" in ''|*[!0-9]*|0) die "--expected-brokers must be a positive integer" ;; esac
@@ -195,11 +205,11 @@ for broker_count in $broker_counts; do
         else
           curl -sSfL "$metrics_url" >"$case_dir/metrics.prom" || die "failed to capture metrics from $metrics_url"
         fi
-        validate_topology_metrics "$case_dir/metrics.prom"
+        validate_topology_metrics "$case_dir/metrics.prom" "$metrics_role"
       fi
       printf '{"broker_count":%s,"topics":%s,"partitions":%s,"deployment_profile":"%s","controller_voter_count":%s,"roles_share_process":%s,"batch_records":%s,"batch_bytes":%s,"metadata_cache_capacity":%s,"modes":"%s","ack_levels":"%s","result_dir":"%s"}\n' \
         "$broker_count" "$topic_count" "$partition_count" "$deployment_profile" "$controller_voters" "$roles_share_process" "$batch_records" "$batch_bytes" "$metadata_cache_capacity" "$modes" "$ack_levels" \
-        "$(json_escape "$case_dir")" >> "$case_index"
+        "$(json_escape "$case_dir/results")" >> "$case_index"
     done
   done
 done
