@@ -82,3 +82,23 @@ For clustered catch-up sensitivity, vary the bounded append batch with
 `MORROW_DATA_APPEND_BATCH_RECORDS` and `MORROW_DATA_APPEND_BATCH_BYTES`. Record
 these values with the benchmark manifest when comparing replication throughput;
 the receiver enforces the same hard maxima.
+
+At the end of a run, the fixture evaluates the artifacts with the default scale
+gate: the measured throughput of the largest case must retain at least 70% of
+the first case, and its p95 latency may grow to at most 150% of the first case.
+The result is written to `scale-gate.json`; a failed gate returns a non-zero
+status. Adjust the policy for a particular machine with
+`--min-throughput-percent` and `--max-p95-percent`, or use `--no-gate` when
+collecting exploratory data. To evaluate an existing artifact directory:
+
+```sh
+python3 scripts/check-scale-benchmark.py target/scale-benchmarks/<run> \
+  --min-throughput-percent 70 --max-p95-percent 150 \
+  --output target/scale-benchmarks/<run>/scale-gate.json
+```
+
+The evaluator rejects invalid benchmark results, non-zero error/timeout/duplicate
+counters, payload mismatches, and missing topology metadata before applying the
+throughput and p95 thresholds. This keeps a failed workload from being mistaken
+for a successful scale result while allowing thresholds to be tuned to the
+documented CPU, disk, and network limits of the host.

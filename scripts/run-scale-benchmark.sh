@@ -12,6 +12,9 @@ usage() {
   echo "  --fire-throughput N                      (default: --throughput)"
   echo "  --modes LIST                             (default: fire-and-forget,sync,async,batch)"
   echo "  --ack-levels LIST                        (default: accepted,durable,high-durability)"
+  echo "  --min-throughput-percent N               (default: 70)"
+  echo "  --max-p95-percent N                     (default: 150)"
+  echo "  --no-gate                                skip post-run scale-gate evaluation"
 }
 die() { echo "error: $*" >&2; exit 1; }
 cpu_cores() {
@@ -85,6 +88,9 @@ expected_brokers=
 server_pid=
 modes=fire-and-forget,sync,async,batch
 ack_levels=accepted,durable,high-durability
+min_throughput_percent=70
+max_p95_percent=150
+run_gate=true
 output_dir="target/scale-benchmarks/$(date -u +%Y%m%dT%H%M%SZ)"; build=true
 while test "$#" -gt 0; do
   case "$1" in
@@ -103,6 +109,9 @@ while test "$#" -gt 0; do
     --fire-throughput) test "$#" -ge 2 || die "$1 requires a value"; fire_throughput=$2; shift 2 ;;
     --modes) test "$#" -ge 2 || die "$1 requires a value"; modes=$2; shift 2 ;;
     --ack-levels) test "$#" -ge 2 || die "$1 requires a value"; ack_levels=$2; shift 2 ;;
+    --min-throughput-percent) test "$#" -ge 2 || die "$1 requires a value"; min_throughput_percent=$2; shift 2 ;;
+    --max-p95-percent) test "$#" -ge 2 || die "$1 requires a value"; max_p95_percent=$2; shift 2 ;;
+    --no-gate) run_gate=false; shift ;;
     --clients) test "$#" -ge 2 || die "$1 requires a value"; clients=$2; shift 2 ;;
     --duration) test "$#" -ge 2 || die "$1 requires a value"; duration=$2; shift 2 ;;
     --payload-size) test "$#" -ge 2 || die "$1 requires a value"; payload_size=$2; shift 2 ;;
@@ -112,6 +121,8 @@ while test "$#" -gt 0; do
     *) die "unknown option $1" ;;
   esac
 done
+case "$min_throughput_percent" in ''|*[!0-9]*) die "--min-throughput-percent must be an integer percentage" ;; esac
+case "$max_p95_percent" in ''|*[!0-9]*) die "--max-p95-percent must be a non-negative integer percentage" ;; esac
 case "$throughput" in ''|*[!0-9]*) die "--throughput must be a non-negative integer" ;; esac
 if test -z "$fire_throughput"; then fire_throughput=$throughput; fi
 case "$fire_throughput" in ''|*[!0-9]*) die "--fire-throughput must be a non-negative integer" ;; esac
@@ -186,4 +197,10 @@ for broker_count in $broker_counts; do
   done
 done
 IFS=$old_ifs
+if test "$run_gate" = true; then
+  python3 "$script_dir/check-scale-benchmark.py" "$output_dir" \
+    --min-throughput-percent "$min_throughput_percent" \
+    --max-p95-percent "$max_p95_percent" \
+    --output "$output_dir/scale-gate.json"
+fi
 printf '%s\n' "scale benchmark results: $output_dir"
