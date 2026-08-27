@@ -248,6 +248,10 @@ impl RaftRuntime {
             .cloned()
             .ok_or_else(|| BrokerError::msg("partition has no metadata assignment"))?;
         crate::broker_ensure!(
+            metadata.feature_gates.contains("partition-local-commit-v1"),
+            "partition-local commit authority is unavailable"
+        );
+        crate::broker_ensure!(
             assignment.leader_id == self.node_id,
             "partition leader assignment is not committed"
         );
@@ -259,14 +263,12 @@ impl RaftRuntime {
         let previous = local_commit
             .as_ref()
             .or_else(|| metadata.partition_commits.get(&key));
-        if metadata.feature_gates.contains("partition-local-commit-v1") {
-            crate::broker_ensure!(
-                previous.is_none_or(|commit| {
-                    commit.replica_set_generation == assignment.replica_set_generation
-                }),
-                "partition commit generation is not safe"
-            );
-        }
+        crate::broker_ensure!(
+            previous.is_none_or(|commit| {
+                commit.replica_set_generation == assignment.replica_set_generation
+            }),
+            "partition commit generation is not safe"
+        );
         let first_offset = previous.map_or(0, |commit| commit.high_watermark.saturating_add(1));
         let leader_epoch = assignment.leader_epoch;
         let mut checksums = Vec::with_capacity(envelopes.len());
@@ -502,7 +504,7 @@ impl RaftRuntime {
             .last()
             .copied()
             .ok_or_else(|| BrokerError::msg("partition replication batch was empty"))?;
-        if metadata.feature_gates.contains("partition-local-commit-v1") {
+        {
             let commit_request = DataCommitRequest {
                 leader_id: self.node_id,
                 leader_epoch,
@@ -529,29 +531,6 @@ impl RaftRuntime {
                 .lock()
                 .unwrap()
                 .commit(&commit_request)?;
-        } else {
-            for envelope in &envelopes {
-                let response = self
-                    .client_write(BrokerCommand::PartitionCommit {
-                        stream: envelope.stream.as_str().to_string(),
-                        partition: envelope.partition.0,
-                        offset: envelope.offset,
-                        checksum: crate::partition_log::committed_envelope_checksum(envelope)?,
-                        leader_id: self.node_id,
-                        leader_epoch,
-                    })
-                    .await?;
-                crate::broker_ensure!(
-                    matches!(
-                        response,
-                        BrokerResponse::PartitionCommit {
-                            high_watermark,
-                            leader_epoch: committed_epoch,
-                        } if high_watermark == envelope.offset && committed_epoch == leader_epoch
-                    ),
-                    "partition metadata commit rejected"
-                );
-            }
         }
         Ok(envelopes)
     }

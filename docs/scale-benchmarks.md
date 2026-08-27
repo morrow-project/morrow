@@ -15,13 +15,17 @@ For a local separated topology, generate and start dedicated processes with
 `scripts/start-local-cluster.sh`. It clones a normal server JSON template,
 creates three controller voters and two brokers by default, assigns unique
 client/Raft/route ports and storage directories, and keeps the controller voter
-set fixed while the broker count changes:
+set fixed while the broker count changes. Use the port-base options when more
+than one local campaign runs at once:
 
 ```sh
 scripts/start-local-cluster.sh \
   --base-config crates/integration/tests/fixtures/cluster-node-1.json \
   --controllers 3 --brokers 2
 ```
+
+For example, `--client-port 18001 --raft-port 19001 --route-port 20001
+--http-port 21001` moves the entire generated fleet away from the defaults.
 
 The command prints the generated config directory, log directory, and process
 IDs. Stop it with Ctrl-C; add `--keep-running` when another shell will manage
@@ -57,7 +61,9 @@ these artifacts with the release commit when comparing throughput, p95 latency,
 resource use, and controller activity across topology sizes.
 
 Pass `--metrics-url http://host:admin-port/metrics` to capture a Prometheus
-snapshot as `metrics.prom` inside every case directory. This makes controller
+snapshot as `metrics.prom` inside every case directory. If the endpoint is
+protected, add `--metrics-token ADMIN_TOKEN`; the value is sent only as a
+bearer header and is not written to the manifest. This makes controller
 activity and broker queue/replication counters available beside the benchmark
 result instead of requiring a second, unsynchronised scrape.
 When supplied, the fixture also fails a case if the endpoint reports a different
@@ -65,6 +71,15 @@ controller-voter count or process role than the selected topology profile.
 For a real broker-fleet gate, also pass `--expected-brokers N`. Each metrics
 snapshot must then report exactly `N` registered brokers; broker-count labels are
 otherwise descriptive only and do not change cluster membership.
+
+In a separated deployment, scrape a controller when checking registration
+counts, while sending benchmark traffic to a broker:
+
+```sh
+--metrics-url http://127.0.0.1:11001/metrics \
+--metrics-role controller --metrics-token test-admin-token \
+--expected-brokers 2
+```
 
 Pass `--server-pid PID` to capture `resources-before.json` and
 `resources-after.json` in every case directory. These snapshots report resident
@@ -82,3 +97,23 @@ For clustered catch-up sensitivity, vary the bounded append batch with
 `MORROW_DATA_APPEND_BATCH_RECORDS` and `MORROW_DATA_APPEND_BATCH_BYTES`. Record
 these values with the benchmark manifest when comparing replication throughput;
 the receiver enforces the same hard maxima.
+
+At the end of a run, the fixture evaluates the artifacts with the default scale
+gate: the measured throughput of the largest case must retain at least 70% of
+the first case, and its p95 latency may grow to at most 150% of the first case.
+The result is written to `scale-gate.json`; a failed gate returns a non-zero
+status. Adjust the policy for a particular machine with
+`--min-throughput-percent` and `--max-p95-percent`, or use `--no-gate` when
+collecting exploratory data. To evaluate an existing artifact directory:
+
+```sh
+python3 scripts/check-scale-benchmark.py target/scale-benchmarks/<run> \
+  --min-throughput-percent 70 --max-p95-percent 150 \
+  --output target/scale-benchmarks/<run>/scale-gate.json
+```
+
+The evaluator rejects invalid benchmark results, non-zero error/timeout/duplicate
+counters, payload mismatches, and missing topology metadata before applying the
+throughput and p95 thresholds. This keeps a failed workload from being mistaken
+for a successful scale result while allowing thresholds to be tuned to the
+documented CPU, disk, and network limits of the host.

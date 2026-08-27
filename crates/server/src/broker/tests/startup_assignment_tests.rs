@@ -56,6 +56,15 @@ fn startup_assignment_balances_partition_order_across_streams() {
     config.cluster.as_mut().unwrap().controller_voters = vec![1, 2];
 
     let assigned = crate::broker::broker_lifecycle::startup_assigned_partitions(&config).unwrap();
-    assert!(assigned.contains(&("payments".to_string(), 0)));
-    assert!(!assigned.contains(&("orders".to_string(), 0)));
+    let data_nodes = [3, 4];
+    let orders_owned =
+        crate::raft::runtime::initial_partition_replicas("orders", 0, &data_nodes, 1).contains(&4);
+    let payments_owned =
+        crate::raft::runtime::initial_partition_replicas("payments", 0, &data_nodes, 1)
+            .contains(&4);
+    assert_eq!(assigned.contains(&("orders".to_string(), 0)), orders_owned);
+    assert_eq!(
+        assigned.contains(&("payments".to_string(), 0)),
+        payments_owned
+    );
 }

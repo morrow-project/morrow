@@ -63,6 +63,10 @@ pub enum BrokerCommand {
         security_references: BTreeSet<String>,
         feature_gates: BTreeSet<String>,
     },
+    StreamPartitionsUpdate {
+        stream: crate::stream::StreamDefinition,
+        assignments: HashMap<String, PartitionAssignmentMetadata>,
+    },
     PartitionLeaderUpdate {
         stream: String,
         partition: u32,
@@ -110,6 +114,7 @@ pub enum BrokerCommand {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BrokerResponse {
     MetadataBootstrap,
+    StreamPartitionsUpdate,
     PartitionLeaderUpdate {
         leader_id: u64,
         leader_epoch: u64,
@@ -290,6 +295,33 @@ impl DurableState {
                 } else {
                     BrokerResponse::Noop
                 }
+            }
+            BrokerCommand::StreamPartitionsUpdate {
+                stream,
+                assignments,
+            } => {
+                let name = stream.name.as_str().to_string();
+                let Some(current) = self.stream_definitions.get(&name) else {
+                    return BrokerResponse::Noop;
+                };
+                if stream.partitions <= current.partitions
+                    || stream.partitioning.epoch <= current.partitioning.epoch
+                {
+                    return BrokerResponse::Noop;
+                }
+                if assignments.keys().any(|key| {
+                    key.strip_prefix(&format!("{name}:"))
+                        .and_then(|partition| partition.parse::<u32>().ok())
+                        .is_some_and(|partition| partition >= stream.partitions)
+                }) {
+                    return BrokerResponse::Noop;
+                }
+                self.stream_definitions.insert(name, stream);
+                self.partition_assignments.extend(assignments);
+                self.partition_assignments
+                    .values_mut()
+                    .for_each(PartitionAssignmentMetadata::normalize);
+                BrokerResponse::StreamPartitionsUpdate
             }
             BrokerCommand::PolicyReplace { snapshot } => {
                 if self
@@ -503,7 +535,7 @@ mod network;
 pub(crate) mod partition_runtime;
 mod proxy;
 mod rpc;
-mod runtime;
+pub(crate) mod runtime;
 mod state_machine;
 mod storage_io;
 

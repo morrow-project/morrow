@@ -74,6 +74,10 @@ async fn metadata_updates_are_resumable_and_fall_back_to_snapshot() {
     bounded.publish_update(b"b".to_vec()).await;
     bounded.publish_update(b"c".to_vec()).await;
     assert!(bounded.updates_after(0).await.is_none());
+    let registration = bounded.register(registration(7, 1, 0)).await.unwrap();
+    assert!(registration.accepted.snapshot_required);
+    assert_eq!(registration.accepted.updates.len(), 1);
+    assert_eq!(registration.accepted.updates[0].payload, b"c");
 }
 
 #[tokio::test]

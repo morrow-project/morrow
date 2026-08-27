@@ -25,6 +25,18 @@ jobs:
       - name: Validate documented release identity
         run: python3 packaging/tests/release-identity-contract-test.py
 
+  scale-gate-tooling:
+    name: Scale-gate tooling
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+      - name: Validate benchmark scripts
+        run: |
+          sh -n scripts/run-scale-benchmark.sh
+          sh -n scripts/run-publish-benchmark-matrix.sh
+          python3 packaging/tests/scale-benchmark-test.py
+
   test:
     name: Test and build (${{ matrix.name }})
     if: github.event_name == 'pull_request' || !startsWith(github.event.head_commit.message, 'Prepare release ')

@@ -143,7 +143,7 @@ impl BrokerControlRegistry {
             self.metrics
                 .snapshot_fallbacks_total
                 .fetch_add(1, Ordering::Relaxed);
-            Vec::new()
+            state.updates.back().cloned().into_iter().collect()
         } else {
             state
                 .updates
@@ -198,7 +198,7 @@ impl BrokerControlRegistry {
             self.metrics
                 .snapshot_fallbacks_total
                 .fetch_add(1, Ordering::Relaxed);
-            Vec::new()
+            state.updates.back().cloned().into_iter().collect()
         } else {
             state
                 .updates

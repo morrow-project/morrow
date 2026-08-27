@@ -619,3 +619,60 @@ fn initial_partition_leaders_round_robin_across_data_brokers() {
         .collect::<Vec<_>>();
     assert_eq!(leaders, vec![3, 7, 11, 3, 7, 11, 3]);
 }
+
+#[test]
+fn initial_partition_replicas_are_stable_and_bounded_when_brokers_grow() {
+    let original = [3, 7, 11];
+    let expanded = [3, 7, 11, 19];
+    let first = super::runtime::initial_partition_replicas("orders", 4, &original, 2);
+    assert_eq!(
+        first,
+        super::runtime::initial_partition_replicas("orders", 4, &original, 2)
+    );
+    assert_eq!(first.len(), 2);
+    assert!(first.iter().all(|node| original.contains(node)));
+
+    let after_add = super::runtime::initial_partition_replicas("orders", 4, &expanded, 2);
+    assert_eq!(after_add.len(), 2);
+    assert!(after_add.iter().all(|node| expanded.contains(node)));
+}
+
+#[test]
+fn stream_partition_update_advances_epoch_and_adds_only_new_assignments() {
+    let mut state = DurableState::new(nodes());
+    let assignments = assignment();
+    state.apply_command(BrokerCommand::MetadataBootstrap {
+        streams: vec![stream()],
+        assignments,
+        security_references: BTreeSet::new(),
+        feature_gates: BTreeSet::new(),
+    });
+    let mut expanded = stream();
+    expanded.partitions = 2;
+    expanded.partitioning.epoch = 2;
+    let mut new_assignment = PartitionAssignmentMetadata {
+        replicas: [1].into_iter().collect(),
+        active_commit_set: [1].into_iter().collect(),
+        replica_set_generation: 1,
+        phase: PartitionReconfigurationPhase::Stable,
+        leader_id: 1,
+        leader_epoch: 1,
+    };
+    new_assignment.normalize();
+    assert_eq!(
+        state.apply_command(BrokerCommand::StreamPartitionsUpdate {
+            stream: expanded,
+            assignments: [(partition_key("orders", 1), new_assignment)]
+                .into_iter()
+                .collect(),
+        }),
+        BrokerResponse::StreamPartitionsUpdate
+    );
+    assert_eq!(state.stream_definitions["orders"].partitions, 2);
+    assert_eq!(state.stream_definitions["orders"].partitioning.epoch, 2);
+    assert!(
+        state
+            .partition_assignments
+            .contains_key(&partition_key("orders", 1))
+    );
+}

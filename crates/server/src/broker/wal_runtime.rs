@@ -530,20 +530,13 @@ fn wal_worker(mut wal: Wal, receiver: mpsc::Receiver<WalCommand>) {
                         Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => break,
                     }
                 }
-                let mut outcomes = Vec::with_capacity(records.len());
-                let mut failed: Option<String> = None;
-                for record in &records {
-                    let outcome = match (&failed, wal.append_partition_append(record)) {
-                        (Some(error), _) => Err(BrokerError::msg(error.clone())),
-                        (None, Ok(())) => Ok(()),
-                        (None, Err(error)) => {
-                            let message = error.to_string();
-                            failed = Some(message.clone());
-                            Err(BrokerError::msg(message))
-                        }
-                    };
-                    outcomes.push(outcome);
-                }
+                let batch_result = wal.append_partition_append_batch(&records);
+                let outcomes = (0..records.len())
+                    .map(|_| match &batch_result {
+                        Ok(()) => Ok(()),
+                        Err(error) => Err(BrokerError::msg(error.to_string())),
+                    })
+                    .collect::<Vec<_>>();
                 let successful_records = outcomes.iter().filter(|outcome| outcome.is_ok()).count();
                 let successful_bytes = records
                     .iter()
@@ -566,15 +559,14 @@ fn wal_worker(mut wal: Wal, receiver: mpsc::Receiver<WalCommand>) {
             WalCommand::PartitionAppendBatch(records, response) => {
                 let mut successful_records = 0u64;
                 let mut successful_bytes = 0u64;
-                let result = records.iter().try_for_each(|record| {
-                    let result = wal.append_partition_append(record);
-                    if result.is_ok() {
-                        successful_records = successful_records.saturating_add(1);
-                        successful_bytes = successful_bytes
-                            .saturating_add(partition_append_estimated_bytes(record) as u64);
-                    }
-                    result
-                });
+                let result = wal.append_partition_append_batch(&records);
+                if result.is_ok() {
+                    successful_records = records.len() as u64;
+                    successful_bytes = records
+                        .iter()
+                        .map(|record| partition_append_estimated_bytes(record) as u64)
+                        .sum();
+                }
                 wal.note_partition_append_batch(successful_records, successful_bytes);
                 let _ = response.send(result);
             }

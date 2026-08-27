@@ -1,17 +1,23 @@
 #!/bin/sh
 set -eu
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 usage() {
   echo "Usage: $0 --server ADDRESS --client-config FILE [options]"
   echo "  --deployment-profile combined|separated (default: combined)"
   echo "  --controller-voters N                    (default: 3)"
   echo "  --roles-share-process true|false         (default follows profile)"
   echo "  --metrics-url URL                        (optional endpoint captured per case)"
+  echo "  --metrics-token TOKEN                    (optional bearer token for metrics)"
+  echo "  --metrics-role ROLE                      broker|controller|combined (default follows profile)"
   echo "  --expected-brokers N                     (optional registered-broker count check)"
   echo "  --server-pid PID                         (optional per-case resource snapshots)"
   echo "  --throughput N                           (default: 0, unlimited)"
   echo "  --fire-throughput N                      (default: --throughput)"
   echo "  --modes LIST                             (default: fire-and-forget,sync,async,batch)"
   echo "  --ack-levels LIST                        (default: accepted,durable,high-durability)"
+  echo "  --min-throughput-percent N               (default: 70)"
+  echo "  --max-p95-percent N                     (default: 150)"
+  echo "  --no-gate                                skip post-run scale-gate evaluation"
 }
 die() { echo "error: $*" >&2; exit 1; }
 cpu_cores() {
@@ -40,8 +46,7 @@ json_escape() {
 }
 validate_topology_metrics() {
   metrics_file=$1
-  expected_role=broker
-  test "$deployment_profile" = combined && expected_role=combined
+  expected_role=$2
   actual_voters=$(awk '/^morrow_controller_voters / { print $2; exit }' "$metrics_file")
   test "$actual_voters" = "$controller_voters" || die "topology metrics report $actual_voters controller voters; expected $controller_voters"
   grep -Fq "morrow_node_role{role=\"$expected_role\"} 1" "$metrics_file" || die "topology metrics do not identify the endpoint as role $expected_role"
@@ -81,10 +86,15 @@ clients=5; duration=10s; payload_size=128
 throughput=0; fire_throughput=
 deployment_profile=combined; controller_voters=3; roles_share_process=true
 metrics_url=
+metrics_token=
+metrics_role=
 expected_brokers=
 server_pid=
 modes=fire-and-forget,sync,async,batch
 ack_levels=accepted,durable,high-durability
+min_throughput_percent=70
+max_p95_percent=150
+run_gate=true
 output_dir="target/scale-benchmarks/$(date -u +%Y%m%dT%H%M%SZ)"; build=true
 while test "$#" -gt 0; do
   case "$1" in
@@ -97,12 +107,17 @@ while test "$#" -gt 0; do
     --controller-voters) test "$#" -ge 2 || die "$1 requires a value"; controller_voters=$2; shift 2 ;;
     --roles-share-process) test "$#" -ge 2 || die "$1 requires a value"; roles_share_process=$2; shift 2 ;;
     --metrics-url) test "$#" -ge 2 || die "$1 requires a value"; metrics_url=$2; shift 2 ;;
+    --metrics-token) test "$#" -ge 2 || die "$1 requires a value"; metrics_token=$2; shift 2 ;;
+    --metrics-role) test "$#" -ge 2 || die "$1 requires a value"; metrics_role=$2; shift 2 ;;
     --expected-brokers) test "$#" -ge 2 || die "$1 requires a value"; expected_brokers=$2; shift 2 ;;
     --server-pid) test "$#" -ge 2 || die "$1 requires a value"; server_pid=$2; shift 2 ;;
     --throughput) test "$#" -ge 2 || die "$1 requires a value"; throughput=$2; shift 2 ;;
     --fire-throughput) test "$#" -ge 2 || die "$1 requires a value"; fire_throughput=$2; shift 2 ;;
     --modes) test "$#" -ge 2 || die "$1 requires a value"; modes=$2; shift 2 ;;
     --ack-levels) test "$#" -ge 2 || die "$1 requires a value"; ack_levels=$2; shift 2 ;;
+    --min-throughput-percent) test "$#" -ge 2 || die "$1 requires a value"; min_throughput_percent=$2; shift 2 ;;
+    --max-p95-percent) test "$#" -ge 2 || die "$1 requires a value"; max_p95_percent=$2; shift 2 ;;
+    --no-gate) run_gate=false; shift ;;
     --clients) test "$#" -ge 2 || die "$1 requires a value"; clients=$2; shift 2 ;;
     --duration) test "$#" -ge 2 || die "$1 requires a value"; duration=$2; shift 2 ;;
     --payload-size) test "$#" -ge 2 || die "$1 requires a value"; payload_size=$2; shift 2 ;;
@@ -112,6 +127,8 @@ while test "$#" -gt 0; do
     *) die "unknown option $1" ;;
   esac
 done
+case "$min_throughput_percent" in ''|*[!0-9]*) die "--min-throughput-percent must be an integer percentage" ;; esac
+case "$max_p95_percent" in ''|*[!0-9]*) die "--max-p95-percent must be a non-negative integer percentage" ;; esac
 case "$throughput" in ''|*[!0-9]*) die "--throughput must be a non-negative integer" ;; esac
 if test -z "$fire_throughput"; then fire_throughput=$throughput; fi
 case "$fire_throughput" in ''|*[!0-9]*) die "--fire-throughput must be a non-negative integer" ;; esac
@@ -124,6 +141,13 @@ if test -n "$server_pid"; then
 fi
 case "$deployment_profile" in combined|separated) ;; *) die "--deployment-profile must be combined or separated" ;; esac
 case "$roles_share_process" in true|false) ;; *) die "--roles-share-process must be true or false" ;; esac
+if test -n "$metrics_role"; then
+  case "$metrics_role" in broker|controller|combined) ;; *) die "--metrics-role must be broker, controller, or combined" ;; esac
+fi
+if test -z "$metrics_role"; then
+  metrics_role=broker
+  test "$deployment_profile" = combined && metrics_role=combined
+fi
 case "$controller_voters" in ''|*[!0-9]*|0) die "--controller-voters must be a positive integer" ;; esac
 if test -n "$expected_brokers"; then
   case "$expected_brokers" in ''|*[!0-9]*|0) die "--expected-brokers must be a positive integer" ;; esac
@@ -176,14 +200,24 @@ for broker_count in $broker_counts; do
       scripts/run-publish-benchmark-matrix.sh --topology external --client-config "$client_config" --server "$server" --clients "$clients" --duration "$duration" --payload-size "$payload_size" --throughput "$throughput" --fire-throughput "$fire_throughput" --subjects "$topic_count" --partitions "$partition_count" --modes "$modes" --ack-levels "$ack_levels" --output-dir "$case_dir/results" --quiet --no-build
       capture_resources "$case_dir/resources-after.json"
       if test -n "$metrics_url"; then
-        curl -sSfL "$metrics_url" >"$case_dir/metrics.prom" || die "failed to capture metrics from $metrics_url"
-        validate_topology_metrics "$case_dir/metrics.prom"
+        if test -n "$metrics_token"; then
+          curl -sSfL -H "Authorization: Bearer $metrics_token" "$metrics_url" >"$case_dir/metrics.prom" || die "failed to capture metrics from $metrics_url"
+        else
+          curl -sSfL "$metrics_url" >"$case_dir/metrics.prom" || die "failed to capture metrics from $metrics_url"
+        fi
+        validate_topology_metrics "$case_dir/metrics.prom" "$metrics_role"
       fi
       printf '{"broker_count":%s,"topics":%s,"partitions":%s,"deployment_profile":"%s","controller_voter_count":%s,"roles_share_process":%s,"batch_records":%s,"batch_bytes":%s,"metadata_cache_capacity":%s,"modes":"%s","ack_levels":"%s","result_dir":"%s"}\n' \
         "$broker_count" "$topic_count" "$partition_count" "$deployment_profile" "$controller_voters" "$roles_share_process" "$batch_records" "$batch_bytes" "$metadata_cache_capacity" "$modes" "$ack_levels" \
-        "$(json_escape "$case_dir")" >> "$case_index"
+        "$(json_escape "$case_dir/results")" >> "$case_index"
     done
   done
 done
 IFS=$old_ifs
+if test "$run_gate" = true; then
+  python3 "$script_dir/check-scale-benchmark.py" "$output_dir" \
+    --min-throughput-percent "$min_throughput_percent" \
+    --max-p95-percent "$max_p95_percent" \
+    --output "$output_dir/scale-gate.json"
+fi
 printf '%s\n' "scale benchmark results: $output_dir"
